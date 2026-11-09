@@ -15,5 +15,3 @@ whisper-rs = { workspace = true, features = ["cuda"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { workspace = true, features = ["metal"] }
-
-[dev-dependencies]

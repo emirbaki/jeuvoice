@@ -30,8 +30,27 @@ fn transcribes_real_clip() {
         assert!(pair[1].start >= pair[0].start, "times must not go back: {pair:?}");
     }
     for w in &t.words {
-        assert!(w.end >= w.start);
+        assert!(w.end > w.start, "zero-length word: {w:?}");
     }
+}
+
+#[test]
+#[ignore = "needs the downloaded model and a real clip"]
+fn panicking_progress_returns_an_error() {
+    let clip = Path::new(r"D:\MLProjelerim\tts_lab\data\ref\sesim\ses_001_0007.wav");
+    let samples = to_whisper(&decode(clip).expect("decode clip"));
+    let w = WhisperRs::load(&model_path(), true).expect("load model");
+    let mut calls = 0;
+    let r = w.transcribe(
+        &samples,
+        &TranscribeOptions { language: "tr".into(), use_gpu: true },
+        &mut |_| {
+            calls += 1;
+            panic!("progress closure panics");
+        },
+    );
+    assert!(r.is_err(), "a panic in progress must give an error");
+    assert_eq!(calls, 1, "the closure is not called again after a panic");
 }
 
 #[test]

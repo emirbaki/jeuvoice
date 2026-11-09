@@ -6,6 +6,8 @@ mod words;
 pub use model::{download_model, model_path};
 pub use words::tokens_to_words;
 
+use std::cell::Cell;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
 use jeuvoice_core::transcript::Transcript;
@@ -53,11 +55,13 @@ impl std::error::Error for WhisperError {}
 pub struct TranscribeOptions {
     /// A language code such as "tr", or "auto" to detect the language.
     pub language: String,
+    /// Not read by `WhisperRs::transcribe`: GPU use is chosen at `WhisperRs::load`.
     pub use_gpu: bool,
 }
 
 pub trait Transcriber: Send + Sync {
-    /// `progress` gets values from 0.0 to 1.0.
+    /// `progress` gets values from 0.0 to 1.0. If `progress` panics, it is not called again
+    /// and `transcribe` returns `WhisperError::Transcribe` after whisper finishes.
     fn transcribe(
         &self,
         samples_16k: &[f32],
@@ -134,14 +138,28 @@ impl Transcriber for WhisperRs {
         // whisper-rs wants a 'static closure, but `progress` is borrowed. whisper.cpp calls
         // the callback only inside `state.full` below, on this thread, and `params` is not
         // used after that call, so the borrow outlives every use.
-        progress(0.0);
-        let mut report = |p: i32| progress((p as f32 / 100.0).clamp(0.0, 1.0));
+        // A panic must not cross the extern "C" trampoline (that aborts the process), so the
+        // user closure runs in `catch_unwind`. After a panic it is never called again.
+        let panicked = Cell::new(false);
+        let mut call = |v: f32| {
+            if panicked.get() {
+                return;
+            }
+            if catch_unwind(AssertUnwindSafe(|| progress(v))).is_err() {
+                panicked.set(true);
+            }
+        };
+        call(0.0);
+        let mut report = |p: i32| call((p as f32 / 100.0).clamp(0.0, 1.0));
         let report: Box<dyn FnMut(i32) + '_> = Box::new(&mut report);
         let report: Box<dyn FnMut(i32) + 'static> = unsafe { std::mem::transmute(report) };
         params.set_progress_callback_safe::<Option<Box<dyn FnMut(i32)>>, Box<dyn FnMut(i32)>>(Some(report));
 
         state.full(params, samples_16k).map_err(err)?;
-        progress(1.0);
+        call(1.0);
+        if panicked.get() {
+            return Err(WhisperError::Transcribe("the progress callback panicked".to_string()));
+        }
 
         let eot = self.ctx.token_eot();
         let mut tokens = Vec::new();
@@ -153,11 +171,17 @@ impl Transcriber for WhisperRs {
                     continue;
                 }
                 let Ok(text) = tok.to_str_lossy() else { continue };
-                // whisper.cpp token times are in centiseconds.
+                // whisper.cpp token times are in centiseconds. `t_dtw` is one point per
+                // token and is -1 when it is not set. Then t0 and t1 are used.
+                let (start, end) = if data.t_dtw >= 0 {
+                    (data.t_dtw, data.t1.max(data.t_dtw))
+                } else {
+                    (data.t0, data.t1)
+                };
                 tokens.push((
                     text.into_owned(),
-                    data.t0 as f64 / 100.0,
-                    data.t1 as f64 / 100.0,
+                    start as f64 / 100.0,
+                    end as f64 / 100.0,
                     tok.token_probability(),
                 ));
             }

@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::WhisperError;
 
@@ -29,7 +30,14 @@ pub fn download_model(progress: &mut dyn FnMut(u64, u64)) -> Result<PathBuf, Whi
     let dl = |e: ureq::Error| WhisperError::Download(e.to_string());
     fs::create_dir_all(path.parent().expect("model path has a parent")).map_err(io)?;
 
-    let resp = ureq::get(MODEL_URL).call().map_err(dl)?;
+    // ureq has no idle timeout. The body timeout caps a stalled download at two hours.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
+        .timeout_recv_body(Some(Duration::from_secs(2 * 60 * 60)))
+        .build()
+        .into();
+    let resp = agent.get(MODEL_URL).call().map_err(dl)?;
     let total = resp
         .headers()
         .get("content-length")
