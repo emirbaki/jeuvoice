@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use similar::{Algorithm, DiffOp as SimOp, capture_diff_slices};
 
 use crate::transcript::Transcript;
-use crate::turkish::normalize_indexed;
+use crate::turkish::{normalize_indexed, normalize_words};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiffOp {
@@ -98,11 +98,10 @@ fn token_events(a: &[(String, usize)], b: &[(String, usize)]) -> Vec<Event> {
 /// whitespace) and to `Transcript::words`.
 pub fn script_diff(script: &str, t: &Transcript) -> Vec<DiffOp> {
     let a = normalize_indexed(script);
-    // Heard words are normalised one by one so the index stays the `Transcript::words` index.
-    let mut b: Vec<(String, usize)> = Vec::new();
-    for (i, w) in t.words.iter().enumerate() {
-        b.extend(normalize_indexed(&w.text).into_iter().map(|(s, _)| (s, i)));
-    }
+    // Heard words keep their `Transcript::words` index, and a number ending in "." reads the
+    // next heard word to tell an ordinal from a sentence end.
+    let heard: Vec<&str> = t.words.iter().map(|w| w.text.as_str()).collect();
+    let b = normalize_words(&heard);
     let events = token_events(&a, &b);
 
     // Events that share an original word belong to one cluster, so each word gets one op.

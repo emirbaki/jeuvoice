@@ -126,3 +126,23 @@ fn unequal_runs_do_not_pair() {
         ]
     );
 }
+
+#[test]
+fn a_heard_number_before_a_capital_reads_as_cardinal() {
+    let all_same = |script: &str, heard_text: &str| {
+        let ops = script_diff(script, &heard(heard_text));
+        assert!(ops.iter().all(|o| matches!(o, DiffOp::Same { .. })), "{script:?} vs {heard_text:?}: {ops:?}");
+        assert_eq!(ops.len(), script.split_whitespace().count());
+    };
+    all_same("Skor 3. Sonra geldi", "Skor 3. Sonra geldi");
+    all_same("Yıl 2023. Sonra geldi", "Yıl 2023. Sonra geldi");
+}
+
+#[test]
+fn an_edited_heard_word_with_a_space_still_looks_ahead() {
+    // A fixed word can hold two words; the lookahead reads the next heard word.
+    let mut t = heard("Skor x Sonra");
+    t.words[1].text = "3 3.".into();
+    let ops = script_diff("Skor 3 3. Sonra", &t);
+    assert!(ops.iter().all(|o| matches!(o, DiffOp::Same { .. } )), "{ops:?}");
+}

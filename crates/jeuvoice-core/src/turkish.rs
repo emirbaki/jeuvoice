@@ -175,12 +175,24 @@ fn normalize_word(w: &str, dot_may_be_ordinal: bool) -> Vec<String> {
 
 /// Normalised tokens with the index of the whitespace-separated word each came from.
 pub fn normalize_indexed(text: &str) -> Vec<(String, usize)> {
-    let words: Vec<&str> = text.split_whitespace().collect();
+    normalize_parts(text.split_whitespace().enumerate())
+}
+
+/// Normalised tokens of a list of words, with the index in `words` each came from. A word may
+/// hold spaces (a fixed word); a trailing "." still looks ahead to the next word in the list.
+pub fn normalize_words<S: AsRef<str>>(words: &[S]) -> Vec<(String, usize)> {
+    normalize_parts(words.iter().enumerate().flat_map(|(i, w)| w.as_ref().split_whitespace().map(move |p| (i, p))))
+}
+
+/// Normalise whitespace-free parts, each tagged with the index it reports. The ordinal check
+/// of a part reads the part after it.
+fn normalize_parts<'a>(parts: impl Iterator<Item = (usize, &'a str)>) -> Vec<(String, usize)> {
+    let parts: Vec<(usize, &str)> = parts.collect();
     let mut out = Vec::new();
-    for (idx, w) in words.iter().enumerate() {
-        let ordinal_ok = match words.get(idx + 1) {
+    for (k, &(idx, w)) in parts.iter().enumerate() {
+        let ordinal_ok = match parts.get(k + 1) {
             None => true,
-            Some(next) => next.chars().find(|c| c.is_alphanumeric()).is_some_and(|c| c.is_lowercase()),
+            Some((_, next)) => next.chars().find(|c| c.is_alphanumeric()).is_some_and(|c| c.is_lowercase()),
         };
         out.extend(normalize_word(w, ordinal_ok).into_iter().map(|t| (t, idx)));
     }
