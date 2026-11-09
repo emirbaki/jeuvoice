@@ -1,0 +1,100 @@
+<h2>JeuVoice — the voice editor: which layout fits your team?</h2>
+<p class="subtitle">Both screens do the same jobs: fix a word, retake a part, export. They differ in what the user looks at first.</p>
+
+<style>
+  .ed { font-size: 13px; }
+  .tabs { display:flex; gap:4px; margin-bottom:10px; }
+  .tabs span { padding:4px 10px; border-radius:6px; background:rgba(127,127,127,.12); }
+  .tabs span.on { background:#6c5ce7; color:#fff; }
+  .para { border:1px solid rgba(127,127,127,.3); border-radius:8px; padding:8px 10px; margin-bottom:8px; }
+  .para.bad { border-color:#e17055; }
+  .phead { display:flex; justify-content:space-between; font-size:11px; opacity:.7; margin-bottom:4px; }
+  .wave { height:22px; border-radius:4px; margin:4px 0;
+          background: repeating-linear-gradient(90deg, #6c5ce7 0 2px, transparent 2px 4px); opacity:.55; }
+  .w { padding:1px 2px; border-radius:3px; }
+  .w.sel { background:#fdcb6e; color:#000; }
+  .w.flag { text-decoration: underline wavy #e17055; }
+  .pop { border:1px solid #fdcb6e; border-radius:6px; padding:6px 8px; margin-top:6px; font-size:12px; }
+  .takes { display:flex; gap:6px; margin-top:6px; }
+  .takes span { border:1px solid rgba(127,127,127,.4); border-radius:5px; padding:2px 8px; font-size:11px; }
+  .takes span.pick { border-color:#00b894; background:rgba(0,184,148,.15); }
+  .btn { display:inline-block; border-radius:5px; padding:2px 8px; font-size:11px; background:rgba(127,127,127,.18); margin-right:4px; }
+  .bigwave { height:60px; border-radius:6px; position:relative;
+             background: repeating-linear-gradient(90deg, #6c5ce7 0 2px, transparent 2px 3px); opacity:.6; }
+  .region { position:absolute; left:38%; width:14%; top:0; bottom:0; background:rgba(253,203,110,.45); border:1px solid #fdcb6e; }
+  .words { display:flex; flex-wrap:wrap; gap:3px; margin-top:6px; font-size:12px; }
+  .words span { padding:1px 3px; border-radius:3px; background:rgba(127,127,127,.12); }
+  .words span.sel { background:#fdcb6e; color:#000; }
+  .side { font-size:12px; }
+</style>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Script first (paragraph cards)</h3>
+      <p>The script is the main view. Each paragraph is one card with its own audio. Click a word to respell it, or retake the whole card with new seeds. This matches how tr2 renders today (paragraph mode).</p>
+      <div class="mockup ed">
+        <div class="mockup-header">JeuVoice — Project: "The Last of Us inceleme"</div>
+        <div class="mockup-body">
+          <div class="tabs"><span class="on">Voice</span><span>Transcribe</span><span>Train</span></div>
+          <div class="para">
+            <div class="phead"><span>Part 8 · 0:42</span><span>▶ play · ✓ kept</span></div>
+            <div class="wave"></div>
+            Joel ve Ellie şehirden çıkmak için eski bir tünele giriyor.
+          </div>
+          <div class="para bad">
+            <div class="phead"><span>Part 9 · 0:51 · ⚠ Whisper heard "damaraa"</span><span>▶ play</span></div>
+            <div class="wave"></div>
+            Mantarın <span class="w sel flag">damara</span> nasıl yayıldığını oyun çok iyi anlatıyor.
+            <div class="pop">
+              Word: <b>damara</b> &nbsp; Say it as: <input class="mock-input" style="width:90px" value="da-ma-ra"> &nbsp;
+              <span class="btn">Retake word</span><span class="btn">Retake part</span>
+              <div class="takes"><span>take 1</span><span>take 2</span><span class="pick">take 4 ✓</span><span>+ try 3 more</span></div>
+            </div>
+          </div>
+          <div class="para">
+            <div class="phead"><span>Part 10 · 1:03</span><span>▶ play</span></div>
+            <div class="wave"></div>
+            Sonunda vardıkları yer…
+          </div>
+          <span class="btn">Export WAV</span><span class="btn">Export + SRT</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Timeline first (one waveform)</h3>
+      <p>The whole voice-over is one long waveform, with the words under it (from Whisper). Drag over a region to select it, then retake only that region. Feels like an audio editor.</p>
+      <div class="mockup ed">
+        <div class="mockup-header">JeuVoice — Project: "The Last of Us inceleme"</div>
+        <div class="mockup-body">
+          <div class="tabs"><span class="on">Voice</span><span>Transcribe</span><span>Train</span></div>
+          <div style="display:flex; gap:10px;">
+            <div style="flex:3">
+              <div class="bigwave"><div class="region"></div></div>
+              <div class="words">
+                <span>Joel</span><span>ve</span><span>Ellie</span><span>tünele</span><span>giriyor.</span>
+                <span>Mantarın</span><span class="sel">damara</span><span class="sel">nasıl</span><span>yayıldığını</span><span>oyun</span><span>çok</span><span>iyi</span><span>anlatıyor.</span>
+              </div>
+              <div style="margin-top:8px"><span class="btn">◀◀</span><span class="btn">▶</span><span class="btn">0:51.2 / 4:10</span></div>
+            </div>
+            <div class="side" style="flex:1; border-left:1px solid rgba(127,127,127,.3); padding-left:8px;">
+              <div class="label">Selection</div>
+              "damara nasıl"<br><br>
+              <span class="btn">Retake region</span><br><br>
+              <div class="label">Takes</div>
+              <div class="takes" style="flex-direction:column"><span>take 1</span><span class="pick">take 2 ✓</span><span>take 3</span></div>
+              <br><span class="btn">Export</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle">Note: retaking a single word in the middle of a sentence is harder for the model than retaking the sentence or paragraph around it. Option A hides that by always regenerating the part and splicing it in.</p>
