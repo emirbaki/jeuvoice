@@ -2,3 +2,6 @@
 .superpowers/
 *.part
 /shell.png
+engine/.venv/
+__pycache__/
+.engine-pytest/
