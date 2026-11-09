@@ -36,6 +36,7 @@ impl Cursor {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // the app reads the lock-free mirror instead
     pub fn position_seconds(&self) -> f64 {
         self.pos as f64 / self.rate as f64
     }
@@ -159,6 +160,11 @@ impl Playback {
     /// Position in seconds.
     pub fn position(&self) -> f64 {
         self.mirror.pos.load(Ordering::SeqCst) as f64 / self.rate as f64
+    }
+
+    /// The sound output's sample rate.
+    pub fn rate(&self) -> u32 {
+        self.rate
     }
 
     pub fn is_playing(&self) -> bool {

@@ -1,6 +1,7 @@
 //! The window: a tab bar and the page for the open tab.
 
 use crate::state::{App, Tab};
+use crate::transcribe_tab;
 use rune::tok::{self, motion, radius, space, type_};
 use rune::{Cx, El, col, el, row, text};
 
@@ -29,24 +30,30 @@ pub fn view(s: &App, _: &mut Cx<App>) -> El {
             .child(text(name).font(type_::TITLE).color(t.text));
         bar = bar.child(button);
     }
-    let page = match s.tab {
-        Tab::Transcribe => text("Transcribe").font(type_::TITLE).color(t.text),
-        Tab::Settings => text("Settings").font(type_::TITLE).color(t.text),
-        Tab::Voice | Tab::Train => text("Coming in a later version").font(type_::BODY).color(t.text_secondary),
+    let body = match s.tab {
+        Tab::Transcribe => transcribe_tab::view(&s.transcribe),
+        Tab::Settings => centered(text("Settings").font(type_::TITLE).color(t.text)),
+        Tab::Voice | Tab::Train => centered(text("Coming in a later version").font(type_::BODY).color(t.text_secondary)),
     };
-    let body = col().w_full().grow(1.0).center().child(page);
     col().w_full().h_full().fill(t.bg).child(bar).child(body)
+}
+
+fn centered(page: El) -> El {
+    col().w_full().grow(1.0).center().child(page)
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::state::{App, Tab};
+    use crate::state::{App, Deps, Tab};
     use super::view;
+    use jeuvoice_whisper::FakeTranscriber;
     use rune::{Env, Runtime};
+    use std::sync::Arc;
 
     #[test]
     fn transcribe_is_the_first_tab_and_tabs_switch() {
-        let mut rt = Runtime::new(App::default(), view, (1100.0, 720.0), Env { system_dark: true, scale: 2.0 });
+        let deps = Deps { transcriber: Arc::new(FakeTranscriber(Default::default())), ensure_model: None, cache_dir: None, sound: false };
+        let mut rt = Runtime::new(App::new(deps), view, (1100.0, 720.0), Env { system_dark: true, scale: 2.0 });
         rt.frame(0.0);
         assert_eq!(rt.state.tab, Tab::Transcribe);
         let (x, y) = rt.find("tab-settings").unwrap();

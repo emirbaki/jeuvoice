@@ -52,7 +52,8 @@ fn orange() -> Color {
 }
 
 /// The wave and the row of words under it. `duration` is the clip length in seconds. `lens`
-/// finds the [`WaveView`] in the app state, and `on_word` hears the index of a clicked word.
+/// finds the [`WaveView`] in the app state, `on_word` hears the index of a clicked word, and
+/// `on_word_double` the index of a double-clicked word.
 /// `marks` pairs word indexes with marks: a word can have more than one. A `Missing` mark sits
 /// on the heard word right after the gap and draws a red bar before it.
 pub fn waveform<S: 'static>(
@@ -63,6 +64,7 @@ pub fn waveform<S: 'static>(
     duration: f64,
     lens: impl Fn(&mut S) -> &mut WaveView + Clone + 'static,
     on_word: impl Fn(&mut S, usize) + Clone + 'static,
+    on_word_double: impl Fn(&mut S, usize) + Clone + 'static,
 ) -> El {
     let width = rune::memo::layout_size("wave").map_or(DEFAULT_W, |s| s[0]).max(1.0);
     let wave = canvas(wave_shape(v, peaks, width))
@@ -82,7 +84,7 @@ pub fn waveform<S: 'static>(
             zoom(lens(s), f64::from(e.x / width), f64::from(e.dy), duration);
             true
         });
-    col().w_full().child(wave).child(word_row(v, words, marks, width, on_word))
+    col().w_full().child(wave).child(word_row(v, words, marks, width, on_word, on_word_double))
 }
 
 /// Seconds at local point `x` of a wave `w` points wide, inside the clip.
@@ -153,6 +155,7 @@ fn word_row<S: 'static>(
     marks: &[(usize, Mark)],
     width: f32,
     on_word: impl Fn(&mut S, usize) + Clone + 'static,
+    on_word_double: impl Fn(&mut S, usize) + Clone + 'static,
 ) -> El {
     let t = tok::theme(true);
     let end = v.start + v.span;
@@ -178,7 +181,7 @@ fn word_row<S: 'static>(
         } else {
             t.text
         };
-        let on_word = on_word.clone();
+        let (on_word, on_word_double) = (on_word.clone(), on_word_double.clone());
         let mut word = col()
             .key(key)
             .absolute(x, 2.0)
@@ -187,6 +190,7 @@ fn word_row<S: 'static>(
             .cursor(Cursor::Pointer)
             .label(w.text.as_str())
             .on_press(move |s: &mut S| on_word(s, i))
+            .on_double_press(move |s: &mut S| on_word_double(s, i))
             .child(text(w.text.as_str()).font(type_::BODY).color(color));
         if has(Mark::LowProb) {
             word = word.child(el().w_full().h(2.0).radius(1.0).fill(orange()));
@@ -229,6 +233,7 @@ mod tests {
         words: Vec<Word>,
         marks: Vec<(usize, Mark)>,
         picked: Option<usize>,
+        doubled: Option<usize>,
     }
 
     fn word(text: &str, start: f64, end: f64, prob: f32) -> Word {
@@ -266,6 +271,7 @@ mod tests {
             ],
             marks: vec![(1, Mark::Changed), (2, Mark::LowProb), (4, Mark::Added), (6, Mark::Missing), (7, Mark::LowProb), (7, Mark::Changed)],
             picked: None,
+            doubled: None,
         }
     }
 
@@ -279,6 +285,7 @@ mod tests {
             DURATION,
             |s: &mut Fixture| &mut s.view,
             |s: &mut Fixture, i| s.picked = Some(i),
+            |s: &mut Fixture, i| s.doubled = Some(i),
         ))
     }
 
@@ -350,6 +357,19 @@ mod tests {
         rt.pointer_up(x, y);
         rt.frame(1.0 / 60.0);
         assert_eq!(rt.state.picked, Some(2));
+    }
+
+    #[test]
+    fn double_click_on_word_calls_handler() {
+        let mut rt = run();
+        let (x, y) = rt.find("word-3").expect("word 3 is on screen");
+        for _ in 0..2 {
+            rt.pointer_down(x, y);
+            rt.frame(1.0 / 120.0);
+            rt.pointer_up(x, y);
+            rt.frame(1.0 / 120.0);
+        }
+        assert_eq!((rt.state.picked, rt.state.doubled), (Some(3), Some(3)));
     }
 
     #[test]
