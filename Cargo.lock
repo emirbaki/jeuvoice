@@ -1305,6 +1305,8 @@ dependencies = [
  "hound",
  "opuscule",
  "rubato",
+ "serde",
+ "serde_json",
  "symphonia",
  "tempfile",
 ]
