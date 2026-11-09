@@ -51,12 +51,15 @@ fn orange() -> Color {
     oklch(0.78, 0.16, 65.0)
 }
 
-/// The wave and the row of words under it. `duration` is the clip length in seconds. `lens`
-/// finds the [`WaveView`] in the app state, `on_word` hears the index of a clicked word, and
-/// `on_word_double` the index of a double-clicked word.
+/// The wave and the row of words under it. `key` names the wave element and its layout
+/// read, so two waves (Transcribe, Voice) can live in one window. `duration` is the
+/// clip length in seconds. `lens` finds the [`WaveView`] in the app state, `on_word`
+/// hears the index of a clicked word, and `on_word_double` the index of a double-clicked
+/// word.
 /// `marks` pairs word indexes with marks: a word can have more than one. A `Missing` mark sits
 /// on the heard word right after the gap and draws a red bar before it.
 pub fn waveform<S: 'static>(
+    key: &str,
     v: &WaveView,
     peaks: &Peaks,
     words: &[Word],
@@ -66,9 +69,9 @@ pub fn waveform<S: 'static>(
     on_word: impl Fn(&mut S, usize) + Clone + 'static,
     on_word_double: impl Fn(&mut S, usize) + Clone + 'static,
 ) -> El {
-    let width = rune::memo::layout_size("wave").map_or(DEFAULT_W, |s| s[0]).max(1.0);
+    let width = rune::memo::layout_size(key).map_or(DEFAULT_W, |s| s[0]).max(1.0);
     let wave = canvas(wave_shape(v, peaks, width))
-        .key("wave")
+        .key(key)
         .w_full()
         .h(WAVE_H)
         .fill(tok::theme(true).card)
@@ -278,6 +281,7 @@ mod tests {
     fn view(s: &Fixture, _: &mut Cx<Fixture>) -> El {
         let t = rune::tok::theme(true);
         col().w_full().h_full().fill(t.bg).child(waveform(
+            "wave",
             &s.view,
             &s.peaks,
             &s.words,

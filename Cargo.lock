@@ -1582,6 +1582,7 @@ dependencies = [
  "directories",
  "hound",
  "jeuvoice-core",
+ "jeuvoice-engine-client",
  "jeuvoice-whisper",
  "rune",
  "serde",

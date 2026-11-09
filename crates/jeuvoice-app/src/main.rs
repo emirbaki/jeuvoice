@@ -3,9 +3,11 @@
 mod cache;
 mod marks;
 mod playback;
+mod services;
 mod settings;
 mod settings_tab;
 mod state;
+mod transcribe;
 mod transcribe_tab;
 mod view;
 mod waveform;
@@ -16,7 +18,8 @@ use jeuvoice_core::transcript::Transcript;
 use jeuvoice_whisper::{TranscribeOptions, Transcriber, WhisperError, WhisperRs, download_model, model_path};
 use rune::AppSpec;
 use settings::Settings;
-use state::{App, Deps, EnsureModel, ModelHost};
+use services::speech::EnsureModel;
+use state::{App, Deps, ModelHost};
 
 /// whisper.cpp, loaded on the first transcription (on the worker thread). A failed load is
 /// not kept, so the next file tries again. The app drops the loaded model when the GPU choice

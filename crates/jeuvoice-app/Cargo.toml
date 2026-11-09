@@ -8,6 +8,7 @@ license.workspace = true
 rune = { workspace = true, features = ["native-file-dialog"] }
 jeuvoice-core = { path = "../jeuvoice-core" }
 jeuvoice-whisper = { path = "../jeuvoice-whisper" }
+jeuvoice-engine-client = { path = "../jeuvoice-engine-client" }
 cpal = "0.15"
 directories.workspace = true
 serde.workspace = true

@@ -52,6 +52,7 @@ impl std::fmt::Display for WhisperError {
 
 impl std::error::Error for WhisperError {}
 
+#[derive(Clone, Debug)]
 pub struct TranscribeOptions {
     /// A language code such as "tr", or "auto" to detect the language.
     pub language: String,

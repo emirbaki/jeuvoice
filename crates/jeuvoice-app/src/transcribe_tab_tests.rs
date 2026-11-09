@@ -273,7 +273,7 @@ fn fixing_a_word_changes_the_export() {
 /// A done file with words, a file running, one waiting and one failed, and a script with
 /// differences.
 fn fixture() -> App {
-    use crate::state::Loaded;
+    use crate::transcribe::Loaded;
     use crate::waveform::WaveView;
     use jeuvoice_core::peaks::{PEAKS_PER_SECOND, Peaks};
 

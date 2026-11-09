@@ -7,7 +7,8 @@ use rune::tok::{self, radius, space, type_};
 use rune::{Color, El, ScrollSpec, Tx, col, el, oklch, row, text, text_input};
 
 use crate::marks::{counts_text, marks};
-use crate::state::{App, Format, TranscribeTab};
+use crate::state::App;
+use crate::transcribe::{Format, TranscribeTab};
 use crate::waveform::waveform;
 
 /// Extensions the drop zone takes: audio and video files.
@@ -139,6 +140,7 @@ fn main_column(s: &TranscribeTab) -> El {
     let mut wave_card = col().w_full().padding(space::S2).radius(radius::MD).fill(t.card).gap(space::S2);
     wave_card = match (done, &s.loaded) {
         (Some((_, tr)), Some(l)) => wave_card.child(waveform(
+            "wave",
             &s.view,
             &l.peaks,
             &tr.words,

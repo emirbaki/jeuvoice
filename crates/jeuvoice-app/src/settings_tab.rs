@@ -3,7 +3,8 @@
 use rune::tok::{self, radius, space, type_};
 use rune::{El, col, el, row, text};
 
-use crate::state::{App, TranscribeTab};
+use crate::state::App;
+use crate::transcribe::TranscribeTab;
 use crate::transcribe_tab::{button, red, section};
 
 const LANGUAGES: [(&str, &str, &str); 3] = [("lang-tr", "tr", "Turkish"), ("lang-en", "en", "English"), ("lang-auto", "auto", "Detect")];
