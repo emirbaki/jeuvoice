@@ -9,6 +9,7 @@ symphonia.workspace = true
 rubato.workspace = true
 opuscule.workspace = true
 serde.workspace = true
+similar.workspace = true
 
 [dev-dependencies]
 hound.workspace = true
