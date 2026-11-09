@@ -57,9 +57,9 @@ fn plain_year_stays_cardinal() {
 }
 
 #[test]
-fn number_then_dot_at_end_is_ordinal() {
-    // Known limit: "Sayfa 3." at the end of a text is read as an ordinal ("üçüncü").
-    assert_eq!(norm("Sayfa 3."), ["sayfa", "üçüncü"]);
+fn number_then_dot_at_end_stays_cardinal() {
+    // A dot at the end of a text ends the sentence, so the number stays cardinal.
+    assert_eq!(norm("Sayfa 3."), ["sayfa", "üç"]);
 }
 
 #[test]

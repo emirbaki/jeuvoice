@@ -112,7 +112,7 @@ fn real_batch_with_one_bad_file() {
                 assert_eq!(path, &bad);
                 assert_eq!(
                     e,
-                    "JeuVoice cannot read this file type: bozuk.mp4. Save it as .wav, .mp3 or .mp4 and drop it again."
+                    "JeuVoice cannot read this file type: bozuk.mp4. Try a supported audio or video file and drop it again."
                 );
             }
             other => panic!("unexpected state for {}: {other:?}", path.display()),

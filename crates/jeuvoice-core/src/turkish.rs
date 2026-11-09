@@ -112,7 +112,8 @@ fn is_group_at(chars: &[char], i: usize) -> bool {
 }
 
 /// Normalise one whitespace-separated word. `dot_may_be_ordinal` tells whether a trailing "."
-/// after a number may be read as an ordinal marker (next word starts lowercase, or none).
+/// after a number may be read as an ordinal marker (next word starts lowercase; never at
+/// the end of a text, where the dot ends a sentence).
 fn normalize_word(w: &str, dot_may_be_ordinal: bool) -> Vec<String> {
     let chars: Vec<char> = w.chars().collect();
     let mut out = Vec::new();
@@ -160,8 +161,8 @@ fn normalize_word(w: &str, dot_may_be_ordinal: bool) -> Vec<String> {
                 out.extend(digits_to_tokens(&frac[zeros..], false));
             }
         } else {
-            // A "." right after the number and ending the word is an ordinal marker.
-            // Known limit: "Sayfa 3." at the end of a text is read as an ordinal too.
+            // A "." right after the number and ending the word is an ordinal marker, unless
+            // it ends the text: there the dot ends the sentence, so the number stays cardinal.
             let ordinal = !percent && chars.get(i) == Some(&'.') && i + 1 == chars.len() && dot_may_be_ordinal;
             if ordinal {
                 i += 1;
@@ -190,8 +191,9 @@ fn normalize_parts<'a>(parts: impl Iterator<Item = (usize, &'a str)>) -> Vec<(St
     let parts: Vec<(usize, &str)> = parts.collect();
     let mut out = Vec::new();
     for (k, &(idx, w)) in parts.iter().enumerate() {
+        // The last part ends the text: its dot ends the sentence, so it is cardinal.
         let ordinal_ok = match parts.get(k + 1) {
-            None => true,
+            None => false,
             Some((_, next)) => next.chars().find(|c| c.is_alphanumeric()).is_some_and(|c| c.is_lowercase()),
         };
         out.extend(normalize_word(w, ordinal_ok).into_iter().map(|t| (t, idx)));

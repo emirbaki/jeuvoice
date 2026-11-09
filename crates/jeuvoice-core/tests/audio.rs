@@ -95,7 +95,7 @@ fn garbage_bytes_give_the_file_type_text() {
     assert!(matches!(err, AudioError::UnknownFormat { .. }), "{err:?}");
     assert_eq!(
         err.to_string(),
-        "JeuVoice cannot read this file type: bozuk.mp4. Save it as .wav, .mp3 or .mp4 and drop it again."
+        "JeuVoice cannot read this file type: bozuk.mp4. Try a supported audio or video file and drop it again."
     );
 }
 

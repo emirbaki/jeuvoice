@@ -32,19 +32,19 @@ pub enum WhisperError {
 impl std::fmt::Display for WhisperError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ModelLoad(e) => write!(
+            Self::ModelLoad(_) => write!(
                 f,
-                "The speech model could not be loaded. Download it again from the Transcribe tab. Detail: {e}"
+                "The speech model could not be loaded. Download it again from the Settings tab."
             ),
-            Self::Transcribe(e) => {
-                write!(f, "The transcription failed. Try the file again. Detail: {e}")
+            Self::Transcribe(_) => {
+                write!(f, "The transcription failed. Try the file again.")
             }
-            Self::Download(e) => write!(
+            Self::Download(_) => write!(
                 f,
-                "The speech model download failed. Check the internet connection and try again. Detail: {e}"
+                "The speech model download failed. Check the internet connection and try again from the Settings tab."
             ),
-            Self::Io(e) => {
-                write!(f, "A file could not be saved. Check the free disk space. Detail: {e}")
+            Self::Io(_) => {
+                write!(f, "A file could not be saved. Check the free disk space.")
             }
         }
     }

@@ -79,6 +79,7 @@ impl App {
     pub fn set_language(&mut self, code: &str) {
         if self.settings.whisper_language != code {
             self.settings.whisper_language = code.to_string();
+            self.transcribe.deps.settings.whisper_language = code.to_string();
             self.save_settings();
         }
     }
@@ -328,11 +329,15 @@ impl TranscribeTab {
         self.playback.as_ref().is_some_and(Playback::is_playing)
     }
 
-    /// Add dropped files. A file that failed before goes back to waiting.
+    /// Add dropped files. A file that failed or is already done goes back to waiting, so a
+    /// language change or a fixed file can be transcribed again.
     pub fn add_files(&mut self, paths: &[PathBuf]) {
+        let language = self.deps.settings.whisper_language.clone();
+        let mut retried: Vec<PathBuf> = Vec::new();
         for (p, state) in &mut self.queue.items {
-            if paths.contains(p) && matches!(state, ItemState::Failed(_)) {
+            if paths.contains(p) && matches!(state, ItemState::Done(_) | ItemState::Failed(_)) {
                 *state = ItemState::Waiting;
+                retried.push(p.clone());
             }
         }
         let mut new: Vec<PathBuf> = Vec::new();
@@ -342,14 +347,16 @@ impl TranscribeTab {
             }
         }
         self.queue.add(&new);
+        let mut lookup = retried;
+        lookup.extend(new);
         if let Some(dir) = self.deps.cache_dir.clone()
-            && !new.is_empty()
+            && !lookup.is_empty()
         {
-            self.lookups += new.len();
+            self.lookups += lookup.len();
             let (events, wake) = (self.events_tx.clone(), self.waker.clone());
             std::thread::spawn(move || {
-                for p in new {
-                    let t = cache::load(&dir, &p);
+                for p in lookup {
+                    let t = cache::load(&dir, &p, &language);
                     let _ = events.send(Event::Cached(p, t));
                 }
                 wake();
@@ -467,7 +474,8 @@ impl TranscribeTab {
         t.set_word(i, &text);
         if let Some(dir) = self.deps.cache_dir.clone() {
             let (path, t) = (path.clone(), t.clone());
-            self.in_background(move || cache::save(&dir, &path, &t).err().map(Event::Notice));
+            let language = self.deps.settings.whisper_language.clone();
+            self.in_background(move || cache::save(&dir, &path, &language, &t).err().map(Event::Notice));
         }
         self.editing = None;
         self.refresh_diff();
@@ -558,7 +566,7 @@ impl TranscribeTab {
             let a = audio::decode(&path).map_err(|e| e.to_string())?;
             let t = transcriber.transcribe(&audio::to_whisper(&a), &opts, progress).map_err(|e| e.to_string())?;
             if let Some(dir) = cache_dir
-                && let Err(e) = cache::save(&dir, &path, &t)
+                && let Err(e) = cache::save(&dir, &path, &opts.language, &t)
             {
                 let _ = events.send(Event::Notice(e));
             }

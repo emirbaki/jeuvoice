@@ -57,7 +57,7 @@ impl fmt::Display for AudioError {
             }
             AudioError::UnknownFormat { path, .. } => write!(
                 f,
-                "JeuVoice cannot read this file type: {}. Save it as .wav, .mp3 or .mp4 and drop it again.",
+                "JeuVoice cannot read this file type: {}. Try a supported audio or video file and drop it again.",
                 file_name(path)
             ),
             AudioError::Damaged { path, .. } => write!(
@@ -90,8 +90,10 @@ pub fn decode(path: &Path) -> Result<Audio, AudioError> {
     })?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
+    // Windows cameras and phones save `VIDEO.MKV` in upper case, and a path outside
+    // UTF-8 would give no hint at all: normalise the extension before probing.
+    if let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()) {
+        hint.with_extension(&ext);
     }
     let mut format = symphonia::default::get_probe()
         .format(

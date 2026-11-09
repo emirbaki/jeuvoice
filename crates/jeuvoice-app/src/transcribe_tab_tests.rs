@@ -177,7 +177,7 @@ fn a_cached_file_opens_as_done_without_transcribing() {
     let counting = Arc::new(Counting(AtomicUsize::new(0)));
     let mut rig = Rig::with(counting.clone(), None, |dir| {
         let src = wav(dir, "a.wav");
-        crate::cache::save(&dir.join("cache"), &src, &joel_ellie()).unwrap();
+        crate::cache::save(&dir.join("cache"), &src, "tr", &joel_ellie()).unwrap();
     });
     let src = rig.dir().join("a.wav");
     rig.drop(vec![src]);
@@ -306,7 +306,7 @@ fn fixture() -> App {
         ("C:/takes/last-of-us-part-8.wav".into(), ItemState::Done(heard.clone())),
         ("C:/takes/last-of-us-part-9.wav".into(), ItemState::Running(0.42)),
         ("C:/takes/last-of-us-part-10.mp4".into(), ItemState::Waiting),
-        ("C:/takes/notes.m4a".into(), ItemState::Failed("JeuVoice cannot read this file type: notes.m4a. Save it as .wav, .mp3 or .mp4 and drop it again.".into())),
+        ("C:/takes/notes.m4a".into(), ItemState::Failed("JeuVoice cannot read this file type: notes.m4a. Try a supported audio or video file and drop it again.".into())),
     ];
     s.selected = Some(0);
     s.loaded = Some(Loaded { peaks, duration: 10.0 });
