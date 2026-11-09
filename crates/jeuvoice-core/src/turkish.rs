@@ -133,6 +133,7 @@ fn normalize_word(w: &str, dot_may_be_ordinal: bool) -> Vec<String> {
             out.push("yüzde".to_string());
             i += 1;
         }
+        // Known limits: leading zeros are lost ("007" reads "yedi"). A trailing "50%" gives no "yüzde".
         // Integer part; "." between groups of exactly 3 digits is a thousands separator.
         let mut int = String::new();
         while i < chars.len() && chars[i].is_ascii_digit() {

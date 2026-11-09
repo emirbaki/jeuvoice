@@ -112,3 +112,17 @@ fn empty_inputs() {
     assert!(script_diff("", &Transcript::default()).is_empty());
     assert_eq!(script_diff("merhaba", &Transcript::default()), vec![DiffOp::Missing { script: 0 }]);
 }
+
+#[test]
+fn unequal_runs_do_not_pair() {
+    let ops = script_diff("a b c", &heard("x"));
+    assert_eq!(
+        ops,
+        vec![
+            DiffOp::Missing { script: 0 },
+            DiffOp::Missing { script: 1 },
+            DiffOp::Missing { script: 2 },
+            DiffOp::Added { heard: 0 },
+        ]
+    );
+}

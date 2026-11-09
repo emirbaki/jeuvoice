@@ -42,7 +42,7 @@ fn find(parent: &mut [usize], x: usize) -> usize {
 }
 
 /// Token-level diff. A run of deletes followed right away by inserts pairs up 1-to-1 as
-/// changes; leftovers stay deletes / inserts.
+/// changes when both runs have equal length. Otherwise they stay deletes and inserts.
 fn token_events(a: &[(String, usize)], b: &[(String, usize)]) -> Vec<Event> {
     let at: Vec<&str> = a.iter().map(|(s, _)| s.as_str()).collect();
     let bt: Vec<&str> = b.iter().map(|(s, _)| s.as_str()).collect();
@@ -54,7 +54,7 @@ fn token_events(a: &[(String, usize)], b: &[(String, usize)]) -> Vec<Event> {
     let mut events = Vec::new();
     let mut dels: Vec<usize> = Vec::new();
     let flush = |events: &mut Vec<Event>, dels: &mut Vec<usize>, ins: &[usize]| {
-        let n = dels.len().min(ins.len());
+        let n = if dels.len() == ins.len() { dels.len() } else { 0 };
         for k in 0..n {
             events.push(ev(false, Some(dels[k]), Some(ins[k])));
         }
