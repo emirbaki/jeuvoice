@@ -443,9 +443,29 @@ impl TranscribeTab {
         };
     }
 
+    /// The shared sound player (the Voice tab plays through it too).
+    pub(crate) fn player(&self) -> &SharedPlayer {
+        &self.player
+    }
+
+    /// The shared sound player (the Voice tab plays through it too).
+    pub(crate) fn player_mut(&mut self) -> &mut SharedPlayer {
+        &mut self.player
+    }
+
+    /// The shared voice engine (the Voice tab renders through it).
+    pub(crate) fn engine_mut(&mut self) -> &mut EngineService {
+        &mut self.engine
+    }
+
     /// The voice engine state for the Settings tab.
     pub(crate) fn engine_state(&self) -> crate::services::engine::EngineState {
         self.engine.state()
+    }
+
+    /// The shared engine client, once the engine is ready.
+    pub(crate) fn engine_api(&self) -> Option<Arc<dyn jeuvoice_engine_client::EngineApi>> {
+        self.engine.api()
     }
 
     /// Restart the voice engine from the Settings tab.

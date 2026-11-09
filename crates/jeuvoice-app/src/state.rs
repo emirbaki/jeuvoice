@@ -8,6 +8,7 @@ use rune::{TextEdit, Tx, Waker};
 
 use crate::settings::{Settings, TokenStore};
 use crate::transcribe::TranscribeTab;
+use crate::voice::state::{VoiceDeps, projects_root};
 
 pub use crate::services::speech::EnsureModel;
 
@@ -51,6 +52,7 @@ pub struct Deps {
 pub struct App {
     pub tab: Tab,
     pub transcribe: TranscribeTab,
+    pub voice: crate::voice::state::VoiceTab,
     pub settings: Settings,
     /// Why the last save of the settings failed, in plain words.
     pub settings_error: Option<String>,
@@ -69,9 +71,15 @@ impl App {
         let (settings, settings_path) = (deps.settings.clone(), deps.settings_path.clone());
         let token_store = deps.token_store.clone();
         let adapter = settings.local_adapter_dir.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let voice = crate::voice::state::VoiceTab::new(VoiceDeps {
+            transcriber: deps.transcriber.clone(),
+            presets_dir: jeuvoice_core::preset::default_presets_dir().unwrap_or_else(std::env::temp_dir),
+            projects_dir: projects_root(),
+        });
         Self {
             tab: Tab::Transcribe,
             transcribe: TranscribeTab::new(deps),
+            voice,
             settings,
             settings_error: None,
             settings_path,
@@ -124,6 +132,11 @@ impl App {
         }
     }
 
+    /// The token store for the voice model files.
+    pub(crate) fn token_store(&self) -> Arc<dyn TokenStore> {
+        self.token_store.clone()
+    }
+
     /// Save now, on the UI thread: the file is tiny.
     fn save_settings(&mut self) {
         let Some(path) = &self.settings_path else { return };
@@ -134,11 +147,29 @@ impl App {
 
     /// `AppSpec::setup`: starts the transcription worker with the window's waker.
     pub fn setup(s: &mut App, waker: Waker) {
-        s.transcribe.setup(waker);
+        s.transcribe.setup(waker.clone());
+        s.voice.setup(waker);
     }
 
     /// `AppSpec::poll`: takes in what the other threads finished.
     pub fn poll(s: &mut App, _clock: f64, tx: &mut Tx) -> bool {
-        s.transcribe.poll(tx, &s.settings)
+        let mut changed = s.transcribe.poll(tx, &s.settings);
+        // The voice tab uses the shared engine client once it is ready.
+        if matches!(s.transcribe.engine_state(), crate::services::engine::EngineState::Ready(_)) {
+            s.voice.engine_api = s.transcribe.engine_api();
+        }
+        changed |= s.voice.poll();
+        // A Generate pressed while the engine started now continues.
+        if s.voice.pending_generate && matches!(s.transcribe.engine_state(), crate::services::engine::EngineState::Ready(_)) {
+            s.voice.pending_generate = false;
+            let cpu = crate::services::engine::whisper_must_use_cpu(&s.transcribe.engine_state());
+            let store = s.token_store();
+            let settings = s.settings.clone();
+            let (transcribe, voice) = (&mut s.transcribe, &mut s.voice);
+            voice.generate(transcribe.engine_mut(), &settings, store, cpu);
+            changed = true;
+        }
+        changed |= s.voice.follow_playback(s.transcribe.player_mut(), tx);
+        changed
     }
 }

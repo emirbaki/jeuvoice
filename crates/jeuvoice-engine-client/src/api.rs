@@ -295,7 +295,15 @@ impl EngineApi for FakeEngineApi {
     }
 
     fn load(&self, _model: &str, _adapter_dir: Option<&str>, _device: &str) -> Result<JobId, EngineError> {
-        Ok("job-0".into())
+        let id = format!("job-{}", self.jobs.lock().unwrap().len() + 1);
+        self.jobs.lock().unwrap().push(JobStatus {
+            state: JobState::Done,
+            progress: 1.0,
+            message: String::new(),
+            result: None,
+            error: None,
+        });
+        Ok(id)
     }
 
     fn unload(&self) -> Result<(), EngineError> {
