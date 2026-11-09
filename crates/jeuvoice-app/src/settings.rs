@@ -81,7 +81,8 @@ pub struct Settings {
     pub terms: Terms,
 }
 
-fn default_terms() -> Terms {
+/// The seeded script terms: the quote term every preset starts with.
+pub fn default_terms() -> Terms {
     Terms { en: vec![], quote: vec!["The Last of Us".into()], respell: vec![] }
 }
 
