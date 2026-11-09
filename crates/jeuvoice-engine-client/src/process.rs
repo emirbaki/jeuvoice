@@ -9,6 +9,7 @@ use std::time::Duration;
 use super::api::{EngineError, HttpEngine};
 
 /// What the engine runs on: a venv python, the engine source, a data folder.
+#[derive(Clone)]
 pub struct EngineConfig {
     pub python: PathBuf,
     pub engine_dir: PathBuf,
