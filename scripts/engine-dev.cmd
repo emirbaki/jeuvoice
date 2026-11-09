@@ -9,12 +9,12 @@ if not exist engine\.venv (
 )
 
 rem Windows: torch from the CUDA 12.6 index, the rest from the default index.
-engine\.venv\Scripts\uv.exe pip install --python engine\.venv\Scripts\python.exe ^
+uv pip install --python engine\.venv\Scripts\python.exe ^
     --index-url https://download.pytorch.org/whl/cu126 ^
     torch==2.14.0
 if errorlevel 1 exit /b 1
 
-engine\.venv\Scripts\uv.exe pip install --python engine\.venv\Scripts\python.exe ^
+uv pip install --python engine\.venv\Scripts\python.exe ^
     transformers==5.19.0 peft==0.21.2 accelerate==1.15.0 ^
     "omnivoice[lora] @ git+https://github.com/k2-fsa/OmniVoice@08be0b4ccbac3e13e374e86fbfead4b4cac343e2" ^
     "trnorm @ git+https://github.com/ozguradmin/ahenk-turkish-tts" ^

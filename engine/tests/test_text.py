@@ -1,0 +1,66 @@
+"""Text pipeline tests: engine output equals the CLI functions (read-only reference)."""
+
+import sys
+from pathlib import Path
+
+import pytest
+
+from jeuvoice_engine.text import clean, plan_parts
+
+FIXTURES = Path(__file__).parent / "fixtures"
+TTS_SCRIPTS = Path(r"D:/MLProjelerim/tts_lab/scripts")
+
+
+def cli_functions():
+    """Import the CLI functions read-only. Skip when unavailable (no folder or no deps)."""
+    if not TTS_SCRIPTS.exists():
+        pytest.skip(f"reference folder missing: {TTS_SCRIPTS}")
+    sys.path.insert(0, str(TTS_SCRIPTS))
+    try:
+        import try_omnivoice
+        from render_script_gguf import split_paragraphs
+    except ImportError as e:
+        pytest.skip(f"reference deps missing: {e}")
+    return try_omnivoice, split_paragraphs
+
+
+def cli_parts(script, en_terms, quote_terms, respell):
+    try_omnivoice, split_paragraphs = cli_functions()
+    out = []
+    index = 1
+    for para, group in split_paragraphs(script):
+        for lang, text in try_omnivoice.split_by_language(group, en_terms):
+            text = try_omnivoice.clean(text, lang, quote_terms)
+            for old, new in respell:
+                text = text.replace(old, new)
+            out.append((index, para, lang, text))
+            index += 1
+    return out
+
+
+@pytest.mark.parametrize("name,en_terms,quote_terms,respell", [
+    ("script_tr.txt", [], [], []),
+    ("script_mixed.txt", ["tünel"], ["The Last of Us"], []),
+    ("script_two_para.txt", [], [], [("ellie", "elif")]),
+])
+def test_plan_parts_match_cli(name, en_terms, quote_terms, respell):
+    script = (FIXTURES / name).read_text(encoding="utf-8")
+    expected = cli_parts(script, en_terms, quote_terms, respell)
+    got = [(p.index, p.paragraph, p.language, p.text) for p in plan_parts(script, en_terms, quote_terms, respell)]
+    assert got == expected
+
+
+def test_quote_term_stays_quoted_in_en_part():
+    parts = plan_parts(
+        "Joel sabah tünele giriyor. The Last of Us'ta bu sahne herkesin aklında kaldı.",
+        ["the last of us"],
+        ["The Last of Us"],
+        [],
+    )
+    en = [p for p in parts if p.language == "en"]
+    assert en, "the quoted sentence is an en part"
+    assert '"The Last of Us"' in en[0].text
+
+
+def test_turkish_dotted_capitals():
+    assert clean("İSTANBUL IŞIK", "tr") == "istanbul ışık"
