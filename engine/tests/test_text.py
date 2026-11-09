@@ -15,6 +15,28 @@ def cli_functions():
     """Import the CLI functions read-only. Skip when unavailable (no folder or no deps)."""
     if not TTS_SCRIPTS.exists():
         pytest.skip(f"reference folder missing: {TTS_SCRIPTS}")
+    # render_script_gguf pulls tts_lab-only imports (normalizer_tr, librosa) that
+    # the split/clean functions never call. Stub them so the reference stays importable.
+    import sys as _sys
+    import types as _types
+
+    if "normalizer_tr" not in _sys.modules:
+        try:
+            import normalizer_tr  # noqa: F401
+        except ImportError:
+            _stub = _types.ModuleType("normalizer_tr")
+
+            class _Normalizer:
+                def __init__(self, *a, **k):
+                    raise RuntimeError("stub")
+
+            _stub.Normalizer = _Normalizer
+            _sys.modules["normalizer_tr"] = _stub
+    if "librosa" not in _sys.modules:
+        try:
+            import librosa  # noqa: F401
+        except ImportError:
+            _sys.modules["librosa"] = _types.ModuleType("librosa")
     sys.path.insert(0, str(TTS_SCRIPTS))
     try:
         import try_omnivoice

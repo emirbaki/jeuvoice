@@ -20,3 +20,4 @@ test = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["gpu: needs the model and --gpu on this machine"]
