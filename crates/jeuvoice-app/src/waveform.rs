@@ -158,9 +158,11 @@ fn word_row<S: 'static>(
     let end = v.start + v.span;
     let mut row = el().w_full().h(WORDS_H).clip_rounded(0.0);
     let mut free_x = f32::NEG_INFINITY;
-    for (i, w) in words.iter().enumerate() {
-        if w.end <= v.start || w.start >= end {
-            continue;
+    // Words are in time order, so the first visible word is the first that ends after `start`.
+    let first = words.partition_point(|w| w.end <= v.start);
+    for (i, w) in words.iter().enumerate().skip(first) {
+        if w.start >= end {
+            break;
         }
         let has = |m: Mark| marks.iter().any(|&(j, k)| j == i && k == m);
         let key = format!("word-{i}");
@@ -190,11 +192,26 @@ fn word_row<S: 'static>(
             word = word.child(el().w_full().h(2.0).radius(1.0).fill(orange()));
         }
         if has(Mark::Missing) {
-            row = row.child(el().absolute((x - 3.0).max(0.0), 3.0).size(3.0, 16.0).radius(1.5).fill(red()));
+            row = row.child(missing_bar(format!("missing-{i}"), x - 3.0));
         }
         row = row.child(word);
     }
+    // A gap after the last word (the speaker stopped early): the bar goes right after that word.
+    let trailing = marks.iter().any(|&(j, k)| j == words.len() && k == Mark::Missing);
+    if let Some(last) = words.last()
+        && trailing
+        && last.end > v.start
+        && last.end <= end
+    {
+        let x = if free_x.is_finite() { free_x - WORD_GAP + 1.0 } else { 0.0 };
+        row = row.child(missing_bar("missing-end".into(), x));
+    }
     row
+}
+
+/// The red bar that marks a gap where a script word was not heard, with its left edge at `x`.
+fn missing_bar(key: String, x: f32) -> El {
+    el().key(key).absolute(x.max(0.0), 3.0).size(3.0, 16.0).radius(1.5).fill(red())
 }
 
 #[cfg(test)]
@@ -351,6 +368,26 @@ mod tests {
     }
 
     #[test]
+    fn missing_bar_sits_left_of_its_word() {
+        let rt = run();
+        let bar = rt.presented("missing-6").expect("word 6 has a Missing bar").0;
+        let word = rt.presented("word-6").unwrap().0;
+        assert!(bar[0] + bar[2] <= word[0] + 0.5 && bar[0] >= word[0] - 6.0, "bar {bar:?} word {word:?}");
+    }
+
+    #[test]
+    fn trailing_missing_bar_sits_right_of_the_last_word() {
+        let mut rt = run();
+        rt.update(|s, _| s.marks.push((s.words.len(), Mark::Missing)));
+        rt.frame(1.0 / 60.0);
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("missing-end").is_some());
+        let bar = rt.presented("missing-end").unwrap().0;
+        let last = rt.presented("word-7").unwrap().0;
+        assert!(bar[0] >= last[0] + last[2] && bar[0] <= last[0] + last[2] + 6.0, "bar {bar:?} last word {last:?}");
+    }
+
+    #[test]
     fn words_outside_the_visible_range_are_not_built() {
         let mut rt = run();
         rt.update(|s, _| (s.view.start, s.view.span) = (4.0, 2.0));
@@ -359,6 +396,9 @@ mod tests {
         assert!(rt.find("word-0").is_none());
         assert!(rt.find("word-7").is_none());
         assert!(rt.find("word-6").is_some());
+        rt.update(|s, _| s.marks.push((s.words.len(), Mark::Missing)));
+        rt.frame(1.0 / 60.0);
+        assert!(rt.find("missing-end").is_none(), "the last word ends outside the view");
     }
 
     #[test]
