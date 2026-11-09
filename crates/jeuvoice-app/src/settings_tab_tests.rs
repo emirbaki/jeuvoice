@@ -11,8 +11,9 @@ use jeuvoice_core::transcript::Transcript;
 use jeuvoice_whisper::{FakeTranscriber, TranscribeOptions, Transcriber, WhisperError};
 use rune::{Env, Runtime};
 
-use crate::settings::Settings;
-use crate::state::{App, Deps, EnsureModel, ModelHost};
+use crate::services::speech::EnsureModel;
+use crate::settings::{HF_TOKEN_KEY, MemStore, Settings, TokenStore};
+use crate::state::{App, Deps, ModelHost};
 use crate::view::view;
 
 /// A model that is a flag and a number, so a test can see what the app asks of it.
@@ -40,6 +41,7 @@ struct Rig {
     rt: Runtime<App>,
     tmp: tempfile::TempDir,
     model: Arc<FakeModel>,
+    store: Arc<MemStore>,
 }
 
 impl Rig {
@@ -51,6 +53,7 @@ impl Rig {
         let tmp = tempfile::tempdir().unwrap();
         let model = Arc::new(FakeModel::default());
         model.on_disk.store(on_disk, Ordering::SeqCst);
+        let store = Arc::new(MemStore::default());
         let deps = Deps {
             transcriber,
             ensure_model,
@@ -59,6 +62,7 @@ impl Rig {
             model: Some(model.clone()),
             settings,
             settings_path: Some(tmp.path().join("config").join("settings.json")),
+            token_store: store.clone(),
         };
         let mut app = App::new(deps);
         App::setup(&mut app, Arc::new(|| {}));
@@ -66,7 +70,7 @@ impl Rig {
         rt.poll = Some(App::poll);
         rt.frame(0.0);
         rt.frame(1.0 / 60.0);
-        let mut rig = Rig { rt, tmp, model };
+        let mut rig = Rig { rt, tmp, model, store };
         rig.tap("tab-settings");
         rig
     }
@@ -119,6 +123,49 @@ fn wav(dir: &Path, name: &str) -> PathBuf {
     }
     w.finalize().unwrap();
     path
+}
+
+#[test]
+fn saving_the_token_writes_it_to_the_keychain_store() {
+    let mut rig = Rig::new(true);
+    rig.tap("hf-token");
+    rig.rt.paste("tok123");
+    rig.rt.frame(1.0 / 60.0);
+    rig.tap("save-token");
+    assert_eq!(rig.store.get(HF_TOKEN_KEY), Some("tok123".into()));
+    assert_eq!(rig.text("files-status"), "Saved the Hugging Face token.");
+    // Empty removes it again.
+    rig.tap("save-token");
+    assert_eq!(rig.store.get(HF_TOKEN_KEY), None);
+    assert_eq!(rig.text("files-status"), "Removed the Hugging Face token.");
+}
+
+#[test]
+fn saving_the_adapter_folder_writes_it_to_settings() {
+    let mut rig = Rig::new(true);
+    rig.tap("adapter-dir");
+    rig.rt.paste("D:/ckpt");
+    rig.rt.frame(1.0 / 60.0);
+    rig.tap("save-adapter");
+    assert_eq!(
+        rig.rt.state.settings.local_adapter_dir.as_deref(),
+        Some(std::path::Path::new("D:/ckpt"))
+    );
+    assert_eq!(Settings::load_from(&rig.settings_path()).local_adapter_dir.as_deref(), Some(std::path::Path::new("D:/ckpt")));
+    assert_eq!(rig.text("files-status"), "Saved the adapter folder.");
+    // Empty means "use each preset's model".
+    rig.tap("save-adapter");
+    rig.rt.update(|s, _| s.adapter_field = rune::TextEdit::new(""));
+    rig.rt.frame(1.0 / 60.0);
+    rig.tap("save-adapter");
+    assert_eq!(rig.rt.state.settings.local_adapter_dir, None);
+}
+
+#[test]
+fn the_voice_engine_shows_off_with_a_restart_button() {
+    let rig = Rig::new(true);
+    assert_eq!(rig.text("engine-status"), "Voice engine: off");
+    assert!(rig.on_screen("restart-engine"));
 }
 
 #[test]
@@ -270,8 +317,9 @@ fn snap_settings() {
             cache_dir: None,
             sound: false,
             model: None,
-            settings: Settings { whisper_language: "tr".into(), use_gpu: true },
+            settings: Settings::default(),
             settings_path: None,
+            token_store: Arc::new(MemStore::default()),
         };
         let mut app = App::new(deps);
         app.tab = crate::state::Tab::Settings;

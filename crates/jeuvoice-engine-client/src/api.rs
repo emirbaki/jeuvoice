@@ -141,6 +141,8 @@ pub trait EngineApi: Send + Sync {
     fn render(&self, req: &RenderRequest) -> Result<JobId, EngineError>;
     fn job(&self, id: &JobId) -> Result<JobStatus, EngineError>;
     fn cancel(&self, id: &JobId) -> Result<(), EngineError>;
+    /// Download a Hugging Face adapter into the engine data folder.
+    fn fetch_adapter(&self, repo: &str, subfolder: Option<&str>, token: Option<&str>) -> Result<std::path::PathBuf, EngineError>;
 }
 
 /// HTTP engine client over `ureq`.
@@ -245,6 +247,22 @@ impl EngineApi for HttpEngine {
         let body = serde_json::json!({});
         self.post::<_, Ok>(&format!("/jobs/{id}/cancel"), &body).map(|_| ())
     }
+
+    fn fetch_adapter(&self, repo: &str, subfolder: Option<&str>, token: Option<&str>) -> Result<std::path::PathBuf, EngineError> {
+        #[derive(Deserialize)]
+        struct Reply {
+            ok: bool,
+            path: Option<String>,
+            error: Option<String>,
+        }
+        let body = serde_json::json!({"repo": repo, "subfolder": subfolder, "token": token});
+        let reply: Reply = self.post("/fetch_adapter", &body)?;
+        if reply.ok {
+            reply.path.map(std::path::PathBuf::from).ok_or_else(|| EngineError::Failed("The voice engine gave a bad answer.".into()))
+        } else {
+            Err(EngineError::Failed(reply.error.unwrap_or_else(|| "The model files could not be downloaded.".into())))
+        }
+    }
 }
 
 /// In-memory engine for app tests: renders are silent WAVs, done at once.
@@ -330,6 +348,16 @@ impl EngineApi for FakeEngineApi {
 
     fn cancel(&self, _id: &JobId) -> Result<(), EngineError> {
         Ok(())
+    }
+
+    fn fetch_adapter(&self, repo: &str, subfolder: Option<&str>, _token: Option<&str>) -> Result<std::path::PathBuf, EngineError> {
+        let dir = std::env::temp_dir().join(format!("fake-adapter-{}", repo.replace('/', "__")));
+        let dir = match subfolder {
+            Some(s) => dir.join(s),
+            None => dir,
+        };
+        std::fs::create_dir_all(&dir).map_err(|_| EngineError::Failed("A file could not be saved.".into()))?;
+        Ok(dir)
     }
 }
 

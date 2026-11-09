@@ -1,0 +1,22 @@
+{
+  "name": "ses_0007",
+  "kind": "Clone",
+  "ref_audio": "ref.wav",
+  "ref_text": "Dünyanın öbür ucunda insanlar birbirine sarıldı. Şimdi bir an durup düşünelim. O bilgisayar, bugün cebinizdeki telefondan binlerce kat daha zayıftı.",
+  "seed": 1,
+  "instruct": null,
+  "model": {
+    "base": "k2-fsa/OmniVoice",
+    "adapter": {
+      "HfRepo": {
+        "repo": "emirbakid/jeuvoice-omnivoice-tr2",
+        "subfolder": "checkpoint-6000"
+      }
+    }
+  },
+  "guidance": 2.5,
+  "pause": 0.1,
+  "para_pause": 0.3,
+  "num_step": 32,
+  "speed": 1.0
+}

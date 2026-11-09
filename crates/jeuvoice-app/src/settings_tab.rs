@@ -1,8 +1,10 @@
-//! The Settings tab: the Whisper language, the GPU switch and the speech model.
+//! The Settings tab: the Whisper language, the GPU switch, the speech model,
+//! the Hugging Face token and the voice engine.
 
 use rune::tok::{self, radius, space, type_};
-use rune::{El, col, el, row, text};
+use rune::{El, col, el, row, text, text_input};
 
+use crate::services::engine::EngineState;
 use crate::state::App;
 use crate::transcribe::TranscribeTab;
 use crate::transcribe_tab::{button, red, section};
@@ -28,7 +30,13 @@ pub fn view(s: &App) -> El {
         .child(section("Graphics card"))
         .child(gpu_switch(s.settings.use_gpu))
         .child(section("Speech model"))
-        .child(model_block(&s.transcribe));
+        .child(model_block(&s.transcribe))
+        .child(section("Hugging Face token"))
+        .child(token_block(s))
+        .child(section("Voice model files"))
+        .child(adapter_block(s))
+        .child(section("Voice engine"))
+        .child(engine_block(&s.transcribe));
     if let Some(e) = &s.settings_error {
         page = page.child(text(e.as_str()).key("settings-error").font(type_::LABEL).color(red()).wrap());
     }
@@ -114,6 +122,72 @@ fn model_block(s: &TranscribeTab) -> El {
         block = block.child(text(e.as_str()).key("model-error").font(type_::LABEL).color(red()).wrap());
     }
     block
+}
+
+/// The Hugging Face token: saved to the OS keychain, never to `settings.json`.
+fn token_block(s: &App) -> El {
+    let t = tok::theme(true);
+    let field = text_input(&s.token_field, type_::BODY)
+        .key("hf-token")
+        .single_line()
+        .w_full()
+        .padding(space::S2)
+        .radius(radius::SM)
+        .fill(t.card)
+        .placeholder("Paste the token, then Save", t.text_secondary)
+        .on_edit(|s: &mut App| &mut s.token_field)
+        .on_submit(|s: &mut App, _| s.save_hf_token());
+    let mut block = col()
+        .gap(space::S2)
+        .child(field)
+        .child(button("save-token", "Save token", true, |s, _| s.save_hf_token()))
+        .child(
+            text("Opens private voice models. Find it in your Hugging Face account settings.")
+                .font(type_::LABEL)
+                .color(t.text_secondary)
+                .wrap(),
+        );
+    if let Some(m) = &s.files_status {
+        block = block.child(text(m.as_str()).key("files-status").font(type_::LABEL).color(t.text).wrap());
+    }
+    block
+}
+
+/// A local adapter folder that overrides every Hugging Face adapter (development).
+fn adapter_block(s: &App) -> El {
+    let t = tok::theme(true);
+    let field = text_input(&s.adapter_field, type_::BODY)
+        .key("adapter-dir")
+        .single_line()
+        .w_full()
+        .padding(space::S2)
+        .radius(radius::SM)
+        .fill(t.card)
+        .placeholder("A checkpoint folder, empty for the preset's own model", t.text_secondary)
+        .on_edit(|s: &mut App| &mut s.adapter_field)
+        .on_submit(|s: &mut App, _| s.save_adapter_dir());
+    col().gap(space::S2).child(field).child(button("save-adapter", "Save folder", true, |s, _| s.save_adapter_dir()))
+}
+
+/// The voice engine state with a restart button.
+fn engine_block(s: &TranscribeTab) -> El {
+    let t = tok::theme(true);
+    let (status, bad) = match s.engine_state() {
+        EngineState::Off => ("Voice engine: off".to_string(), false),
+        EngineState::Starting => ("Voice engine: starting…".to_string(), false),
+        EngineState::Ready(h) => (format!("Voice engine: ready ({})", h.device), false),
+        EngineState::Failed(e) => (format!("Voice engine: {e}"), true),
+    };
+    col()
+        .gap(space::S2)
+        .child(
+            text(status)
+                .key("engine-status")
+                .font(type_::BODY)
+                .color(if bad { red() } else { t.text })
+                .wrap(),
+        )
+        .child(button("restart-engine", "Restart engine", true, |s, _| s.transcribe.restart_engine()))
 }
 
 #[cfg(test)]

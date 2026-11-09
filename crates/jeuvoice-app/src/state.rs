@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use jeuvoice_whisper::Transcriber;
-use rune::{Tx, Waker};
+use rune::{TextEdit, Tx, Waker};
 
-use crate::settings::Settings;
+use crate::settings::{Settings, TokenStore};
 use crate::transcribe::TranscribeTab;
 
 pub use crate::services::speech::EnsureModel;
@@ -44,6 +44,8 @@ pub struct Deps {
     pub settings: Settings,
     /// Where settings are saved. `None` turns saving off.
     pub settings_path: Option<PathBuf>,
+    /// Reads and writes the Hugging Face token in the OS keychain.
+    pub token_store: Arc<dyn TokenStore>,
 }
 
 pub struct App {
@@ -53,12 +55,57 @@ pub struct App {
     /// Why the last save of the settings failed, in plain words.
     pub settings_error: Option<String>,
     settings_path: Option<PathBuf>,
+    token_store: Arc<dyn TokenStore>,
+    /// The Hugging Face token field (never filled from the keychain).
+    pub token_field: TextEdit,
+    /// A local adapter folder; empty means "use the preset's own model".
+    pub adapter_field: TextEdit,
+    /// What the last token/adapter save did.
+    pub files_status: Option<String>,
 }
 
 impl App {
     pub fn new(deps: Deps) -> Self {
         let (settings, settings_path) = (deps.settings.clone(), deps.settings_path.clone());
-        Self { tab: Tab::Transcribe, transcribe: TranscribeTab::new(deps), settings, settings_error: None, settings_path }
+        let token_store = deps.token_store.clone();
+        let adapter = settings.local_adapter_dir.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        Self {
+            tab: Tab::Transcribe,
+            transcribe: TranscribeTab::new(deps),
+            settings,
+            settings_error: None,
+            settings_path,
+            token_store,
+            token_field: TextEdit::new(""),
+            adapter_field: TextEdit::new(adapter),
+            files_status: None,
+        }
+    }
+
+    /// Save the token field to the keychain. Empty removes it.
+    pub fn save_hf_token(&mut self) {
+        let token = self.token_field.text.trim().to_string();
+        let done = if token.is_empty() {
+            self.token_store.delete(crate::settings::HF_TOKEN_KEY)
+        } else {
+            self.token_store.set(crate::settings::HF_TOKEN_KEY, &token)
+        };
+        self.files_status = Some(match done {
+            Ok(()) if token.is_empty() => "Removed the Hugging Face token.".into(),
+            Ok(()) => "Saved the Hugging Face token.".into(),
+            Err(e) => e,
+        });
+        self.token_field.replace_text(String::new());
+    }
+
+    /// Save the adapter folder field to the settings. Empty means "use each preset's model".
+    pub fn save_adapter_dir(&mut self) {
+        let dir = self.adapter_field.text.trim().to_string();
+        self.settings.local_adapter_dir = (!dir.is_empty()).then(|| PathBuf::from(dir));
+        self.save_settings();
+        if self.settings_error.is_none() {
+            self.files_status = Some("Saved the adapter folder.".into());
+        }
     }
 
     pub fn set_language(&mut self, code: &str) {

@@ -1,6 +1,7 @@
 //! Shared types and logic for JeuVoice.
 pub mod audio;
 pub mod peaks;
+pub mod preset;
 pub mod project;
 pub mod queue;
 pub mod script_diff;

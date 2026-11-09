@@ -12,6 +12,7 @@ mod transcribe_tab;
 mod view;
 mod waveform;
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use jeuvoice_core::transcript::Transcript;
@@ -73,6 +74,12 @@ fn ensure_model() -> EnsureModel {
 }
 
 fn init() -> App {
+    // Built-in voice presets on first start only; never overwrites user edits.
+    if let (Some(presets), Some(assets)) = (jeuvoice_core::preset::default_presets_dir(), dev_assets_dir())
+        && assets.join("presets").is_dir()
+    {
+        let _ = jeuvoice_core::preset::install_default_presets(&assets, &presets);
+    }
     let whisper = Arc::new(LazyWhisper::default());
     App::new(Deps {
         transcriber: whisper.clone(),
@@ -82,7 +89,16 @@ fn init() -> App {
         model: Some(whisper),
         settings: Settings::load(),
         settings_path: Settings::default_path(),
+        token_store: Arc::new(settings::KeyringStore),
     })
+}
+
+/// `assets/` next to the workspace root (development). Installed mode comes with
+/// runtime paths in Plan 4.
+fn dev_assets_dir() -> Option<PathBuf> {
+    let root = std::env::current_exe().ok()?.parent()?.parent()?.parent()?.to_path_buf();
+    let assets = root.join("assets");
+    assets.is_dir().then_some(assets)
 }
 
 fn main() {

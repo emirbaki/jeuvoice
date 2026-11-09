@@ -7,6 +7,8 @@ Endpoints (all JSON, all need header X-JeuVoice-Token):
   POST /render          {script, paragraphs|null, preset, terms, base_seed, part_overrides, out_dir} -> {"job": id}
   GET  /jobs/<id>       -> {"state", "progress", "message", "result"|null, "error"|null}
   POST /jobs/<id>/cancel -> takes effect between parts
+  POST /fetch_adapter   {"repo", "subfolder"|null, "token"|null} -> {"ok": true, "path": ...}
+                       or {"ok": false, "error": plain words}
   POST /shutdown        -> stops the process.
 """
 
@@ -167,6 +169,22 @@ def make_handler(state: State, token: str, server_ref: dict):
             if self.path == "/render":
                 job = state.store.submit("render", make_render_run(state.store, req))
                 self._send(200, {"job": job.id})
+                return
+            if self.path == "/fetch_adapter":
+                from .fetch import FetchError, fetch_adapter
+
+                try:
+                    path = fetch_adapter(
+                        str(req.get("repo", "")),
+                        req.get("subfolder"),
+                        req.get("token"),
+                        state.data_dir,
+                        state.log,
+                    )
+                except FetchError as e:
+                    self._send(200, {"ok": False, "error": e.message})
+                    return
+                self._send(200, {"ok": True, "path": path})
                 return
             if self.path.startswith("/jobs/") and self.path.endswith("/cancel"):
                 job_id = self.path[len("/jobs/"):-len("/cancel")]

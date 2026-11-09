@@ -13,7 +13,9 @@ use jeuvoice_whisper::{FakeTranscriber, TranscribeOptions, Transcriber, WhisperE
 use rune::{Env, FileDialogKind, Runtime};
 
 use crate::marks::counts_text;
-use crate::state::{App, Deps, EnsureModel};
+use crate::services::speech::EnsureModel;
+use crate::settings::MemStore;
+use crate::state::{App, Deps};
 use crate::view::view;
 use crate::waveform::Mark;
 
@@ -54,7 +56,7 @@ impl Rig {
     fn with(transcriber: Arc<dyn Transcriber>, ensure_model: Option<EnsureModel>, before: impl FnOnce(&Path)) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         before(tmp.path());
-        let deps = Deps { transcriber, ensure_model, cache_dir: Some(tmp.path().join("cache")), sound: false, model: None, settings: Default::default(), settings_path: None };
+        let deps = Deps { transcriber, ensure_model, cache_dir: Some(tmp.path().join("cache")), sound: false, model: None, settings: Default::default(), settings_path: None, token_store: Arc::new(MemStore::default()) };
         let mut app = App::new(deps);
         let wakes = Arc::new(AtomicUsize::new(0));
         let counter = wakes.clone();
@@ -277,7 +279,7 @@ fn fixture() -> App {
     use crate::waveform::WaveView;
     use jeuvoice_core::peaks::{PEAKS_PER_SECOND, Peaks};
 
-    let deps = Deps { transcriber: Arc::new(FakeTranscriber(joel_ellie())), ensure_model: None, cache_dir: None, sound: false, model: None, settings: Default::default(), settings_path: None };
+    let deps = Deps { transcriber: Arc::new(FakeTranscriber(joel_ellie())), ensure_model: None, cache_dir: None, sound: false, model: None, settings: Default::default(), settings_path: None, token_store: Arc::new(MemStore::default()) };
     let mut app = App::new(deps);
     let heard = Transcript {
         language: "tr".into(),

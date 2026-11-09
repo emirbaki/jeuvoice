@@ -443,6 +443,16 @@ impl TranscribeTab {
         };
     }
 
+    /// The voice engine state for the Settings tab.
+    pub(crate) fn engine_state(&self) -> crate::services::engine::EngineState {
+        self.engine.state()
+    }
+
+    /// Restart the voice engine from the Settings tab.
+    pub(crate) fn restart_engine(&mut self) {
+        self.engine.restart();
+    }
+
     /// Start the next waiting file when nothing runs and no cache lookup is out. While the
     /// voice engine holds a small GPU, Whisper runs on the CPU.
     fn start_next(&mut self, settings: &Settings) -> bool {
