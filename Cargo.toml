@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/jeuvoice-core", "crates/jeuvoice-whisper", "crates/jeuvoice-app"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+rune = { git = "https://github.com/anomalyco/rune", rev = "b3a33a0f3a5c35d78f188046a040696193cfb6bf" }
