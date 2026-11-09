@@ -4,6 +4,8 @@
 mod playback;
 mod state;
 mod view;
+#[allow(dead_code)] // wired into the Transcribe tab in the next task
+mod waveform;
 
 use rune::AppSpec;
 use state::App;
