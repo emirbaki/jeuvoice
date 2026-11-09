@@ -6,3 +6,5 @@ license.workspace = true
 
 [dependencies]
 rune.workspace = true
+jeuvoice-core = { path = "../jeuvoice-core" }
+cpal = "0.15"

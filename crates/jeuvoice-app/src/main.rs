@@ -1,5 +1,7 @@
 //! JeuVoice desktop app: speech, transcription and training in one window.
 
+#[allow(dead_code)] // wired into the UI in a later task
+mod playback;
 mod state;
 mod view;
 
