@@ -306,7 +306,7 @@ fn fixture() -> App {
         ("C:/takes/last-of-us-part-8.wav".into(), ItemState::Done(heard.clone())),
         ("C:/takes/last-of-us-part-9.wav".into(), ItemState::Running(0.42)),
         ("C:/takes/last-of-us-part-10.mp4".into(), ItemState::Waiting),
-        ("C:/takes/notes.m4a".into(), ItemState::Failed("JeuVoice cannot read the sound in notes.m4a (unsupported codec).".into())),
+        ("C:/takes/notes.m4a".into(), ItemState::Failed("JeuVoice cannot read this file type: notes.m4a. Save it as .wav, .mp3 or .mp4 and drop it again.".into())),
     ];
     s.selected = Some(0);
     s.loaded = Some(Loaded { peaks, duration: 10.0 });

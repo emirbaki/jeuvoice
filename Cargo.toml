@@ -9,7 +9,7 @@ license = "MIT"
 
 [workspace.dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "b3a33a0f3a5c35d78f188046a040696193cfb6bf" }
-symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "ogg", "vorbis", "flac", "wav", "pcm"] }
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "mkv", "ogg", "vorbis", "flac", "wav", "pcm"] }
 rubato = "0.16"
 hound = "3.5"
 tempfile = "3"

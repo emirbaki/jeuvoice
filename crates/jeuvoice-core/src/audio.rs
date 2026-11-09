@@ -23,11 +23,18 @@ pub struct Audio {
     pub rate: u32,
 }
 
+/// Why a file gave no sound. `Display` is plain words for the file list. The `detail` fields
+/// keep the decoder's own text for logs (`Debug`) and never reach the user.
 #[derive(Debug)]
 pub enum AudioError {
     NotFound(PathBuf),
+    /// The file could not be opened (no permission, or another program locks it).
+    CannotOpen { path: PathBuf, detail: String },
     NoAudioTrack(PathBuf),
-    Unsupported { path: PathBuf, detail: String },
+    /// No reader or decoder for this container or sound format.
+    UnknownFormat { path: PathBuf, detail: String },
+    /// The format is known but the data is broken.
+    Damaged { path: PathBuf, detail: String },
 }
 
 fn file_name(path: &Path) -> String {
@@ -40,12 +47,22 @@ impl fmt::Display for AudioError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AudioError::NotFound(p) => write!(f, "Cannot find the file {}.", p.display()),
+            AudioError::CannotOpen { path, .. } => write!(
+                f,
+                "JeuVoice cannot open {}. Close other programs that use it and drop it again.",
+                file_name(path)
+            ),
             AudioError::NoAudioTrack(p) => {
                 write!(f, "The file {} has no sound track.", file_name(p))
             }
-            AudioError::Unsupported { path, detail } => write!(
+            AudioError::UnknownFormat { path, .. } => write!(
                 f,
-                "JeuVoice cannot read the sound in {} ({detail}).",
+                "JeuVoice cannot read this file type: {}. Save it as .wav, .mp3 or .mp4 and drop it again.",
+                file_name(path)
+            ),
+            AudioError::Damaged { path, .. } => write!(
+                f,
+                "The sound in {} is damaged. Export it again and drop it again.",
                 file_name(path)
             ),
         }
@@ -56,15 +73,19 @@ impl std::error::Error for AudioError {}
 
 /// Decode the first audio track at its native rate, mixing channels to mono.
 pub fn decode(path: &Path) -> Result<Audio, AudioError> {
-    let unsupported = |detail: String| AudioError::Unsupported {
-        path: path.to_path_buf(),
-        detail,
+    let unknown = |detail: String| AudioError::UnknownFormat { path: path.to_path_buf(), detail };
+    let damaged = |detail: String| AudioError::Damaged { path: path.to_path_buf(), detail };
+    // A symphonia error while reading: an unsupported feature means an unknown format, the
+    // rest means broken data.
+    let read_error = |e: SymError| match e {
+        SymError::Unsupported(_) => unknown(e.to_string()),
+        _ => damaged(e.to_string()),
     };
     let file = File::open(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             AudioError::NotFound(path.to_path_buf())
         } else {
-            unsupported(e.to_string())
+            AudioError::CannotOpen { path: path.to_path_buf(), detail: e.to_string() }
         }
     })?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -79,7 +100,8 @@ pub fn decode(path: &Path) -> Result<Audio, AudioError> {
             &FormatOptions { enable_gapless: true, ..Default::default() },
             &MetadataOptions::default(),
         )
-        .map_err(|e| unsupported(e.to_string()))?
+        // The probe fails when no reader knows the bytes: an unknown file type.
+        .map_err(|e| unknown(e.to_string()))?
         .format;
 
     let track = format
@@ -89,9 +111,10 @@ pub fn decode(path: &Path) -> Result<Audio, AudioError> {
         .ok_or_else(|| AudioError::NoAudioTrack(path.to_path_buf()))?;
     let track_id = track.id;
     let params = track.codec_params.clone();
-    // symphonia reads Opus in Ogg but cannot decode it, so Opus has its own decoder.
+    // symphonia reads Opus in Ogg and in Matroska/WebM but cannot decode it, so Opus has its
+    // own decoder. Both containers hand over the `OpusHead` header as extra data.
     let mut opus = if params.codec == CODEC_TYPE_OPUS {
-        Some(OpusDecoder::new(params.extra_data.as_deref().unwrap_or_default()).map_err(unsupported)?)
+        Some(OpusDecoder::new(params.extra_data.as_deref().unwrap_or_default()).map_err(unknown)?)
     } else {
         None
     };
@@ -99,7 +122,7 @@ pub fn decode(path: &Path) -> Result<Audio, AudioError> {
         Some(
             symphonia::default::get_codecs()
                 .make(&params, &DecoderOptions::default())
-                .map_err(|e| unsupported(e.to_string()))?,
+                .map_err(|e| unknown(e.to_string()))?,
         )
     } else {
         None
@@ -114,14 +137,14 @@ pub fn decode(path: &Path) -> Result<Audio, AudioError> {
             Ok(p) => p,
             Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(SymError::ResetRequired) => break,
-            Err(e) => return Err(unsupported(e.to_string())),
+            Err(e) => return Err(read_error(e)),
         };
         if packet.track_id() != track_id {
             continue;
         }
         if let Some(o) = opus.as_mut() {
             rate = OPUS_RATE;
-            samples.extend(o.decode(&packet.data).map_err(unsupported)?);
+            samples.extend(o.decode(&packet.data).map_err(damaged)?);
             continue;
         }
         let decoder = decoder.as_mut().expect("non-Opus tracks have a symphonia decoder");
@@ -140,12 +163,21 @@ pub fn decode(path: &Path) -> Result<Audio, AudioError> {
             }
             // A damaged packet is skipped; the rest of the file still plays.
             Err(SymError::DecodeError(_)) => continue,
-            Err(e) => return Err(unsupported(e.to_string())),
+            Err(e) => return Err(read_error(e)),
         }
     }
 
-    // Ogg Opus ends at its last granule position, which counts the pre-skip (RFC 7845 section 4).
+    // Opus ends at the stream length, which counts the pre-skip: in Ogg the last granule
+    // position (RFC 7845 section 4), in Matroska/WebM the segment duration in its own time
+    // base (whole milliseconds, so up to 1 ms of padding can stay).
     if let (Some(o), Some(end)) = (&opus, params.n_frames) {
+        let end = match params.time_base {
+            Some(tb) => {
+                let n = u128::from(end) * u128::from(tb.numer) * u128::from(OPUS_RATE) / u128::from(tb.denom.max(1));
+                u64::try_from(n).unwrap_or(u64::MAX)
+            }
+            None => end,
+        };
         let keep = end.saturating_sub(o.pre_skip as u64) as usize;
         if keep > 0 {
             samples.truncate(keep);
@@ -153,7 +185,7 @@ pub fn decode(path: &Path) -> Result<Audio, AudioError> {
     }
 
     if rate == 0 || samples.is_empty() {
-        return Err(unsupported("no sound could be decoded".into()));
+        return Err(damaged("no sound could be decoded".into()));
     }
     Ok(Audio { samples, rate })
 }

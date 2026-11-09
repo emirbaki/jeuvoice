@@ -110,8 +110,10 @@ fn real_batch_with_one_bad_file() {
                 failed += 1;
                 eprintln!("FAILED {} | {e}", path.file_name().unwrap().to_string_lossy());
                 assert_eq!(path, &bad);
-                assert!(!e.is_empty() && e.ends_with('.'), "error should be a plain sentence: {e}");
-                assert!(!e.contains("Unsupported {") && !e.contains("panicked"), "raw error: {e}");
+                assert_eq!(
+                    e,
+                    "JeuVoice cannot read this file type: bozuk.mp4. Save it as .wav, .mp3 or .mp4 and drop it again."
+                );
             }
             other => panic!("unexpected state for {}: {other:?}", path.display()),
         }
