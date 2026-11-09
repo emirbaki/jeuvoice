@@ -16,3 +16,6 @@ tempfile = "3"
 serde = { version = "1", features = ["derive"] }
 opuscule = "0.2.2"
 similar = "2"
+whisper-rs = { version = "=0.16.0", default-features = false }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+directories = "5"
