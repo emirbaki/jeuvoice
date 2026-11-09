@@ -4,5 +4,6 @@ pub mod peaks;
 pub mod queue;
 pub mod script_diff;
 pub mod subtitles;
+pub mod terms;
 pub mod transcript;
 pub mod turkish;
