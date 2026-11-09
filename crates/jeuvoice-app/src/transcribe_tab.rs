@@ -16,7 +16,7 @@ pub const MEDIA: [&str; 11] = ["wav", "mp3", "m4a", "aac", "ogg", "opus", "flac"
 const LEFT_W: f32 = 240.0;
 const RIGHT_W: f32 = 290.0;
 
-fn red() -> Color {
+pub(crate) fn red() -> Color {
     oklch(0.66, 0.2, 25.0)
 }
 fn green() -> Color {
@@ -36,7 +36,7 @@ pub fn view(s: &TranscribeTab) -> El {
 }
 
 /// A small button. `on` runs on press. A disabled button ignores presses.
-fn button(key: &str, label: &str, enabled: bool, on: impl Fn(&mut App, &mut Tx) + 'static) -> El {
+pub(crate) fn button(key: &str, label: &str, enabled: bool, on: impl Fn(&mut App, &mut Tx) + 'static) -> El {
     let t = tok::theme(true);
     let b = el()
         .key(key)
@@ -52,7 +52,7 @@ fn button(key: &str, label: &str, enabled: bool, on: impl Fn(&mut App, &mut Tx) 
     if enabled { b.on_press_tx(on) } else { b }
 }
 
-fn section(title: &str) -> El {
+pub(crate) fn section(title: &str) -> El {
     text(title).font(type_::SECTION).color(tok::theme(true).text_secondary)
 }
 

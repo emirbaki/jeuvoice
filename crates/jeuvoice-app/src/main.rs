@@ -3,6 +3,8 @@
 mod cache;
 mod marks;
 mod playback;
+mod settings;
+mod settings_tab;
 mod state;
 mod transcribe_tab;
 mod view;
@@ -13,10 +15,12 @@ use std::sync::{Arc, Mutex};
 use jeuvoice_core::transcript::Transcript;
 use jeuvoice_whisper::{TranscribeOptions, Transcriber, WhisperError, WhisperRs, download_model, model_path};
 use rune::AppSpec;
-use state::{App, Deps, EnsureModel};
+use settings::Settings;
+use state::{App, Deps, EnsureModel, ModelHost};
 
 /// whisper.cpp, loaded on the first transcription (on the worker thread). A failed load is
-/// not kept, so the next file tries again.
+/// not kept, so the next file tries again. The app drops the loaded model when the GPU choice
+/// changes (`ModelHost::unload`), and the next file loads it again with the new choice.
 #[derive(Default)]
 struct LazyWhisper(Mutex<Option<Arc<WhisperRs>>>);
 
@@ -38,9 +42,26 @@ impl Transcriber for LazyWhisper {
     }
 }
 
-/// Download the model on first use. It reports progress only while it downloads.
+impl ModelHost for LazyWhisper {
+    fn file_exists(&self) -> bool {
+        model_path().exists()
+    }
+
+    fn loaded_on_gpu(&self) -> Option<bool> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|m| m.on_gpu)
+    }
+
+    fn unload(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// Download the model if it is missing. It reports progress only while it downloads. One
+/// download runs at a time: a second caller waits, then finds the file.
 fn ensure_model() -> EnsureModel {
-    Arc::new(|progress: &mut dyn FnMut(u64, u64)| {
+    let one_at_a_time = Mutex::new(());
+    Arc::new(move |progress: &mut dyn FnMut(u64, u64)| {
+        let _turn = one_at_a_time.lock().unwrap_or_else(|e| e.into_inner());
         if model_path().exists() {
             return Ok(());
         }
@@ -49,11 +70,15 @@ fn ensure_model() -> EnsureModel {
 }
 
 fn init() -> App {
+    let whisper = Arc::new(LazyWhisper::default());
     App::new(Deps {
-        transcriber: Arc::new(LazyWhisper::default()),
+        transcriber: whisper.clone(),
         ensure_model: Some(ensure_model()),
         cache_dir: cache::default_dir(),
         sound: true,
+        model: Some(whisper),
+        settings: Settings::load(),
+        settings_path: Settings::default_path(),
     })
 }
 

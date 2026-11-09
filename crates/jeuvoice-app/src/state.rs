@@ -19,6 +19,7 @@ use rune::{FileDialogOptions, Latest, TextEdit, Tx, Waker};
 
 use crate::cache;
 use crate::playback::Playback;
+use crate::settings::Settings;
 use crate::waveform::WaveView;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +34,16 @@ pub enum Tab {
 /// bytes total), with a total of 0 when the size is unknown. The error is plain words.
 pub type EnsureModel = Arc<dyn Fn(&mut dyn FnMut(u64, u64)) -> Result<(), String> + Send + Sync>;
 
+/// The speech model as the app sees it: the file on disk and the copy loaded in memory.
+pub trait ModelHost: Send + Sync {
+    /// Whether the model file is on disk.
+    fn file_exists(&self) -> bool;
+    /// `Some(on GPU)` once the model is loaded, `None` before.
+    fn loaded_on_gpu(&self) -> Option<bool>;
+    /// Drop the loaded model. The next transcription loads it again.
+    fn unload(&self);
+}
+
 /// What the app runs on. `main` passes the real ones, tests pass fakes.
 pub struct Deps {
     pub transcriber: Arc<dyn Transcriber>,
@@ -42,16 +53,50 @@ pub struct Deps {
     pub cache_dir: Option<PathBuf>,
     /// Open the sound output for playback. Tests turn it off.
     pub sound: bool,
+    /// The model file and the loaded model. `None` when there is no model (tests): the
+    /// Settings tab then shows "Ready".
+    pub model: Option<Arc<dyn ModelHost>>,
+    pub settings: Settings,
+    /// Where settings are saved. `None` turns saving off.
+    pub settings_path: Option<PathBuf>,
 }
 
 pub struct App {
     pub tab: Tab,
     pub transcribe: TranscribeTab,
+    pub settings: Settings,
+    /// Why the last save of the settings failed, in plain words.
+    pub settings_error: Option<String>,
+    settings_path: Option<PathBuf>,
 }
 
 impl App {
     pub fn new(deps: Deps) -> Self {
-        Self { tab: Tab::Transcribe, transcribe: TranscribeTab::new(deps) }
+        let (settings, settings_path) = (deps.settings.clone(), deps.settings_path.clone());
+        Self { tab: Tab::Transcribe, transcribe: TranscribeTab::new(deps), settings, settings_error: None, settings_path }
+    }
+
+    pub fn set_language(&mut self, code: &str) {
+        if self.settings.whisper_language != code {
+            self.settings.whisper_language = code.to_string();
+            self.save_settings();
+        }
+    }
+
+    pub fn set_use_gpu(&mut self, on: bool) {
+        if self.settings.use_gpu != on {
+            self.settings.use_gpu = on;
+            self.transcribe.drop_loaded_model();
+            self.save_settings();
+        }
+    }
+
+    /// Save now, on the UI thread: the file is tiny.
+    fn save_settings(&mut self) {
+        let Some(path) = &self.settings_path else { return };
+        self.settings_error = self.settings.save_to(path).err().map(|e| {
+            format!("The settings could not be saved in {}: {e}. Your choice works until you close JeuVoice.", path.display())
+        });
     }
 
     /// `AppSpec::setup`: starts the transcription worker with the window's waker.
@@ -61,7 +106,7 @@ impl App {
 
     /// `AppSpec::poll`: takes in what the other threads finished.
     pub fn poll(s: &mut App, _clock: f64, tx: &mut Tx) -> bool {
-        s.transcribe.poll(tx)
+        s.transcribe.poll(tx, &s.settings)
     }
 }
 
@@ -109,6 +154,17 @@ enum Event {
     Script(String),
     /// A line for the user: a file saved, or why it was not.
     Notice(String),
+    /// The download that the Settings tab started ended.
+    ModelDownloaded(Result<(), String>),
+}
+
+/// The speech model as the Settings tab shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelStatus {
+    /// The model file is on disk.
+    pub ready: bool,
+    /// `Some(on GPU)` once the model is loaded.
+    pub on_gpu: Option<bool>,
 }
 
 /// The selected file's waveform.
@@ -136,6 +192,13 @@ pub struct TranscribeTab {
     pub download: Option<Option<u8>>,
     /// The last thing to tell the user: a file saved, or an error that belongs to no file row.
     pub notice: Option<String>,
+    pub model: ModelStatus,
+    /// Why the download from the Settings tab failed.
+    pub model_error: Option<String>,
+    /// The download from the Settings tab runs. No job starts until it ends.
+    model_busy: bool,
+    /// The loaded model must go before the next job (the GPU choice changed).
+    unload_pending: bool,
     deps: Deps,
     waker: Waker,
     jobs: Option<Sender<(usize, Job)>>,
@@ -169,6 +232,10 @@ impl TranscribeTab {
             loaded: None,
             download: None,
             notice: None,
+            model: ModelStatus { ready: true, on_gpu: None },
+            model_error: None,
+            model_busy: false,
+            unload_pending: false,
             deps,
             waker: Arc::new(|| {}),
             jobs: None,
@@ -185,12 +252,62 @@ impl TranscribeTab {
     }
 
     fn setup(&mut self, waker: Waker) {
+        self.refresh_model();
         let (jobs_tx, jobs_rx) = mpsc::channel();
         let wake = waker.clone();
         spawn_worker(jobs_rx, self.updates_tx.clone(), move || wake());
         self.decode.set_waker(waker.clone());
         self.jobs = Some(jobs_tx);
         self.waker = waker;
+    }
+
+    /// Read the model file and the loaded model again.
+    fn refresh_model(&mut self) {
+        self.model = match &self.deps.model {
+            Some(m) => ModelStatus { ready: m.file_exists(), on_gpu: m.loaded_on_gpu() },
+            None => ModelStatus { ready: true, on_gpu: None },
+        };
+    }
+
+    fn job_running(&self) -> bool {
+        self.queue.items.iter().any(|(_, s)| matches!(s, ItemState::Running(_)))
+    }
+
+    /// A job or the Settings download uses the model now.
+    pub fn busy(&self) -> bool {
+        self.download.is_some() || self.model_busy || self.job_running()
+    }
+
+    /// The GPU choice changed: load the model again for the next job. A running job keeps its
+    /// copy, so the model goes when nothing runs (`poll`).
+    fn drop_loaded_model(&mut self) {
+        self.unload_pending = true;
+    }
+
+    /// Download the model on a worker and show the progress. Does nothing while a download or
+    /// a job runs, so two downloads never run at once.
+    pub fn start_model_download(&mut self) {
+        let Some(ensure) = self.deps.ensure_model.clone() else { return };
+        if self.busy() || self.model.ready {
+            return;
+        }
+        self.model_busy = true;
+        self.model_error = None;
+        self.download = Some(None);
+        let (events, wake) = (self.events_tx.clone(), self.waker.clone());
+        std::thread::spawn(move || {
+            let mut last = None;
+            let result = ensure(&mut |done, total| {
+                let pct = (total > 0).then(|| (done.saturating_mul(100) / total).min(100) as u8);
+                if last != Some(pct) {
+                    last = Some(pct);
+                    let _ = events.send(Event::Download(pct));
+                    wake();
+                }
+            });
+            let _ = events.send(Event::ModelDownloaded(result));
+            wake();
+        });
     }
 
     /// The transcript of item `i`, if it is done.
@@ -421,7 +538,7 @@ impl TranscribeTab {
 
     /// The job for one file: get the model, decode, transcribe, save to the cache. Runs on the
     /// worker thread.
-    fn job(&self, path: PathBuf) -> Job {
+    fn job(&self, path: PathBuf, opts: TranscribeOptions) -> Job {
         let transcriber = self.deps.transcriber.clone();
         let ensure_model = self.deps.ensure_model.clone();
         let cache_dir = self.deps.cache_dir.clone();
@@ -439,7 +556,6 @@ impl TranscribeTab {
                 })?;
             }
             let a = audio::decode(&path).map_err(|e| e.to_string())?;
-            let opts = TranscribeOptions { language: "tr".into(), use_gpu: true };
             let t = transcriber.transcribe(&audio::to_whisper(&a), &opts, progress).map_err(|e| e.to_string())?;
             if let Some(dir) = cache_dir
                 && let Err(e) = cache::save(&dir, &path, &t)
@@ -451,21 +567,21 @@ impl TranscribeTab {
     }
 
     /// Start the next waiting file when nothing runs and no cache lookup is out.
-    fn start_next(&mut self) -> bool {
+    fn start_next(&mut self, settings: &Settings) -> bool {
         let Some(jobs) = &self.jobs else { return false };
-        let running = self.queue.items.iter().any(|(_, s)| matches!(s, ItemState::Running(_)));
-        if running || self.lookups > 0 {
+        if self.job_running() || self.model_busy || self.lookups > 0 {
             return false;
         }
         let Some(i) = self.queue.take_next() else { return false };
-        let job = self.job(self.queue.items[i].0.clone());
+        let opts = TranscribeOptions { language: settings.whisper_language.clone(), use_gpu: settings.use_gpu };
+        let job = self.job(self.queue.items[i].0.clone(), opts);
         if jobs.send((i, job)).is_err() {
             self.queue.apply(i, Update::Failed("The transcription worker stopped. Restart JeuVoice.".into()));
         }
         true
     }
 
-    fn poll(&mut self, tx: &mut Tx) -> bool {
+    fn poll(&mut self, tx: &mut Tx, settings: &Settings) -> bool {
         let mut changed = false;
         // Events first: a job sends all its download events before its first progress update.
         while let Ok(e) = self.events.try_recv() {
@@ -482,6 +598,12 @@ impl TranscribeTab {
                 }
                 Event::Script(text) => self.script_field.replace_text(text),
                 Event::Notice(n) => self.notice = Some(n),
+                Event::ModelDownloaded(result) => {
+                    self.model_busy = false;
+                    self.download = None;
+                    self.model_error = result.err();
+                    self.refresh_model();
+                }
             }
         }
         while let Ok((i, u)) = self.updates.try_recv() {
@@ -491,6 +613,7 @@ impl TranscribeTab {
             self.queue.apply(i, u);
             if finished {
                 self.select_if_none(i);
+                self.refresh_model();
             }
         }
         if let Some(answer) = self.decode.take() {
@@ -502,7 +625,15 @@ impl TranscribeTab {
             self.script = self.script_field.text.clone();
             self.refresh_diff();
         }
-        changed |= self.start_next();
+        if self.unload_pending && !self.job_running() {
+            self.unload_pending = false;
+            if let Some(m) = &self.deps.model {
+                m.unload();
+            }
+            self.refresh_model();
+            changed = true;
+        }
+        changed |= self.start_next(settings);
         changed |= self.follow_playback(tx);
         changed
     }
