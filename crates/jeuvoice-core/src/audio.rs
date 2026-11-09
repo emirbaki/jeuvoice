@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use rubato::{FftFixedIn, Resampler};
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
+use symphonia::core::codecs::{CODEC_TYPE_NULL, CODEC_TYPE_OPUS, DecoderOptions};
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
@@ -73,7 +73,12 @@ pub fn decode(path: &Path) -> Result<Audio, AudioError> {
         hint.with_extension(ext);
     }
     let mut format = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions { enable_gapless: true, ..Default::default() },
+            &MetadataOptions::default(),
+        )
         .map_err(|e| unsupported(e.to_string()))?
         .format;
 
@@ -84,9 +89,21 @@ pub fn decode(path: &Path) -> Result<Audio, AudioError> {
         .ok_or_else(|| AudioError::NoAudioTrack(path.to_path_buf()))?;
     let track_id = track.id;
     let params = track.codec_params.clone();
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&params, &DecoderOptions::default())
-        .map_err(|e| unsupported(e.to_string()))?;
+    // symphonia reads Opus in Ogg but cannot decode it, so Opus has its own decoder.
+    let mut opus = if params.codec == CODEC_TYPE_OPUS {
+        Some(OpusDecoder::new(params.extra_data.as_deref().unwrap_or_default()).map_err(unsupported)?)
+    } else {
+        None
+    };
+    let mut decoder = if opus.is_none() {
+        Some(
+            symphonia::default::get_codecs()
+                .make(&params, &DecoderOptions::default())
+                .map_err(|e| unsupported(e.to_string()))?,
+        )
+    } else {
+        None
+    };
 
     let mut rate = params.sample_rate.unwrap_or(0);
     let mut samples: Vec<f32> = Vec::new();
@@ -102,6 +119,12 @@ pub fn decode(path: &Path) -> Result<Audio, AudioError> {
         if packet.track_id() != track_id {
             continue;
         }
+        if let Some(o) = opus.as_mut() {
+            rate = OPUS_RATE;
+            samples.extend(o.decode(&packet.data).map_err(unsupported)?);
+            continue;
+        }
+        let decoder = decoder.as_mut().expect("non-Opus tracks have a symphonia decoder");
         match decoder.decode(&packet) {
             Ok(decoded) => {
                 let spec = *decoded.spec();
@@ -118,6 +141,14 @@ pub fn decode(path: &Path) -> Result<Audio, AudioError> {
             // A damaged packet is skipped; the rest of the file still plays.
             Err(SymError::DecodeError(_)) => continue,
             Err(e) => return Err(unsupported(e.to_string())),
+        }
+    }
+
+    // Ogg Opus ends at its last granule position, which counts the pre-skip (RFC 7845 section 4).
+    if let (Some(o), Some(end)) = (&opus, params.n_frames) {
+        let keep = end.saturating_sub(o.pre_skip as u64) as usize;
+        if keep > 0 {
+            samples.truncate(keep);
         }
     }
 
@@ -165,4 +196,58 @@ pub fn resample(a: &Audio, rate: u32) -> Audio {
 /// 16 kHz mono samples for Whisper.
 pub fn to_whisper(a: &Audio) -> Vec<f32> {
     resample(a, WHISPER_RATE).samples
+}
+
+const OPUS_RATE: u32 = 48_000;
+
+/// Ogg Opus packets to mono samples, with the pre-skip and output gain of RFC 7845.
+struct OpusDecoder {
+    decoder: opuscule::Decoder,
+    channels: usize,
+    pre_skip: usize,
+    /// Decoded frames still to drop for the pre-skip.
+    skip: usize,
+    gain: f32,
+    buffer: Vec<f32>,
+}
+
+impl OpusDecoder {
+    /// From the `OpusHead` identification header (RFC 7845 section 5.1).
+    fn new(head: &[u8]) -> Result<Self, String> {
+        if head.len() < 19 || &head[..8] != b"OpusHead" {
+            return Err("Opus track without an OpusHead header".into());
+        }
+        let channels = head[9] as usize;
+        if head[18] != 0 || !(1..=2).contains(&channels) {
+            return Err(format!("Opus with {channels} channels is not supported"));
+        }
+        let pre_skip = u16::from_le_bytes([head[10], head[11]]) as usize;
+        let gain_db = i16::from_le_bytes([head[16], head[17]]) as f32 / 256.0;
+        let layout = if channels == 1 { opuscule::Channels::Mono } else { opuscule::Channels::Stereo };
+        Ok(Self {
+            decoder: opuscule::Decoder::new(opuscule::SampleRate::Hz48000, layout),
+            channels,
+            pre_skip,
+            skip: pre_skip,
+            gain: 10f32.powf(gain_db / 20.0),
+            // 120 ms, the longest packet.
+            buffer: vec![0.0; 5760 * channels],
+        })
+    }
+
+    fn decode(&mut self, packet: &[u8]) -> Result<Vec<f32>, String> {
+        let frames = match self.decoder.decode(Some(packet), &mut self.buffer, false) {
+            Ok(frames) => frames,
+            // A damaged packet is skipped, as a player would.
+            Err(opuscule::Error::InvalidPacket) => return Ok(Vec::new()),
+            Err(e) => return Err(format!("Opus: {e}")),
+        };
+        let start = self.skip.min(frames);
+        self.skip -= start;
+        let ch = self.channels;
+        Ok(self.buffer[start * ch..frames * ch]
+            .chunks(ch)
+            .map(|f| f.iter().sum::<f32>() / ch as f32 * self.gain)
+            .collect())
+    }
 }

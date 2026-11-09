@@ -57,3 +57,15 @@ fn missing_file_is_not_found() {
     assert!(matches!(err, AudioError::NotFound(_)));
     assert!(err.to_string().starts_with("Cannot find the file"));
 }
+
+#[test]
+fn decodes_ogg_opus() {
+    // 0.5 s of a 440 Hz sine, mono, made with ffmpeg.
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sine-opus.ogg");
+    let a = decode(&p).unwrap();
+    assert_eq!(a.rate, 48000);
+    assert_eq!(a.samples.len(), 24_000, "pre-skip and end trim applied once");
+    let mid = &a.samples[6000..18000];
+    let rms = (mid.iter().map(|s| s * s).sum::<f32>() / mid.len() as f32).sqrt();
+    assert!((0.05..0.6).contains(&rms), "rms {rms}");
+}

@@ -1303,6 +1303,7 @@ name = "jeuvoice-core"
 version = "0.0.1"
 dependencies = [
  "hound",
+ "opuscule",
  "rubato",
  "symphonia",
  "tempfile",
