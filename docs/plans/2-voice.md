@@ -93,7 +93,7 @@ The agent cannot run this. Write it so a teammate with an Apple Silicon Mac can 
 - [ ] **Step 1: Write failing tests:** fake backend tests (length rule, seed changes the samples, `seed_for`). `test_same_sound` (GPU): render the first paragraph of a fixture script with the default preset through `OmniVoiceBackend`, then run `try_omnivoice.py` on the same paragraph with the same flags (`--by-paragraph --pause 0.1 --para-pause 0.3 --guidance-scale 2.5 --quote-term "The Last of Us" --lora-adapter <tts_lab ckpt-6000> --ref <ses_001_0007.wav> --ref-text <ses_001_0007.txt> --out <tmp name>`) with `PYTHONPATH=third_party/omnivoice_env` and the `.venv_ml` python **only as a read-only reference run** (it writes into `tts_lab/outputs/<tmp name>`: use a name starting with `jeuvoice_check_` and delete that folder after the test). Assert max abs difference ≤ 1e-4 for every part.
 - [ ] **Step 2:** Run. Expected: FAIL.
 - [ ] **Step 3:** Implement.
-- [ ] **Step 4:** Run the fake tests, then `pytest -m gpu --gpu`. Expected: PASS. If the reference run differs, find why before you continue (dtype, tokenizer device, seed order). Write the max difference in the report.
+- [ ] **Step 4:** Run the fake tests, then `pytest -m gpu --gpu`. Expected: PASS. If the reference run differs, find why before you continue (dtype, tokenizer device, seed order). Write the max difference in the report. NOTE: the reference CLI needs `PYTHONPATH=third_party/omnivoice_src` (the pinned source checkout with `utils/lora`); `omnivoice_env` is older and has no LoRA support.
 - [ ] **Step 5:** Commit: `feat(engine): OmniVoice backend matching the CLI`.
 
 Note: the reference run writes into tts_lab/outputs. This is the only allowed write there. Ask the user once before the first run.

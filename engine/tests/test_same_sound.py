@@ -54,8 +54,15 @@ def test_same_sound_as_cli():
     try:
         script_file.write_text(REF_SCRIPT, encoding="utf-8")
         venv_python = TTS_LAB / ".." / ".venv_ml" / "Scripts" / "python.exe"
-        env = {"PYTHONPATH": str(TTS_LAB / "third_party" / "omnivoice_env")}
+        # NOTE: omnivoice_src (pinned source checkout, has utils.lora), not
+        # omnivoice_env (older, no LoRA support). Hashes match the pinned commit.
+        # omnivoice_env stays second on the path for deps (pydub, ...).
         import os
+
+        env = {"PYTHONPATH": os.pathsep.join([
+            str(TTS_LAB / "third_party" / "omnivoice_src"),
+            str(TTS_LAB / "third_party" / "omnivoice_env"),
+        ])}
 
         cmd = [
             str(venv_python), "scripts/try_omnivoice.py", str(script_file),

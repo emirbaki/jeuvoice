@@ -21,4 +21,11 @@ uv pip install --python engine\.venv\Scripts\python.exe ^
     soundfile numpy huggingface_hub pytest
 if errorlevel 1 exit /b 1
 
+rem TorchAudio: CPU build, like the working tts_lab env (torch 2.14.0+cu126 with
+rem torchaudio 2.11.0+cpu passes the CUDA-version check; the default index gives
+rem a cu128 build that refuses to import next to cu126 torch).
+uv pip install --python engine\.venv\Scripts\python.exe --no-deps ^
+    --index-url https://download.pytorch.org/whl/cpu torchaudio==2.11.0
+if errorlevel 1 exit /b 1
+
 echo Done. Run: engine\.venv\Scripts\python -m pytest engine/tests -q
