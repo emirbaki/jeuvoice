@@ -41,51 +41,80 @@ impl Cursor {
     }
 }
 
+/// Everything the audio callback and the UI methods share. Always changed under one lock.
+struct State {
+    samples: Arc<Vec<f32>>,
+    cursor: Cursor,
+}
+
+/// Lock-free copies of the state for cheap reads on the UI thread.
+struct Mirror {
+    pos: AtomicU64,
+    playing: AtomicBool,
+}
+
+impl Mirror {
+    fn publish(&self, c: &Cursor) {
+        self.pos.store(c.pos, Ordering::SeqCst);
+        self.playing.store(c.playing, Ordering::SeqCst);
+    }
+}
+
 /// Plays one loaded clip on the default output device.
 ///
 /// Not `Send`: the cpal stream must stay on the thread that created it (the UI thread).
 pub struct Playback {
     _stream: cpal::Stream,
     rate: u32,
-    samples: Arc<Mutex<Arc<Vec<f32>>>>,
-    pos: Arc<AtomicU64>,
-    playing: Arc<AtomicBool>,
+    state: Arc<Mutex<State>>,
+    mirror: Arc<Mirror>,
 }
 
 impl Playback {
     pub fn new() -> Result<Self, String> {
         let device = cpal::default_host().default_output_device().ok_or(NO_DEVICE)?;
-        let config = device.default_output_config().map_err(|_| NO_DEVICE.to_string())?;
+        let config = device
+            .default_output_config()
+            .map_err(|e| format!("Could not read the sound output settings: {e}"))?;
         let rate = config.sample_rate().0;
         let channels = config.channels() as usize;
         let format = config.sample_format();
         let config: cpal::StreamConfig = config.into();
 
-        let samples: Arc<Mutex<Arc<Vec<f32>>>> = Arc::new(Mutex::new(Arc::new(Vec::new())));
-        let pos = Arc::new(AtomicU64::new(0));
-        let playing = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(Mutex::new(State {
+            samples: Arc::new(Vec::new()),
+            cursor: Cursor::new(0, rate),
+        }));
+        let mirror = Arc::new(Mirror { pos: AtomicU64::new(0), playing: AtomicBool::new(false) });
 
-        let (s, p, pl) = (samples.clone(), pos.clone(), playing.clone());
+        let (st, mi) = (state.clone(), mirror.clone());
         let err_fn = |e| eprintln!("sound output error: {e}");
         let stream = match format {
             cpal::SampleFormat::F32 => device.build_output_stream(
                 &config,
-                move |out: &mut [f32], _: &cpal::OutputCallbackInfo| fill(out, channels, &s, &p, &pl, rate),
+                move |out: &mut [f32], _: &cpal::OutputCallbackInfo| run_callback(&st, &mi, out, channels),
                 err_fn,
                 None,
             ),
-            cpal::SampleFormat::I16 => device.build_output_stream(
-                &config,
-                move |out: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                    let mut tmp = vec![0.0f32; out.len()];
-                    fill(&mut tmp, channels, &s, &p, &pl, rate);
-                    for (o, t) in out.iter_mut().zip(tmp) {
-                        *o = (t.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-                    }
-                },
-                err_fn,
-                None,
-            ),
+            cpal::SampleFormat::I16 => {
+                // Scratch buffer allocated once; it only grows if the device asks for more.
+                let mut scratch = vec![0.0f32; 16_384 * channels];
+                device.build_output_stream(
+                    &config,
+                    move |out: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                        if scratch.len() < out.len() {
+                            scratch.resize(out.len(), 0.0);
+                        }
+                        let tmp = &mut scratch[..out.len()];
+                        run_callback(&st, &mi, tmp, channels);
+                        for (o, t) in out.iter_mut().zip(tmp.iter()) {
+                            *o = (t.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+            }
             _ => return Err("This sound output is not supported.".to_string()),
         }
         .map_err(|e| format!("Could not open the sound output: {e}"))?;
@@ -93,86 +122,74 @@ impl Playback {
             .play()
             .map_err(|e| format!("Could not start the sound output: {e}"))?;
 
-        Ok(Self { _stream: stream, rate, samples, pos, playing })
+        Ok(Self { _stream: stream, rate, state, mirror })
     }
 
     /// Load a clip (resampled once to the device rate). Stops playback and rewinds.
     pub fn load(&mut self, a: Arc<Audio>) {
         let data = if a.rate == self.rate { a.samples.clone() } else { resample(&a, self.rate).samples };
-        self.playing.store(false, Ordering::SeqCst);
-        self.pos.store(0, Ordering::SeqCst);
-        *self.samples.lock().unwrap() = Arc::new(data);
+        let mut st = self.state.lock().unwrap();
+        st.cursor = Cursor::new(data.len() as u64, self.rate);
+        st.samples = Arc::new(data);
+        self.mirror.publish(&st.cursor);
     }
 
     pub fn play(&mut self) {
-        let c = self.cursor();
-        if c.pos >= c.len {
-            self.pos.store(0, Ordering::SeqCst);
+        let mut st = self.state.lock().unwrap();
+        if st.cursor.pos >= st.cursor.len {
+            st.cursor.pos = 0;
         }
-        self.playing.store(c.len > 0, Ordering::SeqCst);
+        st.cursor.playing = st.cursor.len > 0;
+        self.mirror.publish(&st.cursor);
     }
 
     pub fn pause(&mut self) {
-        self.playing.store(false, Ordering::SeqCst);
+        let mut st = self.state.lock().unwrap();
+        st.cursor.playing = false;
+        self.mirror.publish(&st.cursor);
     }
 
     /// Seek to `t` seconds, clamped to the clip.
     pub fn seek(&mut self, t: f64) {
-        let mut c = self.cursor();
-        c.seek(t);
-        self.pos.store(c.pos, Ordering::SeqCst);
+        let mut st = self.state.lock().unwrap();
+        st.cursor.seek(t);
+        self.mirror.publish(&st.cursor);
     }
 
     /// Position in seconds.
     pub fn position(&self) -> f64 {
-        self.cursor().position_seconds()
+        self.mirror.pos.load(Ordering::SeqCst) as f64 / self.rate as f64
     }
 
     pub fn is_playing(&self) -> bool {
-        self.playing.load(Ordering::SeqCst)
-    }
-
-    fn cursor(&self) -> Cursor {
-        let len = self.samples.lock().unwrap().len() as u64;
-        Cursor {
-            len,
-            rate: self.rate,
-            pos: self.pos.load(Ordering::SeqCst),
-            playing: self.playing.load(Ordering::SeqCst),
-        }
+        self.mirror.playing.load(Ordering::SeqCst)
     }
 }
 
-/// Audio callback body: copy mono samples to every channel, or write silence.
-fn fill(
-    out: &mut [f32],
-    channels: usize,
-    samples: &Mutex<Arc<Vec<f32>>>,
-    pos: &AtomicU64,
-    playing: &AtomicBool,
-    rate: u32,
-) {
+/// Take the lock without waiting; write silence if the UI holds it.
+fn run_callback(state: &Mutex<State>, mirror: &Mirror, out: &mut [f32], channels: usize) {
+    match state.try_lock() {
+        Ok(mut st) => {
+            fill(&mut st, out, channels);
+            mirror.publish(&st.cursor);
+        }
+        Err(_) => out.fill(0.0),
+    }
+}
+
+/// Pure audio callback body: copy mono samples to every channel, then silence.
+fn fill(state: &mut State, out: &mut [f32], channels: usize) {
     out.fill(0.0);
-    if !playing.load(Ordering::SeqCst) {
+    if !state.cursor.playing {
         return;
     }
-    let Ok(guard) = samples.try_lock() else { return };
-    let data = guard.clone();
-    drop(guard);
-
-    let start = pos.load(Ordering::SeqCst);
-    let mut c = Cursor { len: data.len() as u64, rate, pos: start, playing: true };
-    let frames = (out.len() / channels) as u64;
-    let n = frames.min(c.len.saturating_sub(start)) as usize;
+    let start = state.cursor.pos as usize;
+    let frames = out.len() / channels;
+    let n = frames.min(state.samples.len().saturating_sub(start));
     for i in 0..n {
-        let v = data[start as usize + i];
-        out[i * channels..(i + 1) * channels].fill(v);
+        out[i * channels..(i + 1) * channels].fill(state.samples[start + i]);
     }
-    c.advance(frames);
-    // A seek during this callback wins: only store if the position did not change.
-    if pos.compare_exchange(start, c.pos, Ordering::SeqCst, Ordering::SeqCst).is_ok() && !c.playing {
-        playing.store(false, Ordering::SeqCst);
-    }
+    state.cursor.advance(frames as u64);
 }
 
 #[cfg(test)]
@@ -211,6 +228,46 @@ mod tests {
         assert!((c.position_seconds() - 0.5).abs() < 0.01);
         c.seek(1.0);
         assert!((c.pos as i64 - 48_000).abs() <= 2);
+    }
+
+    fn state(samples: Vec<f32>) -> State {
+        let mut cursor = Cursor::new(samples.len() as u64, 48_000);
+        cursor.playing = true;
+        State { samples: Arc::new(samples), cursor }
+    }
+
+    #[test]
+    fn fill_copies_mono_to_all_channels_and_advances() {
+        let mut st = state(vec![0.1, 0.2, 0.3, 0.4]);
+        let mut out = [9.0f32; 6];
+        fill(&mut st, &mut out, 2);
+        assert_eq!(out, [0.1, 0.1, 0.2, 0.2, 0.3, 0.3]);
+        assert_eq!(st.cursor.pos, 3);
+        assert!(st.cursor.playing);
+    }
+
+    #[test]
+    fn fill_writes_silence_after_the_end_and_stops() {
+        let mut st = state(vec![0.5, 0.6]);
+        let mut out = [9.0f32; 8];
+        fill(&mut st, &mut out, 2);
+        assert_eq!(out, [0.5, 0.5, 0.6, 0.6, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(st.cursor.pos, 2);
+        assert!(!st.cursor.playing);
+    }
+
+    #[test]
+    fn seek_after_loading_a_shorter_clip_starts_from_the_new_clip() {
+        let mut st = state(vec![0.1; 1000]);
+        let mut out = [0.0f32; 4];
+        fill(&mut st, &mut out, 1);
+        // Load a shorter clip, then seek inside it.
+        st.samples = Arc::new(vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
+        st.cursor = Cursor::new(6, 48_000);
+        st.cursor.seek(2.0 / 48_000.0);
+        st.cursor.playing = true;
+        fill(&mut st, &mut out, 1);
+        assert_eq!(out, [0.3, 0.4, 0.5, 0.6]);
     }
 
     /// Manual check: needs a sound device. Run with `-- --ignored --nocapture`.
