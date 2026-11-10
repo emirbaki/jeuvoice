@@ -4,18 +4,19 @@ rem git refs are cloned to resolve their hashes.
 setlocal
 cd /d "%~dp0.."
 
-rem Windows: torch from the CUDA 12.6 index, the rest from PyPI.
+rem Windows lock. The torch wheels come by URL from requirements.in; the rest
+rem comes from PyPI, so no index flags are needed.
 uv pip compile engine/requirements.in ^
+    --override engine/overrides.txt ^
     --python-version 3.12 ^
     --python-platform x86_64-pc-windows-msvc ^
-    --index-url https://download.pytorch.org/whl/cu126 ^
-    --extra-index-url https://pypi.org/simple ^
     --generate-hashes ^
     -o engine/requirements-win-cu126.txt
 if errorlevel 1 exit /b 1
 
 rem macOS: everything from PyPI (CPU torch).
 uv pip compile engine/requirements.in ^
+    --override engine/overrides.txt ^
     --python-version 3.12 ^
     --python-platform aarch64-apple-darwin ^
     --generate-hashes ^

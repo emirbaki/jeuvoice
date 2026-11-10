@@ -2,8 +2,13 @@
 # commands pick the torch index per platform). Git refs pin commits so a
 # relock resolves the same code; `uv pip compile --generate-hashes` records
 # every wheel hash in the per-platform lock files.
-torch==2.14.0
-torchaudio==2.11.0
+# Windows takes the exact CUDA/CPU wheels by URL: with two indexes configured
+# PyPI wins over the torch index, so URLs pin the builds deterministically.
+# torch ships no macOS 13 wheels past 2.11, so macOS stays on the 2.11 pair.
+torch @ https://download.pytorch.org/whl/cu126/torch-2.14.0%2Bcu126-cp312-cp312-win_amd64.whl ; sys_platform == "win32"
+torch==2.11.0 ; sys_platform == "darwin"
+torchaudio @ https://download.pytorch.org/whl/cpu/torchaudio-2.11.0%2Bcpu-cp312-cp312-win_amd64.whl ; sys_platform == "win32"
+torchaudio==2.11.0 ; sys_platform == "darwin"
 transformers==5.19.0
 peft==0.21.2
 accelerate==1.15.0

@@ -1,0 +1,10 @@
+# Version overrides for the lock compiles. OmniVoice's own `[tool.uv]`
+# pins `torch==2.8.0`/`torchaudio==2.8.0` (cu128), which fights the working
+# pair below. Overrides outrank a dependency's constraints, including plain
+# pins in requirements.in, so the exact wheels live here.
+# torch ships no macOS 13 wheels past 2.11, so macOS stays on the 2.11 pair.
+# With two indexes configured PyPI wins over the torch index, hence URLs.
+torch @ https://download.pytorch.org/whl/cu126/torch-2.14.0%2Bcu126-cp312-cp312-win_amd64.whl ; sys_platform == "win32"
+torch==2.11.0 ; sys_platform == "darwin"
+torchaudio @ https://download.pytorch.org/whl/cpu/torchaudio-2.11.0%2Bcpu-cp312-cp312-win_amd64.whl ; sys_platform == "win32"
+torchaudio==2.11.0 ; sys_platform == "darwin"
