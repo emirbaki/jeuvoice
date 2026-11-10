@@ -7,6 +7,9 @@ Endpoints (all JSON, all need header X-JeuVoice-Token):
   POST /render          {script, paragraphs|null, preset, terms, base_seed, part_overrides, out_dir} -> {"job": id}
   GET  /jobs/<id>       -> {"state", "progress", "message", "result"|null, "error"|null}
   POST /jobs/<id>/cancel -> takes effect between parts
+  POST /prep/clean    {"clips": [{"id", "audio"}], "out_dir": str} -> {"job": id}
+  POST /prep/hf       {"repo", "config", "split", "audio_col", "text_col"|null, "limit"|null, "token"|null, "out_dir": str} -> {"job": id}
+  POST /prep/manifest {"clips", "sources": [{"name", "weight"}], "dev_ratio", "out_dir": str} -> {"job": id}
   POST /fetch_adapter   {"repo", "subfolder"|null, "token"|null} -> {"ok": true, "path": ...}
                        or {"ok": false, "error": plain words}
   POST /shutdown        -> stops the process.
@@ -173,6 +176,32 @@ def make_handler(state: State, token: str, server_ref: dict):
                 return
             if self.path == "/render":
                 job = state.store.submit("render", make_render_run(state.store, req))
+                self._send(200, {"job": job.id})
+                return
+            if self.path == "/prep/clean":
+                from .dataprep import make_clean_run
+
+                job = state.store.submit(
+                    "prep", make_clean_run(state.store, req.get("clips", []), str(req.get("out_dir", "")))
+                )
+                self._send(200, {"job": job.id})
+                return
+            if self.path == "/prep/hf":
+                from .dataprep import make_hf_run
+
+                job = state.store.submit("prep", make_hf_run(state.store, req))
+                self._send(200, {"job": job.id})
+                return
+            if self.path == "/prep/manifest":
+                from .dataprep import make_manifest_run
+
+                job = state.store.submit(
+                    "prep",
+                    make_manifest_run(
+                        state.store, req.get("clips", []), req.get("sources", []), float(req.get("dev_ratio", 0.02)),
+                        str(req.get("out_dir", "")),
+                    ),
+                )
                 self._send(200, {"job": job.id})
                 return
             if self.path == "/fetch_adapter":

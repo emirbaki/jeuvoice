@@ -5,7 +5,16 @@ description = "JeuVoice voice engine (OmniVoice + tr2 LoRA) over local HTTP"
 requires-python = ">=3.12"
 dependencies = [
     "huggingface_hub",
+    "datasets",
+    "soundfile",
+    "numpy",
+    "scipy",
+    "librosa",
 ]
+# NOTE: datasets decodes Audio-typed columns through torchcodec, whose Windows
+# wheels currently fail to load in this venv. The pipeline below only needs file
+# paths (soundfile reads those), so torchcodec stays out until Hub audio columns
+# are actually used.
 
 [project.optional-dependencies]
 cuda = [

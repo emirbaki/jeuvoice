@@ -18,7 +18,7 @@ uv pip install --python engine\.venv\Scripts\python.exe ^
     transformers==5.19.0 peft==0.21.2 accelerate==1.15.0 ^
     "omnivoice[lora] @ git+https://github.com/k2-fsa/OmniVoice@08be0b4ccbac3e13e374e86fbfead4b4cac343e2" ^
     "trnorm @ git+https://github.com/ozguradmin/ahenk-turkish-tts" ^
-    soundfile numpy huggingface_hub pytest
+    soundfile numpy huggingface_hub datasets librosa scipy pytest
 if errorlevel 1 exit /b 1
 
 rem TorchAudio: CPU build, like the working tts_lab env (torch 2.14.0+cu126 with
