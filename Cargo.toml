@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/jeuvoice-core", "crates/jeuvoice-whisper", "crates/jeuvoice-app", "crates/jeuvoice-engine-client"]
+members = ["crates/jeuvoice-core", "crates/jeuvoice-whisper", "crates/jeuvoice-app", "crates/jeuvoice-engine-client", "crates/jeuvoice-kaggle"]
 
 [workspace.package]
 version = "0.0.1"
