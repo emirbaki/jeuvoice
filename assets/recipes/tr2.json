@@ -1,0 +1,75 @@
+{
+  "name": "tr2",
+  "base_model": "k2-fsa/OmniVoice",
+  "settings": {
+    "steps": 6000,
+    "lora_r": 32,
+    "lora_alpha": 64,
+    "batch_tokens": 2048,
+    "save_steps": 1000,
+    "learning_rate": 0.0001,
+    "start_from": "Base"
+  },
+  "notes": "The tr2 Turkish OmniVoice LoRA (checkpoint-6000): 14,505 Alania clips, 9,171 YODAS clips, 994 Antalia clips, and the user's own voice doubled (710 + 309 clips x2). Measured rows in tts_lab/data/omni2/train.jsonl. Run settings mirror tts_lab/kaggle/omnivoice-tr2.zip config/train.json. Full configs live in that zip.",
+  "sources": [
+    {
+      "name": "alania_a8_tr2",
+      "kind": {
+        "HfDataset": {
+          "repo": "cloud0day3/alania-synthetic-speech-tr",
+          "config": null,
+          "split": "train",
+          "audio_col": "audio",
+          "text_col": "text_spoken"
+        }
+      },
+      "weight": 1,
+      "license": "CC-BY-4.0",
+      "note": "Alania Turkish Synthetic Speech by PatientDesk AI. Prepared from the cc-by parquet shards (data/alania/data/cc-by/train-*.parquet); exact column mapping in tts_lab/scripts/prep_alania_audio8.py."
+    },
+    {
+      "name": "yodas_tr2",
+      "kind": {
+        "HfDataset": {
+          "repo": "espnet/yodas2",
+          "config": "tr000",
+          "split": "train",
+          "audio_col": "audio",
+          "text_col": null
+        }
+      },
+      "weight": 1,
+      "license": "CC-BY-3.0",
+      "note": "YODAS2 tr000 shards, clip list Ertugrul1611/akil-tts-tr v3b-egitim-klipleri.csv; exact mapping in tts_lab/scripts/prep_yodas.py. Empty text means Whisper makes it."
+    },
+    {
+      "name": "antalia",
+      "kind": {
+        "HfDataset": {
+          "repo": "cloud0day3/antalia-voice-corpus",
+          "config": null,
+          "split": "train",
+          "audio_col": "file_name",
+          "text_col": "transcript"
+        }
+      },
+      "weight": 1,
+      "license": "CC-BY-4.0",
+      "note": "Antalia Turkish single-speaker scripted speech; column names from its metadata.jsonl."
+    },
+    {
+      "name": "my_voice_a8",
+      "kind": { "LocalFolder": { "dir": "my_voice_a8" } },
+      "weight": 2,
+      "license": null,
+      "note": "Your own recordings. Point this at your folder."
+    },
+    {
+      "name": "my_voice_a8_clean",
+      "kind": { "LocalFolder": { "dir": "my_voice_a8_clean" } },
+      "weight": 2,
+      "license": null,
+      "note": "Your own recordings. Point this at your folder."
+    }
+  ]
+}

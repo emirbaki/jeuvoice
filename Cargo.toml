@@ -1,11 +1,46 @@
 [workspace]
 resolver = "2"
-members = ["crates/jeuvoice-core", "crates/jeuvoice-whisper", "crates/jeuvoice-app", "crates/jeuvoice-engine-client"]
+members = ["crates/jeuvoice-core", "crates/jeuvoice-whisper", "crates/jeuvoice-app", "crates/jeuvoice-engine-client", "crates/jeuvoice-kaggle"]
 
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
 license = "MIT"
+
+# Keep dev target/ small: line tables for our own crates (backtraces keep file
+# and line numbers), no debuginfo for third-party dependencies (the bulk of the
+# 40+ GB debug/ bloat: DWARF in deps/ plus debuginfo-heavy incremental caches).
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.dev.package.jeuvoice-core]
+debug = 1
+[profile.dev.package.jeuvoice-whisper]
+debug = 1
+[profile.dev.package.jeuvoice-app]
+debug = 1
+[profile.dev.package.jeuvoice-engine-client]
+debug = 1
+[profile.dev.package.jeuvoice-kaggle]
+debug = 1
+
+# `cargo test` inherits dev, but spell it out so test builds stay lean too.
+[profile.test.package."*"]
+debug = false
+
+[profile.test.package.jeuvoice-core]
+debug = 1
+[profile.test.package.jeuvoice-whisper]
+debug = 1
+[profile.test.package.jeuvoice-app]
+debug = 1
+[profile.test.package.jeuvoice-engine-client]
+debug = 1
+[profile.test.package.jeuvoice-kaggle]
+debug = 1
 
 [workspace.dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "b3a33a0f3a5c35d78f188046a040696193cfb6bf" }

@@ -131,7 +131,7 @@ pub struct VoiceTab {
     pub adv_respell: TextEdit,
     pub adv_para_guidance: TextEdit,
     pub adv_para_seed: TextEdit,
-    deps: VoiceDeps,
+    pub(crate) deps: VoiceDeps,
     waker: Waker,
     events_tx: mpsc::Sender<VoiceEvent>,
     events: mpsc::Receiver<VoiceEvent>,
@@ -204,7 +204,7 @@ impl VoiceTab {
         }
     }
 
-    fn refresh_presets(&mut self) {
+    pub(crate) fn refresh_presets(&mut self) {
         self.presets = list_presets(&self.deps.presets_dir);
     }
 

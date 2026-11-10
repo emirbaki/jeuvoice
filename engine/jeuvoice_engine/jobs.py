@@ -21,6 +21,7 @@ from .text import Part, plan_parts
 
 PLAIN_LOAD_ERROR = "The voice model could not be loaded. Try again."
 PLAIN_RENDER_ERROR = "The render failed. Try again."
+PLAIN_PREP_ERROR = "Preparing the data failed. Try again."
 
 
 class Job:
@@ -64,7 +65,12 @@ class JobStore:
             except Exception as e:  # noqa: BLE001 - plain error to the client, traceback to the log
                 self.log.error("job %s failed: %s\n%s", job_id, e, traceback.format_exc())
                 job.state = "failed"
-                job.error = PLAIN_LOAD_ERROR if kind == "load" else PLAIN_RENDER_ERROR
+                if kind == "load":
+                    job.error = PLAIN_LOAD_ERROR
+                elif kind.startswith("prep"):
+                    job.error = PLAIN_PREP_ERROR
+                else:
+                    job.error = PLAIN_RENDER_ERROR
 
         self._queue.put((job, _run, getattr(run, "_is_render", False)))
         return job

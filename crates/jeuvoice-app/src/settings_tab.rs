@@ -33,6 +33,8 @@ pub fn view(s: &App) -> El {
         .child(model_block(&s.transcribe))
         .child(section("Hugging Face token"))
         .child(token_block(s))
+        .child(section("Kaggle profiles"))
+        .child(profiles_block(s))
         .child(section("Voice model files"))
         .child(adapter_block(s))
         .child(section("Voice engine"))
@@ -40,7 +42,12 @@ pub fn view(s: &App) -> El {
     if let Some(e) = &s.settings_error {
         page = page.child(text(e.as_str()).key("settings-error").font(type_::LABEL).color(red()).wrap());
     }
-    row().w_full().grow(1.0).min_h(0.0).justify_center().child(page)
+    col()
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .scroll(rune::ScrollSpec { stick_bottom: false })
+        .child(row().w_full().min_h(0.0).justify_center().child(page))
 }
 
 fn language_picker(current: &str) -> El {
@@ -151,6 +158,63 @@ fn token_block(s: &App) -> El {
         block = block.child(text(m.as_str()).key("files-status").font(type_::LABEL).color(t.text).wrap());
     }
     block
+}
+
+/// Kaggle key profiles: named side-slots in the keychain. The Train tab runs
+/// with the active one; secrets never land in `settings.json`.
+fn profiles_block(s: &App) -> El {
+    let t = tok::theme(true);
+    let mut block = col().gap(space::S2);
+    for name in &s.settings.kaggle_profiles {
+        let on = s.settings.active_kaggle_profile.as_deref() == Some(name);
+        let mut card = row()
+            .w_full()
+            .gap(space::S2)
+            .padding(space::S2)
+            .radius(radius::SM)
+            .fill(if on { tok::accent(0, true) } else { t.card })
+            .child(text(name.as_str()).key(format!("profile-{name}")).font(type_::BODY).color(t.text).grow(1.0).min_w(0.0));
+        if on {
+            card = card.child(text("Active").font(type_::LABEL).color(t.text));
+        } else {
+            let select = name.clone();
+            card = card.child(button(&format!("profile-select-{name}"), "Use", true, move |s: &mut App, _| {
+                s.select_kaggle_profile(&select)
+            }));
+        }
+        let delete = name.clone();
+        card = card.child(button(&format!("profile-delete-{name}"), "Remove", true, move |s: &mut App, _| {
+            s.delete_kaggle_profile(&delete)
+        }));
+        block = block.child(card);
+    }
+    block = block.child(profile_field("profile-name", "Profile name (work, home…)", &s.profile_name_field, |s| &mut s.profile_name_field));
+    block = block.child(profile_field("profile-user", "Kaggle user name", &s.profile_user_field, |s| &mut s.profile_user_field));
+    block = block.child(profile_field("profile-key", "Kaggle key", &s.profile_key_field, |s| &mut s.profile_key_field));
+    block = block.child(button("profile-save", "Save profile", true, |s, _| s.add_kaggle_profile()));
+    block = block.child(
+        text("One key per Kaggle account. The Train tab uses the active profile.")
+            .font(type_::LABEL)
+            .color(t.text_secondary)
+            .wrap(),
+    );
+    if let Some(m) = &s.files_status {
+        block = block.child(text(m.as_str()).key("profiles-status").font(type_::LABEL).color(t.text).wrap());
+    }
+    block
+}
+
+fn profile_field(key: &str, placeholder: &str, value: &rune::TextEdit, on_edit: impl Fn(&mut App) -> &mut rune::TextEdit + 'static) -> El {
+    let t = tok::theme(true);
+    text_input(value, type_::BODY)
+        .key(key)
+        .single_line()
+        .w_full()
+        .padding(space::S2)
+        .radius(radius::SM)
+        .fill(t.card)
+        .placeholder(placeholder, t.text_secondary)
+        .on_edit(on_edit)
 }
 
 /// A local adapter folder that overrides every Hugging Face adapter (development).

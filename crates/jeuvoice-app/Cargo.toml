@@ -6,10 +6,12 @@ license.workspace = true
 
 [dependencies]
 rune = { workspace = true, features = ["native-file-dialog"] }
+arboard = "3"
 hound = "3"
 jeuvoice-core = { path = "../jeuvoice-core" }
 jeuvoice-whisper = { path = "../jeuvoice-whisper" }
 jeuvoice-engine-client = { path = "../jeuvoice-engine-client" }
+jeuvoice-kaggle = { path = "../jeuvoice-kaggle" }
 cpal = "0.15"
 directories.workspace = true
 keyring = "3"

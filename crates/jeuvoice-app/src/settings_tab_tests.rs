@@ -15,6 +15,7 @@ use crate::services::speech::EnsureModel;
 use crate::settings::{HF_TOKEN_KEY, MemStore, Settings, TokenStore};
 use crate::state::{App, Deps, ModelHost};
 use crate::view::view;
+use jeuvoice_kaggle::{KaggleAuth, KeyStore, MemStore as KaggleMemStore};
 
 /// A model that is a flag and a number, so a test can see what the app asks of it.
 #[derive(Default)]
@@ -66,7 +67,7 @@ impl Rig {
         };
         let mut app = App::new(deps);
         App::setup(&mut app, Arc::new(|| {}));
-        let mut rt = Runtime::new(app, view, (1100.0, 720.0), Env { system_dark: true, scale: 2.0 });
+        let mut rt = Runtime::new(app, view, (1100.0, 1600.0), Env { system_dark: true, scale: 2.0 });
         rt.poll = Some(App::poll);
         rt.frame(0.0);
         rt.frame(1.0 / 60.0);
@@ -332,3 +333,37 @@ fn snap_settings() {
     rune::App::new(spec).args(["--snap".to_string(), out.to_string()]).run();
     println!("wrote {out}");
 }
+
+fn add_profile(rig: &mut Rig, name: &str, user: &str, key: &str) {
+    rig.tap("profile-name");
+    rig.rt.paste(name);
+    rig.tap("profile-user");
+    rig.rt.paste(user);
+    rig.tap("profile-key");
+    rig.rt.paste(key);
+    rig.rt.frame(1.0 / 60.0);
+    rig.tap("profile-save");
+}
+
+#[test]
+fn kaggle_profiles_add_select_and_remove() {
+    let mut rig = Rig::new(true);
+    let kaggle = Arc::new(KaggleMemStore::new());
+    rig.rt.state.set_kaggle_store(kaggle.clone());
+    add_profile(&mut rig, "work", "someone", "abc123");
+    assert!(rig.on_screen("profile-work"), "the row appears");
+    assert_eq!(kaggle.load_profile("work"), Some(KaggleAuth { username: "someone".into(), key: "abc123".into() }));
+    assert_eq!(rig.text("profiles-status"), "Saved the Kaggle profile.");
+    let saved = Settings::load_from(&rig.settings_path());
+    assert_eq!(saved.kaggle_profiles, vec!["work".to_string()]);
+    assert_eq!(saved.active_kaggle_profile.as_deref(), Some("work"), "the first profile activates");
+    add_profile(&mut rig, "home", "else", "xyz");
+    assert!(rig.on_screen("profile-home"));
+    rig.tap("profile-select-home");
+    assert_eq!(Settings::load_from(&rig.settings_path()).active_kaggle_profile.as_deref(), Some("home"));
+    rig.tap("profile-delete-work");
+    assert!(!rig.on_screen("profile-work"), "the row goes away");
+    assert_eq!(kaggle.load_profile("work"), None, "the key is forgotten");
+    assert_eq!(Settings::load_from(&rig.settings_path()).kaggle_profiles, vec!["home".to_string()]);
+}
+

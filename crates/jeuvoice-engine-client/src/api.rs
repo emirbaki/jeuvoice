@@ -124,6 +124,44 @@ pub struct RenderResult {
     pub para_pause: f64,
 }
 
+/// One cleaned or fetched training clip, as `/prep/*` jobs report it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PrepClip {
+    pub id: String,
+    pub audio: String,
+    pub duration_s: f32,
+    pub band_khz: f32,
+    /// Empty when the source has no text column: Whisper makes the text.
+    pub text: String,
+    /// Plain reason when the clip is left out (`None` keeps the clip).
+    pub excluded: Option<String>,
+}
+
+/// What `/prep/hf` needs: which dataset, which columns, where to write the WAVs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HfPrep {
+    pub repo: String,
+    pub config: Option<String>,
+    pub split: String,
+    pub audio_col: String,
+    pub text_col: Option<String>,
+    pub limit: Option<u32>,
+    pub token: Option<String>,
+    pub out_dir: std::path::PathBuf,
+}
+
+/// The clips of a finished `/prep/clean` or `/prep/hf` job. `None` when the job
+/// has no clip list (wrong job or engine too old).
+pub fn parse_prep_clips(status: &JobStatus) -> Option<Vec<PrepClip>> {
+    status.result.clone().and_then(|v| v.get("clips").cloned()).and_then(|v| serde_json::from_value(v).ok())
+}
+
+/// The manifest counts of a finished `/prep/manifest` job: `(train, dev)` rows.
+pub fn parse_prep_manifest(status: &JobStatus) -> Option<(usize, usize)> {
+    let v = status.result.clone()?;
+    Some((v.get("train")?.as_u64()? as usize, v.get("dev")?.as_u64()? as usize))
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct JobStatus {
     pub state: JobState,
@@ -152,6 +190,24 @@ pub trait EngineApi: Send + Sync {
     fn cancel(&self, id: &JobId) -> Result<(), EngineError>;
     /// Download a Hugging Face adapter into the engine data folder.
     fn fetch_adapter(&self, repo: &str, subfolder: Option<&str>, token: Option<&str>) -> Result<std::path::PathBuf, EngineError>;
+    /// Clean local clips (`/prep/clean`). Default: the engine has no data prep.
+    fn prep_clean(&self, _clips: &[(String, String)], _out_dir: &std::path::Path) -> Result<JobId, EngineError> {
+        Err(EngineError::Failed("This engine cannot prepare training data.".into()))
+    }
+    /// Fetch a Hugging Face dataset (`/prep/hf`). Default: the engine has no data prep.
+    fn prep_hf(&self, _req: &HfPrep) -> Result<JobId, EngineError> {
+        Err(EngineError::Failed("This engine cannot prepare training data.".into()))
+    }
+    /// Write `train.jsonl`/`dev.jsonl` (`/prep/manifest`). Default: no data prep.
+    fn prep_manifest(
+        &self,
+        _clips: &[PrepClip],
+        _weights: &[(String, u32)],
+        _dev_ratio: f64,
+        _out_dir: &std::path::Path,
+    ) -> Result<JobId, EngineError> {
+        Err(EngineError::Failed("This engine cannot prepare training data.".into()))
+    }
 }
 
 /// HTTP engine client over `ureq`.
@@ -272,6 +328,44 @@ impl EngineApi for HttpEngine {
             Err(EngineError::Failed(reply.error.unwrap_or_else(|| "The model files could not be downloaded.".into())))
         }
     }
+
+    fn prep_clean(&self, clips: &[(String, String)], out_dir: &std::path::Path) -> Result<JobId, EngineError> {
+        let body = serde_json::json!({
+            "clips": clips.iter().map(|(id, audio)| serde_json::json!({"id": id, "audio": audio})).collect::<Vec<_>>(),
+            "out_dir": out_dir,
+        });
+        self.post::<_, JobCreated>("/prep/clean", &body).map(|r| r.job)
+    }
+
+    fn prep_hf(&self, req: &HfPrep) -> Result<JobId, EngineError> {
+        let body = serde_json::json!({
+            "repo": req.repo,
+            "config": req.config,
+            "split": req.split,
+            "audio_col": req.audio_col,
+            "text_col": req.text_col,
+            "limit": req.limit,
+            "token": req.token,
+            "out_dir": req.out_dir,
+        });
+        self.post::<_, JobCreated>("/prep/hf", &body).map(|r| r.job)
+    }
+
+    fn prep_manifest(
+        &self,
+        clips: &[PrepClip],
+        weights: &[(String, u32)],
+        dev_ratio: f64,
+        out_dir: &std::path::Path,
+    ) -> Result<JobId, EngineError> {
+        let body = serde_json::json!({
+            "clips": clips,
+            "sources": weights.iter().map(|(name, weight)| serde_json::json!({"name": name, "weight": weight})).collect::<Vec<_>>(),
+            "dev_ratio": dev_ratio,
+            "out_dir": out_dir,
+        });
+        self.post::<_, JobCreated>("/prep/manifest", &body).map(|r| r.job)
+    }
 }
 
 /// In-memory engine for app tests: renders are silent WAVs, done at once.
@@ -282,6 +376,14 @@ pub struct FakeEngineApi {
 impl FakeEngineApi {
     pub fn new() -> Self {
         Self { jobs: Mutex::new(Vec::new()) }
+    }
+
+    /// Push an already-done job carrying `result`.
+    fn done_job(&self, result: serde_json::Value) -> JobId {
+        let mut jobs = self.jobs.lock().unwrap();
+        let id = format!("job-{}", jobs.len() + 1);
+        jobs.push(JobStatus { state: JobState::Done, progress: 1.0, message: String::new(), result: Some(result), error: None });
+        id
     }
 }
 
@@ -379,6 +481,92 @@ impl EngineApi for FakeEngineApi {
         std::fs::create_dir_all(&dir).map_err(|_| EngineError::Failed("A file could not be saved.".into()))?;
         Ok(dir)
     }
+
+    /// Cleaned at once: readable WAVs keep their duration with band 18 kHz,
+    /// unreadable ones are excluded with the engine's plain reason.
+    fn prep_clean(&self, clips: &[(String, String)], out_dir: &std::path::Path) -> Result<JobId, EngineError> {
+        std::fs::create_dir_all(out_dir).map_err(|_| EngineError::Failed("A file could not be saved.".into()))?;
+        let cleaned: Vec<PrepClip> = clips
+            .iter()
+            .map(|(id, audio)| match hound::WavReader::open(audio) {
+                Ok(r) => {
+                    let spec = r.spec();
+                    let secs = r.duration() as f32 / spec.sample_rate as f32;
+                    PrepClip {
+                        id: id.clone(),
+                        audio: audio.clone(),
+                        duration_s: secs,
+                        band_khz: 18.0,
+                        text: String::new(),
+                        excluded: None,
+                    }
+                }
+                Err(_) => PrepClip {
+                    id: id.clone(),
+                    audio: String::new(),
+                    duration_s: 0.0,
+                    band_khz: 0.0,
+                    text: String::new(),
+                    excluded: Some("The clip could not be read.".into()),
+                },
+            })
+            .collect();
+        Ok(self.done_job(serde_json::json!({"clips": cleaned})))
+    }
+
+    /// Fetched at once: writes `limit` (default 2) short tone WAVs. Clips carry
+    /// text only when the form named a text column — otherwise Whisper runs.
+    fn prep_hf(&self, req: &HfPrep) -> Result<JobId, EngineError> {
+        std::fs::create_dir_all(&req.out_dir).map_err(|_| EngineError::Failed("A file could not be saved.".into()))?;
+        let n = req.limit.unwrap_or(2).max(1) as usize;
+        let text = req.text_col.as_ref().map(|_| "örnek metin".to_string()).unwrap_or_default();
+        let mut clips = Vec::with_capacity(n);
+        for i in 0..n {
+            let id = format!("hf-{:05}", i + 1);
+            let file = req.out_dir.join(format!("{id}.wav"));
+            write_tone(&file, 1.0).map_err(|_| EngineError::Failed("A file could not be saved.".into()))?;
+            clips.push(PrepClip {
+                id,
+                audio: file.to_string_lossy().into_owned(),
+                duration_s: 1.0,
+                band_khz: 18.0,
+                text: text.clone(),
+                excluded: None,
+            });
+        }
+        Ok(self.done_job(serde_json::json!({"clips": clips})))
+    }
+
+    fn prep_manifest(
+        &self,
+        clips: &[PrepClip],
+        _weights: &[(String, u32)],
+        _dev_ratio: f64,
+        out_dir: &std::path::Path,
+    ) -> Result<JobId, EngineError> {
+        std::fs::create_dir_all(out_dir).map_err(|_| EngineError::Failed("A file could not be saved.".into()))?;
+        // All rows to train, like a dev_ratio of 0: the point is the files exist.
+        let mut train = String::new();
+        for c in clips {
+            let row = serde_json::json!({
+                "id": c.id,
+                "audio_path": c.audio,
+                "text": c.text,
+                "language_id": "tr",
+            });
+            train.push_str(&serde_json::to_string(&row).map_err(|_| EngineError::Failed("A file could not be saved.".into()))?);
+            train.push('\n');
+        }
+        std::fs::write(out_dir.join("train.jsonl"), train).map_err(|_| EngineError::Failed("A file could not be saved.".into()))?;
+        std::fs::write(out_dir.join("dev.jsonl"), "").map_err(|_| EngineError::Failed("A file could not be saved.".into()))?;
+        Ok(self.done_job(serde_json::json!({"train": clips.len(), "dev": 0})))
+    }
+}
+
+fn write_tone(path: &std::path::Path, secs: f32) -> std::io::Result<()> {
+    let samples: Vec<f32> =
+        (0..(24_000.0 * secs) as usize).map(|k| (k as f32 * 440.0 * std::f32::consts::TAU / 24_000.0).sin() * 0.3).collect();
+    write_wav(path, &samples)
 }
 
 fn write_wav(path: &std::path::Path, samples: &[f32]) -> std::io::Result<()> {
@@ -429,5 +617,27 @@ mod tests {
         let back: Preset = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back.extra["name"], "ses_0007");
         assert_eq!(back.guidance, 2.5);
+    }
+
+    #[test]
+    fn prep_results_parse_from_job_status() {
+        let clips = vec![PrepClip {
+            id: "a".into(),
+            audio: "a.wav".into(),
+            duration_s: 1.0,
+            band_khz: 18.0,
+            text: "merhaba".into(),
+            excluded: None,
+        }];
+        let status = JobStatus {
+            state: JobState::Done,
+            progress: 1.0,
+            message: String::new(),
+            result: Some(serde_json::json!({"clips": clips})),
+            error: None,
+        };
+        assert_eq!(parse_prep_clips(&status).unwrap()[0].text, "merhaba");
+        let manifest = JobStatus { result: Some(serde_json::json!({"train": 8, "dev": 2})), ..status };
+        assert_eq!(parse_prep_manifest(&manifest), Some((8, 2)));
     }
 }

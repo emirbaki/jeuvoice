@@ -130,3 +130,52 @@ scripts\cargo.cmd test -p jeuvoice-app --release --test real_voice -- --ignored 
 3. Compare a paragraph with `tts_lab/outputs/omni_tr2_para_gs25_s4/full.wav`. They should sound like the same voice.
 4. Drag a region over one sentence and press **Retake region**. Use the take that sounds best.
 5. Open **Advanced**, set guidance to 3, and retake the word "damara". Keep the take that reads it cleanly.
+
+## Status (Plan 3, Train)
+
+The Train tab takes clips to a Kaggle LoRA run: data (drop files or fetch Hugging Face datasets), start-from model, target (This PC, Kaggle, RunPod), and the run itself (script, start, progress, checkpoints). Each project lives in `Documents/JeuVoice/Training/<name>/` with `train_project.json` (sources, clips, settings, target) and `runs/<run>/` (manifests, bundle, notebook, `run.json`, outputs).
+
+### Credentials
+
+- Open the Train tab, **Add Kaggle key** on the Kaggle card: the Kaggle user name plus the key from `kaggle.com/settings` → API → Create New Token (or **Import kaggle.json**). Both legacy keys and new `KGAT_...` tokens work: legacy keys go as HTTP Basic, `KGAT_` tokens as a bearer token, like the official client.
+- The key lives in the OS keychain (service `JeuVoice-Kaggle`), never in a file. If the app forgets the key between starts, type it in again.
+
+### What goes up to Kaggle
+
+- One **private** dataset per run: `<run>.zip` with the `bundle_<run>.txt` marker, `config/train.json` (the tr2 template with your steps/LoRA settings), `config/data.json`, `manifests/train.jsonl` + `dev.jsonl` (relative `audio/…` paths), and `audio.pack` (a tar of the cleaned 24 kHz WAVs under another suffix, because Kaggle unpacks every `.tar`). Excluded clips never go up.
+- One **private** notebook running the shipped script: unpack, check every clip, extract audio tokens on Kaggle (`tokens/<split>/data.lst`), train with `accelerate launch -m omnivoice.cli.train` (older checkpoints pruned to `adapter_config.json` + `adapter_model.safetensors`), copy adapters plus `train.log` to `/kaggle/working/result`, print `JEUVOICE_RUN_DONE`.
+- The base model (`k2-fsa/OmniVoice`) is downloaded on Kaggle's own connection, not uploaded.
+
+### Time and cost
+
+Kaggle T4 ×2 is free within your GPU quota: about an hour per 1,000 steps (6,000 steps ≈ 6 hours). The card scales the estimate with your steps.
+
+Tiny real check on this machine (20 own-voice clips, steps 50, save every 25; release build):
+
+| Step | Measured |
+|---|---|
+| Whisper text for 20 clips (CPU) | ~8 min |
+| Bundle (10.4 MB) | seconds |
+| Dataset upload | 4–12 s |
+| Kernel queue + pip + token extraction + 50 steps | 9–16 min |
+| Two checkpoints (`checkpoint-25`, `checkpoint-50`) download | seconds |
+| Test render with `checkpoint-50` (fixed sentence) | 3.9 s of audio |
+
+Repeat it yourself (needs `KAGGLE_TEST_USER`/`KAGGLE_TEST_KEY` in the env, the engine venv, the Whisper model and Kaggle GPU quota; the tts_lab clips stay read-only):
+
+```
+scripts\cargo.cmd test -p jeuvoice-app --release --test real_train -- --ignored --nocapture
+```
+
+### How to resume
+
+- A run keeps going on Kaggle when the app closes. Its `runs/<name>/run.json` holds the dataset, kernel, start time and state; Queued/Running runs resume polling on the next start.
+- On `Error` the tab shows the last 30 log lines and keeps the bundle: **Download bundle only** saves the zip plus the `.ipynb` for a manual run.
+
+### Known limits
+
+- Local training needs a 12 GB CUDA card; this PC's card turns This PC off with the reason. RunPod says "Coming later".
+- A kernel title may not repeat a dataset title: the app names the dataset `<project> <run> data`.
+- The client waits (up to 10 minutes) for a fresh dataset version to read `READY` before pushing.
+- The loss curve reads `Eval Loss:` lines, so runs shorter than `eval_steps` show no curve.
+- The macOS build is not tested.
