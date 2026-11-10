@@ -10,6 +10,8 @@ use crate::KaggleError;
 pub const SERVICE: &str = "JeuVoice-Kaggle";
 /// One entry holds both fields as JSON, so the user name needs no second lookup.
 const ACCOUNT: &str = "kaggle-auth";
+/// Named profiles live under their own service; the account is the profile name.
+pub const PROFILES_SERVICE: &str = "JeuVoice-Kaggle-Profiles";
 
 /// The Kaggle user name and key (`https://www.kaggle.com/settings/account`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,11 +21,14 @@ pub struct KaggleAuth {
 }
 
 /// Where the credentials live. The app uses the OS keychain; tests use memory.
+/// Profiles are named side-slots beside the single legacy key.
 pub trait KeyStore: Send + Sync {
     fn load(&self) -> Option<KaggleAuth>;
     fn save(&self, auth: &KaggleAuth) -> Result<(), KaggleError>;
-    /// Forget the saved credentials. Missing credentials are fine.
     fn delete(&self) -> Result<(), KaggleError>;
+    fn load_profile(&self, name: &str) -> Option<KaggleAuth>;
+    fn save_profile(&self, name: &str, auth: &KaggleAuth) -> Result<(), KaggleError>;
+    fn delete_profile(&self, name: &str) -> Result<(), KaggleError>;
 }
 
 /// The OS keychain, service `JeuVoice-Kaggle`.
@@ -47,11 +52,35 @@ impl KeyStore for KeyringStore {
             Err(_) => Err(KaggleError::Keychain("The Kaggle key could not be removed.".into())),
         }
     }
+
+    fn load_profile(&self, name: &str) -> Option<KaggleAuth> {
+        let entry = keyring::Entry::new(PROFILES_SERVICE, name).ok()?;
+        serde_json::from_str::<KaggleAuth>(&entry.get_password().ok()?).ok()
+    }
+
+    fn save_profile(&self, name: &str, auth: &KaggleAuth) -> Result<(), KaggleError> {
+        let entry = keyring::Entry::new(PROFILES_SERVICE, name)
+            .map_err(|_| KaggleError::Keychain("The keychain is not available.".into()))?;
+        let raw = serde_json::to_string(auth).map_err(|e| KaggleError::Keychain(format!("The credentials could not be saved: {e}")))?;
+        entry.set_password(&raw).map_err(|_| KaggleError::Keychain("The Kaggle key could not be saved in the keychain.".into()))
+    }
+
+    fn delete_profile(&self, name: &str) -> Result<(), KaggleError> {
+        let entry = keyring::Entry::new(PROFILES_SERVICE, name)
+            .map_err(|_| KaggleError::Keychain("The keychain is not available.".into()))?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err(KaggleError::Keychain("The Kaggle key could not be removed.".into())),
+        }
+    }
 }
 
 /// In-memory store for tests.
 #[derive(Default)]
-pub struct MemStore(std::sync::Mutex<Option<KaggleAuth>>);
+pub struct MemStore {
+    single: std::sync::Mutex<Option<KaggleAuth>>,
+    profiles: std::sync::Mutex<std::collections::HashMap<String, KaggleAuth>>,
+}
 
 impl MemStore {
     pub fn new() -> Self {
@@ -61,16 +90,30 @@ impl MemStore {
 
 impl KeyStore for MemStore {
     fn load(&self) -> Option<KaggleAuth> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.single.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn save(&self, auth: &KaggleAuth) -> Result<(), KaggleError> {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(auth.clone());
+        *self.single.lock().unwrap_or_else(|e| e.into_inner()) = Some(auth.clone());
         Ok(())
     }
 
     fn delete(&self) -> Result<(), KaggleError> {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.single.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        Ok(())
+    }
+
+    fn load_profile(&self, name: &str) -> Option<KaggleAuth> {
+        self.profiles.lock().unwrap_or_else(|e| e.into_inner()).get(name).cloned()
+    }
+
+    fn save_profile(&self, name: &str, auth: &KaggleAuth) -> Result<(), KaggleError> {
+        self.profiles.lock().unwrap_or_else(|e| e.into_inner()).insert(name.into(), auth.clone());
+        Ok(())
+    }
+
+    fn delete_profile(&self, name: &str) -> Result<(), KaggleError> {
+        self.profiles.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
         Ok(())
     }
 }
@@ -137,6 +180,17 @@ mod tests {
         assert_eq!(load_auth_from(&service), Some(auth));
         scrub(&service);
         assert_eq!(load_auth_from(&service), None);
+    }
+
+    #[test]
+    fn mem_profiles_round_trip() {
+        let store = MemStore::new();
+        let auth = KaggleAuth { username: "someone".into(), key: "abc123".into() };
+        assert_eq!(store.load_profile("work"), None);
+        store.save_profile("work", &auth).unwrap();
+        assert_eq!(store.load_profile("work"), Some(auth));
+        store.delete_profile("work").unwrap();
+        assert_eq!(store.load_profile("work"), None);
     }
 
     #[test]

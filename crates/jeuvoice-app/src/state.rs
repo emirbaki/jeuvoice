@@ -64,6 +64,11 @@ pub struct App {
     pub token_field: TextEdit,
     /// A local adapter folder; empty means "use the preset's own model".
     pub adapter_field: TextEdit,
+    /// A new Kaggle profile: name, user name and key (never filled from the keychain).
+    pub profile_name_field: TextEdit,
+    pub profile_user_field: TextEdit,
+    pub profile_key_field: TextEdit,
+    kaggle_store: Arc<dyn jeuvoice_kaggle::KeyStore>,
     /// What the last token/adapter save did.
     pub files_status: Option<String>,
 }
@@ -79,16 +84,17 @@ impl App {
             projects_dir: projects_root(),
         });
         let training_dir = training_root().join("My training");
+        let kaggle_store: Arc<dyn jeuvoice_kaggle::KeyStore> = std::sync::Arc::new(jeuvoice_kaggle::KeyringStore);
         let train = TrainData::new(
             "My training",
             training_dir,
             deps.transcriber.clone(),
             deps.ensure_model.clone(),
             token_store.clone(),
-            std::sync::Arc::new(jeuvoice_kaggle::KeyringStore),
+            kaggle_store.clone(),
             deps.sound,
         );
-        Self {
+        let mut app = Self {
             tab: Tab::Transcribe,
             transcribe: TranscribeTab::new(deps),
             train,
@@ -99,8 +105,29 @@ impl App {
             token_store,
             token_field: TextEdit::new(""),
             adapter_field: TextEdit::new(adapter),
+            profile_name_field: TextEdit::new(""),
+            profile_user_field: TextEdit::new(""),
+            profile_key_field: TextEdit::new(""),
+            kaggle_store,
             files_status: None,
+        };
+        app.migrate_legacy_kaggle_key();
+        app
+    }
+
+    /// A single key saved before profiles existed becomes the "default" profile.
+    fn migrate_legacy_kaggle_key(&mut self) {
+        if !self.settings.kaggle_profiles.is_empty() {
+            return;
         }
+        let Some(auth) = self.kaggle_store.load() else { return };
+        if self.kaggle_store.save_profile("default", &auth).is_err() {
+            return;
+        }
+        self.settings.kaggle_profiles = vec!["default".into()];
+        self.settings.active_kaggle_profile = Some("default".into());
+        self.train.active_profile = Some("default".into());
+        self.save_settings();
     }
 
     /// Save the token field to the keychain. Empty removes it.
@@ -127,6 +154,70 @@ impl App {
         if self.settings_error.is_none() {
             self.files_status = Some("Saved the adapter folder.".into());
         }
+    }
+
+    /// Save the profile form as a new Kaggle key profile. The first one becomes active.
+    pub fn add_kaggle_profile(&mut self) {
+        let name = self.profile_name_field.text.trim().to_string();
+        let username = self.profile_user_field.text.trim().to_string();
+        let key = self.profile_key_field.text.trim().to_string();
+        if name.is_empty() || username.is_empty() || key.is_empty() {
+            self.files_status = Some("Name the profile, the user and the key.".into());
+            return;
+        }
+        if let Err(e) = self.kaggle_store.save_profile(&name, &jeuvoice_kaggle::KaggleAuth { username, key }) {
+            self.files_status = Some(e.to_string());
+            return;
+        }
+        if !self.settings.kaggle_profiles.contains(&name) {
+            self.settings.kaggle_profiles.push(name.clone());
+        }
+        if self.settings.active_kaggle_profile.is_none() {
+            self.settings.active_kaggle_profile = Some(name.clone());
+            self.train.active_profile = Some(name);
+        }
+        self.save_settings();
+        self.profile_name_field = TextEdit::new("");
+        self.profile_user_field = TextEdit::new("");
+        self.profile_key_field = TextEdit::new("");
+        if self.settings_error.is_none() {
+            self.files_status = Some("Saved the Kaggle profile.".into());
+        }
+        self.train.refresh_kaggle_user();
+    }
+
+    /// Run the Train tab with this profile's key.
+    pub fn select_kaggle_profile(&mut self, name: &str) {
+        if !self.settings.kaggle_profiles.iter().any(|p| p == name) {
+            return;
+        }
+        self.settings.active_kaggle_profile = Some(name.into());
+        self.train.active_profile = Some(name.into());
+        self.train.refresh_kaggle_user();
+        self.save_settings();
+    }
+
+    /// Forget a profile's key and drop it from the list.
+    pub fn delete_kaggle_profile(&mut self, name: &str) {
+        if let Err(e) = self.kaggle_store.delete_profile(name) {
+            self.files_status = Some(e.to_string());
+            return;
+        }
+        self.settings.kaggle_profiles.retain(|p| p != name);
+        if self.settings.active_kaggle_profile.as_deref() == Some(name) {
+            self.settings.active_kaggle_profile = self.settings.kaggle_profiles.first().cloned();
+            self.train.active_profile = self.settings.active_kaggle_profile.clone();
+        }
+        self.save_settings();
+        self.files_status = Some("Removed the Kaggle profile.".into());
+        self.train.refresh_kaggle_user();
+    }
+
+    /// Point the tabs at another key store (tests use memory).
+    #[allow(dead_code)]
+    pub(crate) fn set_kaggle_store(&mut self, store: Arc<dyn jeuvoice_kaggle::KeyStore>) {
+        self.kaggle_store = store.clone();
+        self.train.set_kaggle_store(store);
     }
 
     pub fn set_language(&mut self, code: &str) {
@@ -172,6 +263,12 @@ impl App {
         // The Train tab shares the Voice engine once it is ready.
         if s.train.engine_api.is_none() {
             s.train.engine_api = s.transcribe.engine_api();
+        }
+        // The Train tab runs with the Settings profile.
+        if s.train.active_profile != s.settings.active_kaggle_profile {
+            s.train.active_profile = s.settings.active_kaggle_profile.clone();
+            s.train.refresh_kaggle_user();
+            changed = true;
         }
         changed |= s.train.poll(&s.settings, tx);
         // The voice tab uses the shared engine client once it is ready.

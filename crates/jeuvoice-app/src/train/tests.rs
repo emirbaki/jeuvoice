@@ -631,6 +631,10 @@ fn checkpoint_rig() -> (Rig, Arc<SpyEngine>) {
     let mut rig = Rig::new();
     let presets = rig.tmp.path().join("presets");
     rig.rt.state.voice.set_dirs(presets, rig.tmp.path().join("projects"));
+    // A real checkpoint folder, like a finished run leaves behind.
+    let ck = rig.tmp.path().join("training").join("runs").join("run-1").join("checkpoint-3000");
+    std::fs::create_dir_all(&ck).unwrap();
+    std::fs::write(ck.join("adapter_model.safetensors"), b"adapter").unwrap();
     let spy = Arc::new(SpyEngine::new());
     rig.rt.state.train.set_engine(spy.clone());
     rig.rt.update(|s, _| {
@@ -737,5 +741,22 @@ fn picking_a_folder_reads_its_clips() {
         s.train.clips_of("my_voice_a8").len() == 2 && s.train.clips_of("my_voice_a8").iter().all(|c| !c.clip.text.is_empty())
     });
     assert!(rig.text("train-status-3").contains("clips"), "the row counts them: {}", rig.text("train-status-3"));
+}
+
+#[test]
+fn the_active_profile_names_the_kaggle_user() {
+    use jeuvoice_kaggle::KaggleAuth;
+
+    let mut rig = Rig::new();
+    rig.kaggle.save_profile("work", &KaggleAuth { username: "pro-user".into(), key: "abc".into() }).unwrap();
+    rig.kaggle.save_profile("home", &KaggleAuth { username: "home-user".into(), key: "xyz".into() }).unwrap();
+    rig.rt.update(|s, _| {
+        s.settings.kaggle_profiles = vec!["work".into(), "home".into()];
+        s.settings.active_kaggle_profile = Some("home".into());
+    });
+    rig.rt.frame(1.0 / 60.0);
+    rig.rt.frame(1.0 / 60.0);
+    assert_eq!(rig.rt.state.train.active_profile.as_deref(), Some("home"), "poll syncs the profile");
+    assert_eq!(rig.rt.state.train.kaggle_user.as_deref(), Some("home-user"));
 }
 

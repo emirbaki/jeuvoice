@@ -122,6 +122,8 @@ pub struct TrainData {
     pub kaggle_key_field: TextEdit,
     /// The keychain user name, if the user saved a key.
     pub kaggle_user: Option<String>,
+    /// The Settings profile the run uses (`None` means the single legacy key).
+    pub active_profile: Option<String>,
     /// The run the tab follows, if one started.
     pub run: Option<RunRecord>,
     /// The latest polled run state.
@@ -208,6 +210,7 @@ impl TrainData {
             kaggle_user_field: TextEdit::new(""),
             kaggle_key_field: TextEdit::new(""),
             kaggle_user: None,
+            active_profile: None,
             run: None,
             run_status: None,
             run_log: Vec::new(),
@@ -276,6 +279,12 @@ impl TrainData {
     #[allow(dead_code)]
     pub fn set_engine(&mut self, api: Arc<dyn EngineApi>) {
         self.engine_api = Some(api);
+    }
+
+    /// Point the tab at another key store (tests use memory).
+    pub fn set_kaggle_store(&mut self, store: Arc<dyn KeyStore>) {
+        self.kaggle_store = store;
+        self.refresh_kaggle_user();
     }
 
     pub(crate) fn setup(&mut self, waker: Waker) {
@@ -600,10 +609,20 @@ impl TrainData {
 
     /// Read the keychain user name again (after saving or forgetting a key).
     pub fn refresh_kaggle_user(&mut self) {
-        self.kaggle_user = self.kaggle_store.load().map(|a| a.username);
+        self.kaggle_user = self.active_auth().map(|a| a.username);
     }
 
-    /// Save the Kaggle form to the keychain. Empty user or key stays on the form.
+    /// The key the run uses: the active profile, else the single legacy key.
+    fn active_auth(&self) -> Option<KaggleAuth> {
+        if let Some(name) = self.active_profile.as_deref() {
+            self.kaggle_store.load_profile(name).or_else(|| self.kaggle_store.load())
+        } else {
+            self.kaggle_store.load()
+        }
+    }
+
+    /// Save the Kaggle form: into the active profile, else the single key.
+    /// Empty user or key stays on the form.
     pub fn save_kaggle_key(&mut self) {
         let username = self.kaggle_user_field.text.trim().to_string();
         let key = self.kaggle_key_field.text.trim().to_string();
@@ -611,7 +630,12 @@ impl TrainData {
             self.notice = Some("Name the Kaggle user and paste the key.".into());
             return;
         }
-        match self.kaggle_store.save(&KaggleAuth { username, key }) {
+        let auth = KaggleAuth { username, key };
+        let done = match self.active_profile.clone() {
+            Some(name) => self.kaggle_store.save_profile(&name, &auth),
+            None => self.kaggle_store.save(&auth),
+        };
+        match done {
             Ok(()) => {
                 self.notice = Some("Saved the Kaggle key.".into());
                 self.show_kaggle_form = false;
@@ -731,7 +755,7 @@ impl TrainData {
     /// A client for the run: the injected one, or the keychain key.
     fn kaggle_client(&mut self) -> Option<Arc<dyn KaggleClient>> {
         if self.client.is_none()
-            && let Some(auth) = self.kaggle_store.load()
+            && let Some(auth) = self.active_auth()
         {
             self.client = Some(Arc::new(jeuvoice_kaggle::Kaggle::new(auth)));
         }

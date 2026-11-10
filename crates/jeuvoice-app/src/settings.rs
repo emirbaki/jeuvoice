@@ -79,6 +79,12 @@ pub struct Settings {
     /// Script words: English terms, quoted titles and respellings.
     #[serde(default = "default_terms")]
     pub terms: Terms,
+    /// Kaggle key profile names in the keychain (no secrets here).
+    #[serde(default)]
+    pub kaggle_profiles: Vec<String>,
+    /// The profile the Train tab runs with.
+    #[serde(default)]
+    pub active_kaggle_profile: Option<String>,
 }
 
 /// The seeded script terms: the quote term every preset starts with.
@@ -88,7 +94,14 @@ pub fn default_terms() -> Terms {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { whisper_language: "tr".into(), use_gpu: true, local_adapter_dir: None, terms: default_terms() }
+        Self {
+            whisper_language: "tr".into(),
+            use_gpu: true,
+            local_adapter_dir: None,
+            terms: default_terms(),
+            kaggle_profiles: Vec::new(),
+            active_kaggle_profile: None,
+        }
     }
 }
 
@@ -137,6 +150,8 @@ mod tests {
             use_gpu: false,
             local_adapter_dir: Some(PathBuf::from("D:/ckpt")),
             terms: Terms { en: vec!["tunnel".into()], quote: vec![], respell: vec![("a".into(), "b".into())] },
+            kaggle_profiles: vec!["work".into()],
+            active_kaggle_profile: Some("work".into()),
         };
         s.save_to(&path).unwrap();
         assert_eq!(Settings::load_from(&path), s);
@@ -159,6 +174,8 @@ mod tests {
                 use_gpu: true,
                 local_adapter_dir: None,
                 terms: Terms { en: vec![], quote: vec!["The Last of Us".into()], respell: vec![] },
+                kaggle_profiles: Vec::new(),
+                active_kaggle_profile: None,
             }
         );
     }
@@ -175,6 +192,8 @@ mod tests {
                 use_gpu: true,
                 local_adapter_dir: None,
                 terms: Terms { en: vec![], quote: vec!["The Last of Us".into()], respell: vec![] },
+                kaggle_profiles: Vec::new(),
+                active_kaggle_profile: None,
             }
         );
     }
