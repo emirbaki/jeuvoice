@@ -805,8 +805,9 @@ impl TrainData {
             .and_then(|entries| {
                 entries.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "zip"))
             });
-        self.checkpoints = finished_checkpoints(&run_dir);
-        self.losses = std::fs::read_to_string(run_dir.join("train.log"))
+        self.checkpoints = crate::train::run::find_checkpoints(&run_dir);
+        self.losses = crate::train::run::find_file(&run_dir, "train.log")
+            .and_then(|p| std::fs::read_to_string(p).ok())
             .map(|t| crate::train::run::parse_losses(&t))
             .unwrap_or_default();
         let kernel = record.kernel.clone();
@@ -1290,20 +1291,6 @@ impl TrainData {
             let _ = std::fs::write(self.project_file(), text);
         }
     }
-}
-
-/// Checkpoint folders under a run dir, sorted.
-fn finished_checkpoints(run_dir: &Path) -> Vec<String> {
-    let mut out: Vec<String> = std::fs::read_dir(run_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("checkpoint-")))
-        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
-        .collect();
-    out.sort();
-    out
 }
 
 fn has_media_ext(path: &Path) -> bool {

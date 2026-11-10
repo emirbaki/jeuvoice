@@ -82,8 +82,8 @@ pub(crate) fn upload_dataset(
         tokens.push(serde_json::json!({"token": token}));
     }
     let files_json = serde_json::Value::Array(tokens);
-    if exists {
-        let reply = post_api(
+    let reply = if exists {
+        post_api(
             k,
             "datasets.DatasetApiService",
             "CreateDatasetVersion",
@@ -96,10 +96,9 @@ pub(crate) fn upload_dataset(
                     "files": files_json,
                 },
             }),
-        )?;
-        created_ref(&reply, "dataset")
+        )?
     } else {
-        let reply = post_api(
+        post_api(
             k,
             "datasets.DatasetApiService",
             "CreateDataset",
@@ -112,9 +111,12 @@ pub(crate) fn upload_dataset(
                 "isPrivate": private,
                 "files": files_json,
             }),
-        )?;
-        created_ref(&reply, "dataset")
-    }
+        )?
+    };
+    let r = created_ref(&reply, "dataset")?;
+    // The kernel mounts a snapshot: only push once Kaggle finished the version.
+    wait_dataset_ready(k, owner_slug, &slug)?;
+    Ok(r)
 }
 
 /// The `ref` of a create/version answer, or the plain `error` it carries.
@@ -126,6 +128,36 @@ fn created_ref(reply: &serde_json::Value, what: &str) -> Result<DatasetRef, Kagg
             .and_then(|r| r.as_str())
             .and_then(parse_ref)
             .ok_or_else(|| KaggleError::Refused("Kaggle gave a bad answer.".into())),
+    }
+}
+
+/// Wait until the new version is READY (10 min): the kernel mounts a snapshot,
+///
+/// a half-processed version starts without the files.
+fn wait_dataset_ready(k: &Kaggle, owner_slug: &str, slug: &str) -> Result<(), KaggleError> {
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(10 * 60);
+    loop {
+        match post_api(
+            k,
+            "datasets.DatasetApiService",
+            "GetDatasetStatus",
+            &serde_json::json!({"ownerSlug": owner_slug, "datasetSlug": slug}),
+        ) {
+            Ok(v) => match v.get("status").and_then(|s| s.as_str()) {
+                Some("READY") => return Ok(()),
+                Some("FAILED") | Some("DELETED") => {
+                    return Err(KaggleError::Refused("Kaggle could not prepare the dataset. Try again.".into()));
+                }
+                _ => {}
+            },
+            // Transient trouble: the version may simply not exist yet.
+            Err(_) => {}
+        }
+        if start.elapsed() > timeout {
+            return Err(KaggleError::Refused("Kaggle is still preparing the dataset. Wait a minute and start again.".into()));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(10));
     }
 }
 

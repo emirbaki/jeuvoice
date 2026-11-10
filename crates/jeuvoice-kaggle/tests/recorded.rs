@@ -47,8 +47,9 @@ fn spec() -> KernelSpec {
 #[test]
 fn creating_a_dataset_uploads_blobs_then_creates() {
     let mut server = mockito::Server::new();
-    // A missing dataset answers 403 (verified live): the client creates new.
-    let status = server.mock("POST", "/v1/datasets.DatasetApiService/GetDatasetStatus").with_status(403).with_body(fixture(&server, "get_dataset_status_denied.json")).create();
+    // The probe (missing) is answered first, the readiness wait after.
+    let status = server.mock("POST", "/v1/datasets.DatasetApiService/GetDatasetStatus").with_status(403).with_body(fixture(&server, "get_dataset_status_denied.json")).expect(1).create();
+    server.mock("POST", "/v1/datasets.DatasetApiService/GetDatasetStatus").with_status(200).with_body(fixture(&server, "get_dataset_status_ok.json")).create();
     let blob = server
         .mock("POST", "/v1/blobs.BlobApiService/StartBlobUpload")
         .match_body(mockito::Matcher::Regex("clip0.wav".into()))

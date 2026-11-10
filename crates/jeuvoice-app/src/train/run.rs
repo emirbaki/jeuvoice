@@ -114,22 +114,48 @@ pub enum RunEvent {
     CkFailed(String),
 }
 
-/// `(step, loss)` points from a `train.log` text. Reads lines shaped like
-/// `step 100 ... loss 2.34 ...`; anything else is skipped.
+/// `(step, loss)` points from a `train.log` text. The trainer writes
+/// `Running evaluation at step N...` and later `Eval Loss: X`; those pair up.
+/// A generic `step N ... loss X` line also parses, for other trainers.
 pub fn parse_losses(log: &str) -> Vec<(u32, f32)> {
     let mut out = Vec::new();
+    let mut step: Option<u32> = None;
     for line in log.lines() {
-        let lower = line.to_lowercase();
-        let (Some(si), Some(li)) = (lower.find("step"), lower.find("loss")) else { continue };
-        let step: Option<u32> = lower[si..].split_whitespace().nth(1).and_then(|w| w.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok());
-        let loss: Option<f32> = lower[li..].split_whitespace().nth(1).and_then(|w| w.trim_matches(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-')).parse().ok());
-        if let (Some(s), Some(l)) = (step, loss) {
+        if let Some(s) = eval_step(line) {
+            step = Some(s);
+        } else if let Some(loss) = eval_loss(line) {
+            if let Some(s) = step {
+                out.push((s, loss));
+            }
+        } else if let Some((s, l)) = generic_point(line) {
             out.push((s, l));
         }
     }
     out.sort_by_key(|(s, _)| *s);
     out.dedup_by_key(|(s, _)| *s);
     out
+}
+
+/// `Running evaluation at step 250...` → `250`.
+fn eval_step(line: &str) -> Option<u32> {
+    let lower = line.to_lowercase();
+    let i = lower.find("evaluation at step")?;
+    lower[i..].split_whitespace().nth(3).and_then(|w| w.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok())
+}
+
+/// `Eval Loss: 3.9556` → `3.9556`.
+fn eval_loss(line: &str) -> Option<f32> {
+    let lower = line.to_lowercase();
+    let i = lower.find("eval loss")?;
+    lower[i..].split(':').nth(1).and_then(|v| v.trim().split_whitespace().next()).and_then(|v| v.parse().ok())
+}
+
+fn generic_point(line: &str) -> Option<(u32, f32)> {
+    let lower = line.to_lowercase();
+    let (Some(si), Some(li)) = (lower.find("step"), lower.find("loss")) else { return None };
+    let step: Option<u32> = lower[si..].split_whitespace().nth(1).and_then(|w| w.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok());
+    let loss: Option<f32> = lower[li..].split_whitespace().nth(1).and_then(|w| w.trim_matches(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-')).parse().ok());
+    Some((step?, loss?))
 }
 
 /// "12 min", "2 h 05 min": how long the run has been going.
@@ -342,6 +368,7 @@ pub fn poll_loop(
 }
 
 /// Download the outputs, list the checkpoints and parse the loss curve.
+/// Outputs nest under `result/`; the search walks the whole run folder.
 fn collect_outputs(
     kaggle: &Arc<dyn KaggleClient>,
     run_dir: &Path,
@@ -355,18 +382,66 @@ fn collect_outputs(
     };
     let mut say_dl = say_dl;
     let files = kaggle.download_output(kernel, run_dir, &mut say_dl).map_err(|e| e.to_string())?;
-    let mut checkpoints: Vec<String> = files
-        .iter()
-        .filter_map(|f| f.parent())
-        .filter(|d| d.file_name().is_some_and(|n| n.to_string_lossy().starts_with("checkpoint-")))
-        .map(|d| d.file_name().unwrap().to_string_lossy().into_owned())
-        .collect();
-    checkpoints.sort();
-    checkpoints.dedup();
-    // The trainer also drops train.log next to the checkpoints.
-    let log = run_dir.join("train.log");
-    let log_text = std::fs::read_to_string(&log).unwrap_or_default();
-    Ok((checkpoints, parse_losses(&log_text)))
+    let _ = files;
+    let checkpoints = find_checkpoints(run_dir);
+    let log = find_file(run_dir, "train.log").and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    Ok((checkpoints, parse_losses(&log)))
+}
+
+/// Checkpoint folder names anywhere under the run dir, sorted.
+pub fn find_checkpoints(run_dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_dirs(run_dir, &mut out);
+    out.sort();
+    out
+}
+
+fn collect_dirs(dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("checkpoint-")) {
+                out.push(p.file_name().unwrap().to_string_lossy().into_owned());
+            }
+            collect_dirs(&p, out);
+        }
+    }
+}
+
+/// The first file with `name` anywhere under the run dir.
+pub fn find_file(run_dir: &Path, name: &str) -> Option<PathBuf> {
+    let mut stack = vec![run_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().is_some_and(|n| n == name) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// The folder of a checkpoint by name, anywhere under the run dir.
+pub fn ck_dir(run_dir: &Path, ck: &str) -> Option<PathBuf> {
+    let mut stack = vec![run_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if p.file_name().is_some_and(|n| n == ck) {
+                    return Some(p);
+                }
+                stack.push(p);
+            }
+        }
+    }
+    None
 }
 
 /// Copy each included clip to `<audio_src>/<id>.<ext>`.
@@ -461,6 +536,16 @@ mod tests {
         let log = "starting up\nstep 100 loss 2.50 grad ok\nstep 200 loss 1.75 grad ok\nno numbers here\n";
         assert_eq!(parse_losses(log), vec![(100, 2.5), (200, 1.75)]);
         assert!(parse_losses("nothing to see").is_empty());
+    }
+
+    #[test]
+    fn losses_come_from_eval_lines() {
+        // Verbatim shape of the omnivoice trainer log.
+        let log = "11/07/2026 11:57:58 - INFO - omnivoice.training.trainer - Running evaluation at step 250...\n\
+                   11/07/2026 11:58:01 - INFO - omnivoice.training.trainer - Eval Loss: 3.9556\n\
+                   11/07/2026 12:04:46 - INFO - omnivoice.training.trainer - Running evaluation at step 500...\n\
+                   11/07/2026 12:04:49 - INFO - omnivoice.training.trainer - Eval Loss: 4.5110\n";
+        assert_eq!(parse_losses(log), vec![(250, 3.9556), (500, 4.511)]);
     }
 
     #[test]

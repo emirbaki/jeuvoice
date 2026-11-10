@@ -177,17 +177,19 @@ fn real_tiny_kaggle_run() {
     eprintln!("kernel={} version={:?}", kernel.id(), kernel.version);
     let final_status = wait_kernel(&kaggle, &kernel, "run");
     assert_eq!(final_status.state, KernelState::Complete, "run completes, message: {:?}", final_status.message);
+    // The tail holds the end; token extraction logged at the start.
     let tail = kaggle.kernel_log_tail(&kernel, 30).unwrap_or_default();
-    assert!(tail.contains("shards"), "token extraction ran:\n{tail}");
     assert!(tail.contains("JEUVOICE_RUN_DONE"), "notebook finished:\n{tail}");
+    let full = kaggle.kernel_log_tail(&kernel, 100_000).unwrap_or_default();
+    assert!(full.contains("shards"), "token extraction ran");
 
-    // 4. Two checkpoints download.
+    // 4. Two checkpoints download (under `result/`).
     let out = root.join("runs").join("run-1");
     std::fs::create_dir_all(&out).unwrap();
     let files = kaggle.download_output(&kernel, &out, &mut |_, _| {}).expect("download works");
     assert!(!files.is_empty(), "outputs download");
     for ck in ["checkpoint-25", "checkpoint-50"] {
-        let adapter = out.join(ck).join("adapter_model.safetensors");
+        let adapter = out.join("result").join(ck).join("adapter_model.safetensors");
         assert!(adapter.is_file(), "{ck} downloads its adapter");
     }
     eprintln!("run_s={:.0}", t0.elapsed().as_secs_f64());
@@ -202,7 +204,7 @@ fn real_tiny_kaggle_run() {
     .expect("the engine starts");
     assert!(proc.is_alive());
     let api = proc.api();
-    let ckpt50 = out.join("checkpoint-50").to_string_lossy().into_owned();
+    let ckpt50 = out.join("result").join("checkpoint-50").to_string_lossy().into_owned();
     let load = api.load("k2-fsa/OmniVoice", Some(&ckpt50), "auto").expect("load starts");
     wait_job(&api, &load, "load");
     let ref_text = std::fs::read_to_string(REF_TXT).unwrap();

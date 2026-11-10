@@ -42,7 +42,12 @@ pub fn test_checkpoint(s: &mut App, ck: &str) {
         return;
     };
     let preset = base_preset(&s.voice);
-    let ck_dir = s.train.dir.join("runs").join(&run.name).join(ck).to_string_lossy().into_owned();
+    let run_dir = s.train.dir.join("runs").join(&run.name);
+    let Some(ck_path) = crate::train::run::ck_dir(&run_dir, ck) else {
+        s.train.notice = Some(format!("The checkpoint {ck} is gone from the run folder."));
+        return;
+    };
+    let ck_dir = ck_path.to_string_lossy().into_owned();
     let presets_dir = s.voice.deps.presets_dir.clone();
     let ref_audio = preset
         .ref_audio
@@ -81,7 +86,11 @@ pub fn use_as_preset(s: &mut App, ck: &str) {
         return;
     };
     let base = base_preset(&s.voice);
-    let ck_dir = s.train.dir.join("runs").join(&run.name).join(ck);
+    let run_dir = s.train.dir.join("runs").join(&run.name);
+    let Some(ck_path) = crate::train::run::ck_dir(&run_dir, ck) else {
+        s.train.notice = Some(format!("The checkpoint {ck} is gone from the run folder."));
+        return;
+    };
     let presets_dir = s.voice.deps.presets_dir.clone();
     let mut name = format!("{} {ck}", base.name);
     if s.voice.presets.iter().any(|p| p.name == name) {
@@ -97,7 +106,7 @@ pub fn use_as_preset(s: &mut App, ck: &str) {
         name: name.clone(),
         model: jeuvoice_core::preset::ModelRef {
             base: base.model.base.clone(),
-            adapter: AdapterRef::Local { dir: ck_dir.to_string_lossy().into_owned() },
+            adapter: AdapterRef::Local { dir: ck_path.to_string_lossy().into_owned() },
         },
         ..base.clone()
     };
