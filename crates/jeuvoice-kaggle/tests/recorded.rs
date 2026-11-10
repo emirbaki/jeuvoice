@@ -47,7 +47,8 @@ fn spec() -> KernelSpec {
 #[test]
 fn creating_a_dataset_uploads_blobs_then_creates() {
     let mut server = mockito::Server::new();
-    let status = server.mock("POST", "/v1/datasets.DatasetApiService/GetDatasetStatus").with_status(404).with_body(fixture(&server, "get_dataset_status_404.json")).create();
+    // A missing dataset answers 403 (verified live): the client creates new.
+    let status = server.mock("POST", "/v1/datasets.DatasetApiService/GetDatasetStatus").with_status(403).with_body(fixture(&server, "get_dataset_status_denied.json")).create();
     let blob = server
         .mock("POST", "/v1/blobs.BlobApiService/StartBlobUpload")
         .match_body(mockito::Matcher::Regex("clip0.wav".into()))
@@ -114,6 +115,47 @@ fn pushing_a_kernel_returns_its_ref() {
     assert_eq!(r.id(), "someone/my-run");
     assert_eq!(r.version, Some(3));
     push.assert();
+}
+
+#[test]
+fn a_kgat_token_goes_as_bearer() {
+    let mut server = mockito::Server::new();
+    server
+        .mock("POST", "/v1/kernels.KernelsApiService/GetKernelSessionStatus")
+        .match_header("Authorization", "Bearer KGAT_abc123")
+        .with_body(fixture(&server, "session_status_complete.json"))
+        .create();
+    let kaggle = Kaggle::with_base(KaggleAuth { username: "someone".into(), key: "KGAT_abc123".into() }, server.url());
+    let got = kaggle
+        .kernel_status(&KernelRef { owner: "someone".into(), slug: "my-run".into(), version: None })
+        .unwrap();
+    assert_eq!(got.state, KernelState::Complete);
+}
+
+#[test]
+fn a_legacy_key_goes_as_basic() {
+    let mut server = mockito::Server::new();
+    server
+        .mock("POST", "/v1/kernels.KernelsApiService/GetKernelSessionStatus")
+        .match_header("Authorization", "Basic c29tZW9uZTphYmMxMjM=")
+        .with_body(fixture(&server, "session_status_complete.json"))
+        .create();
+    let k = kaggle(&server);
+    let got = k.kernel_status(&KernelRef { owner: "someone".into(), slug: "my-run".into(), version: None }).unwrap();
+    assert_eq!(got.state, KernelState::Complete);
+}
+
+#[test]
+fn a_nested_error_keeps_its_message() {
+    let mut server = mockito::Server::new();
+    server
+        .mock("POST", "/v1/kernels.KernelsApiService/SaveKernel")
+        .with_status(409)
+        .with_body(r#"{"error":{"code":409,"message":"The requested title is already in use.","status":"ALREADY_EXISTS"}}"#)
+        .create();
+    let k = kaggle(&server);
+    let err = k.push_kernel(&spec()).unwrap_err();
+    assert_eq!(err, KaggleError::Refused("The requested title is already in use.".into()));
 }
 
 #[test]

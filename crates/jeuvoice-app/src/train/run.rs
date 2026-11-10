@@ -241,14 +241,16 @@ pub fn start_run(req: StartRequest, events: std::sync::mpsc::Sender<RunEvent>, w
         }
     };
     say(RunEvent::BundleReady(built.bundle.clone()));
-    // 3. Upload the bundle as a private dataset.
+    // 3. Upload the bundle as a private dataset. Its title carries "data":
+    // Kaggle refuses a kernel whose title another dataset already uses.
     let title = format!("{} {}", req.project_name, req.run_name);
+    let dataset_title = format!("{title} data");
     let say_up = |done: u64, total: u64| {
         let _ = events.send(RunEvent::UploadProgress(done, total));
         waker();
     };
     let mut say_up = say_up;
-    let dataset = match req.kaggle.upload_dataset(&req.owner, &title, &[built.bundle], true, &mut say_up) {
+    let dataset = match req.kaggle.upload_dataset(&req.owner, &dataset_title, &[built.bundle], true, &mut say_up) {
         Ok(d) => d,
         Err(e) => {
             say(RunEvent::RunFailed(e.to_string()));

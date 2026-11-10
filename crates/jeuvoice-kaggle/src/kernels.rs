@@ -58,8 +58,14 @@ impl KernelRef {
 }
 
 fn parse_ref(id: &str) -> Option<(String, String)> {
-    let (owner, slug) = id.split_once('/')?;
-    (!owner.is_empty() && !slug.is_empty()).then(|| (owner.into(), slug.into()))
+    // Live answers carry a path ("/code/owner/slug"): the pair is last but one.
+    let mut parts: Vec<&str> = id.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let slug = parts.pop().unwrap().to_string();
+    let owner = parts.pop().unwrap().to_string();
+    Some((owner, slug))
 }
 
 /// What the run is doing.

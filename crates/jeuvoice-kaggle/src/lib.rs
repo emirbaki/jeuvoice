@@ -7,9 +7,11 @@
 //!
 //! The official client (`src/kaggle/api/kaggle_api_extended.py`) calls the
 //! generated `kagglesdk` client (`KaggleHttpClient.call`), which sends
-//! `POST https://api.kaggle.com/v1/{Service}/{Method}` with a JSON body and
-//! HTTP Basic auth (`username`, `key` — or a bearer token from the environment,
-//! which JeuVoice never uses). Error bodies look like
+//! `POST https://api.kaggle.com/v1/{Service}/{Method}` with a JSON body and one
+//! of two auth forms (the official client rejects each in the other's place):
+//! a legacy API key as HTTP Basic auth (`username`, `key`), or a `KGAT_...`
+//! API token as `Authorization: Bearer <token>` (raw token from the settings UI,
+//! `~/.kaggle/access_token` or `KAGGLE_API_TOKEN`). Error bodies look like
 //! `{"code": 401, "message": "..."}`. A 429 honors `Retry-After`, else backs off
 //! (`with_retry`: 10 tries, 500 ms × 1.7).
 //!
@@ -164,9 +166,14 @@ pub(crate) fn agent() -> ureq::Agent {
     ureq::Agent::new_with_config(ureq::Agent::config_builder().http_status_as_error(false).build())
 }
 
-/// `Basic base64(user:key)`, like the official client (`requests` basic auth).
-pub(crate) fn basic(auth: &KaggleAuth) -> String {
-    format!("Basic {}", base64_encode(format!("{}:{}", auth.username, auth.key).as_bytes()))
+/// The auth header: `Bearer <token>` for `KGAT_...` API tokens, HTTP Basic for
+/// legacy keys — the official client dispatches on the same prefix.
+pub(crate) fn auth_header(auth: &KaggleAuth) -> String {
+    if auth.key.starts_with("KGAT_") {
+        format!("Bearer {}", auth.key)
+    } else {
+        format!("Basic {}", base64_encode(format!("{}:{}", auth.username, auth.key).as_bytes()))
+    }
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -197,7 +204,7 @@ pub(crate) fn post_api(k: &Kaggle, service: &str, method: &str, body: &serde_jso
     loop {
         let mut res = agent()
             .post(&url)
-            .header("Authorization", &basic(&k.auth))
+            .header("Authorization", &auth_header(&k.auth))
             .send_json(body)
             .map_err(|e| KaggleError::Network(pretty_ureq(&e)))?;
         let status = res.status().as_u16();
@@ -226,10 +233,13 @@ fn backoff_secs(base_ms: u64, attempt: u32) -> f64 {
     (base_ms as f64 / 1000.0) * 2f64.powi(attempt.min(20) as i32)
 }
 
-/// A non-2xx answer as a plain error. Sniffs out spent quota.
+/// A non-2xx answer as a plain error. Sniffs out spent quota. Kaggle nests
+/// some failures as `{"error": {"code", "message"}}`.
 fn map_api_error(status: u16, json: &serde_json::Value) -> KaggleError {
+    let nested = json.get("error").and_then(|e| e.get("message"));
     let message = json
         .get("message")
+        .or(nested)
         .or_else(|| json.get("error"))
         .and_then(|m| m.as_str())
         .filter(|m| !m.is_empty())

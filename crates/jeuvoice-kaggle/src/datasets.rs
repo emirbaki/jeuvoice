@@ -19,8 +19,15 @@ impl DatasetRef {
 }
 
 fn parse_ref(id: &str) -> Option<DatasetRef> {
-    let (owner, slug) = id.split_once('/')?;
-    (!owner.is_empty() && !slug.is_empty()).then(|| DatasetRef { owner_slug: owner.into(), slug: slug.into() })
+    // Live answers carry a path: "/datasets/owner/slug".
+    let mut parts: Vec<&str> = id.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let slug = parts.pop().unwrap().to_string();
+    // Drop a resource prefix ("datasets", "code", ...): the owner is last but one.
+    let owner = parts.pop().unwrap().to_string();
+    Some(DatasetRef { owner_slug: owner, slug })
 }
 
 /// Upload `files` as a private dataset named `title` (or a new version when
@@ -52,7 +59,9 @@ pub(crate) fn upload_dataset(
         sizes.push(size);
         total += size;
     }
-    // A 404 (or anything but bad credentials/rate limit) means "no dataset yet".
+    // A missing (or invisible) dataset answers 403/404: like the official
+    // client, read anything but rate-limit/network trouble as "create new".
+    // Truly bad credentials fail next at CreateDataset with BadCredentials.
     let exists = match post_api(
         k,
         "datasets.DatasetApiService",
@@ -60,8 +69,8 @@ pub(crate) fn upload_dataset(
         &serde_json::json!({"ownerSlug": owner_slug, "datasetSlug": slug}),
     ) {
         Ok(_) => true,
-        Err(KaggleError::BadCredentials) => return Err(KaggleError::BadCredentials),
         Err(KaggleError::RateLimited) => return Err(KaggleError::RateLimited),
+        Err(KaggleError::Network(e)) => return Err(KaggleError::Network(e)),
         Err(_) => false,
     };
     let mut tokens = Vec::with_capacity(files.len());
