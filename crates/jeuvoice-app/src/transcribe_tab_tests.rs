@@ -9,13 +9,16 @@ use std::time::{Duration, Instant};
 use jeuvoice_core::queue::ItemState;
 use jeuvoice_core::subtitles::to_srt;
 use jeuvoice_core::transcript::{Transcript, Word};
+use jeuvoice_engine_client::{EngineApi, EngineError, FakeEngineApi, Health, JobId, JobStatus, RenderRequest};
 use jeuvoice_whisper::{FakeTranscriber, TranscribeOptions, Transcriber, WhisperError};
 use rune::{Env, FileDialogKind, Runtime};
 
 use crate::marks::counts_text;
+use crate::services::engine::EngineState;
 use crate::services::speech::EnsureModel;
 use crate::settings::MemStore;
 use crate::state::{App, Deps};
+use crate::voice::state::VoiceStatus;
 use crate::view::view;
 use crate::waveform::Mark;
 
@@ -134,6 +137,84 @@ fn done(s: &App, i: usize) -> Option<&Transcript> {
         ItemState::Done(t) => Some(t),
         _ => None,
     }
+}
+
+/// Counts engine calls, so a test can tell unloads from loads.
+struct CountingEngine {
+    inner: FakeEngineApi,
+    unloads: AtomicUsize,
+    loads: AtomicUsize,
+}
+
+impl EngineApi for CountingEngine {
+    fn health(&self) -> Result<Health, EngineError> {
+        self.inner.health()
+    }
+    fn load(&self, m: &str, a: Option<&str>, d: &str) -> Result<JobId, EngineError> {
+        self.loads.fetch_add(1, Ordering::SeqCst);
+        self.inner.load(m, a, d)
+    }
+    fn unload(&self) -> Result<(), EngineError> {
+        self.unloads.fetch_add(1, Ordering::SeqCst);
+        self.inner.unload()
+    }
+    fn render(&self, r: &RenderRequest) -> Result<JobId, EngineError> {
+        self.inner.render(r)
+    }
+    fn job(&self, id: &JobId) -> Result<JobStatus, EngineError> {
+        self.inner.job(id)
+    }
+    fn cancel(&self, id: &JobId) -> Result<(), EngineError> {
+        self.inner.cancel(id)
+    }
+    fn fetch_adapter(&self, r: &str, s: Option<&str>, t: Option<&str>) -> Result<PathBuf, EngineError> {
+        self.inner.fetch_adapter(r, s, t)
+    }
+}
+
+fn small_cuda_engine() -> EngineState {
+    EngineState::Ready(Health {
+        ok: true,
+        backend: "omnivoice".into(),
+        device: "cuda".into(),
+        vram_total_gb: Some(4.0),
+        model_loaded: true,
+        version: "test".into(),
+    })
+}
+
+#[test]
+fn a_transcribe_batch_unloads_a_small_cuda_engine() {
+    let mut rig = Rig::new();
+    let engine = Arc::new(CountingEngine {
+        inner: FakeEngineApi::new(),
+        unloads: AtomicUsize::new(0),
+        loads: AtomicUsize::new(0),
+    });
+    rig.rt.state.transcribe.engine_mut().set_test_api(engine.clone());
+    rig.rt.state.transcribe.engine_mut().set_state_for_tests(small_cuda_engine());
+    let a = wav(rig.dir(), "a.wav");
+    rig.drop(vec![a]);
+    rig.until("the file is done", |s| done(s, 0).is_some());
+    assert!(engine.unloads.load(Ordering::SeqCst) >= 1, "the engine unloads first");
+    assert_eq!(engine.loads.load(Ordering::SeqCst), 0, "no Voice job runs");
+}
+
+#[test]
+fn no_unload_while_a_voice_job_runs() {
+    let mut rig = Rig::new();
+    let engine = Arc::new(CountingEngine {
+        inner: FakeEngineApi::new(),
+        unloads: AtomicUsize::new(0),
+        loads: AtomicUsize::new(0),
+    });
+    rig.rt.state.transcribe.engine_mut().set_test_api(engine.clone());
+    rig.rt.state.transcribe.engine_mut().set_state_for_tests(small_cuda_engine());
+    rig.rt.state.voice.status = VoiceStatus::Working("Rendering…".into());
+    let a = wav(rig.dir(), "a.wav");
+    rig.drop(vec![a]);
+    rig.until("the file is done", |s| done(s, 0).is_some());
+    assert_eq!(engine.unloads.load(Ordering::SeqCst), 0, "a Voice job keeps the model");
 }
 
 #[test]

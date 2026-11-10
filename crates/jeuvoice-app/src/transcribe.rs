@@ -21,7 +21,7 @@ use jeuvoice_whisper::TranscribeOptions;
 use rune::{FileDialogOptions, Latest, TextEdit, Tx, Waker};
 
 use crate::cache;
-use crate::services::engine::{EngineService, whisper_must_use_cpu};
+use crate::services::engine::{EngineService, unload_for_transcribe, whisper_must_use_cpu};
 use crate::services::player::{PlayerOwner, SharedPlayer};
 use crate::services::speech::{JobTicket, ServiceEvent, SpeechJob, SpeechService};
 use crate::settings::Settings;
@@ -474,8 +474,9 @@ impl TranscribeTab {
     }
 
     /// Start the next waiting file when nothing runs and no cache lookup is out. While the
-    /// voice engine holds a small GPU, Whisper runs on the CPU.
-    fn start_next(&mut self, settings: &Settings) -> bool {
+    /// voice engine holds a small GPU, Whisper runs on the CPU — and the engine unloads
+    /// first when no Voice job runs, so Whisper gets the whole card.
+    fn start_next(&mut self, settings: &Settings, voice_busy: bool) -> bool {
         if !self.speech.ready() {
             return false;
         }
@@ -484,13 +485,14 @@ impl TranscribeTab {
         }
         let Some(i) = self.queue.take_next() else { return false };
         self.speech.set_force_cpu(whisper_must_use_cpu(&self.engine.state()));
+        unload_for_transcribe(self.engine.api().as_deref(), &self.engine.state(), voice_busy);
         let opts = TranscribeOptions { language: settings.whisper_language.clone(), use_gpu: settings.use_gpu };
         let ticket = self.speech.submit(SpeechJob::File { path: self.queue.items[i].0.clone(), opts });
         self.tickets.insert(ticket, i);
         true
     }
 
-    pub(crate) fn poll(&mut self, tx: &mut Tx, settings: &Settings) -> bool {
+    pub(crate) fn poll(&mut self, tx: &mut Tx, settings: &Settings, voice_busy: bool) -> bool {
         let mut changed = false;
         // Service news first: a job sends all its download events before its first update.
         for e in self.speech.drain_events() {
@@ -552,7 +554,7 @@ impl TranscribeTab {
             self.refresh_model();
             changed = true;
         }
-        changed |= self.start_next(settings);
+        changed |= self.start_next(settings, voice_busy);
         changed |= self.follow_playback(tx);
         changed
     }

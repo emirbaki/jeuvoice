@@ -153,7 +153,8 @@ impl App {
 
     /// `AppSpec::poll`: takes in what the other threads finished.
     pub fn poll(s: &mut App, _clock: f64, tx: &mut Tx) -> bool {
-        let mut changed = s.transcribe.poll(tx, &s.settings);
+        let voice_busy = s.voice.is_busy();
+        let mut changed = s.transcribe.poll(tx, &s.settings, voice_busy);
         // The voice tab uses the shared engine client once it is ready.
         if matches!(s.transcribe.engine_state(), crate::services::engine::EngineState::Ready(_)) {
             s.voice.engine_api = s.transcribe.engine_api();
