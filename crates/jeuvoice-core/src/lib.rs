@@ -1,5 +1,6 @@
 //! Shared types and logic for JeuVoice.
 pub mod audio;
+pub mod kaggle_bundle;
 pub mod peaks;
 pub mod preset;
 pub mod project;
