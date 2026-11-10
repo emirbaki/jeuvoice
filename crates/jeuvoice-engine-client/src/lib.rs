@@ -9,7 +9,7 @@ mod api;
 mod process;
 
 pub use api::{
-    EngineApi, EngineError, FakeEngineApi, Health, HttpEngine, JobId, JobState, JobStatus, PartOverride,
-    PartResult, Preset, RenderRequest, RenderResult,
+    EngineApi, EngineError, FakeEngineApi, Health, HfPrep, HttpEngine, JobId, JobState, JobStatus, PartOverride,
+    PartResult, PrepClip, Preset, RenderRequest, RenderResult, parse_prep_clips, parse_prep_manifest,
 };
 pub use process::{EngineConfig, EngineProcess};

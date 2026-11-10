@@ -16,6 +16,8 @@ pub enum PlayerOwner {
     /// The Voice tab (Plan 2) takes the player with this.
     #[allow(dead_code)]
     Voice,
+    /// The Train tab review list takes the player with this.
+    Train,
 }
 
 /// One [`Playback`] with an owner. Opening the device can fail: then playback stays

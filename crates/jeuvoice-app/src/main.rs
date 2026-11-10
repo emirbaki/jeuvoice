@@ -7,6 +7,7 @@ mod services;
 mod settings;
 mod settings_tab;
 mod state;
+mod train;
 mod transcribe;
 mod transcribe_tab;
 /// Voice tab pieces. The Voice tab (Task 11) plugs these into the window.

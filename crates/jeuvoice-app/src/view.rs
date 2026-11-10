@@ -1,7 +1,7 @@
 //! The window: a tab bar and the page for the open tab.
 
 use crate::state::{App, Tab};
-use crate::{settings_tab, transcribe_tab, voice};
+use crate::{settings_tab, train, transcribe_tab, voice};
 use rune::tok::{self, motion, radius, space, type_};
 use rune::{Cx, El, col, el, row, text};
 
@@ -34,13 +34,9 @@ pub fn view(s: &App, _: &mut Cx<App>) -> El {
         Tab::Transcribe => transcribe_tab::view(&s.transcribe),
         Tab::Voice => voice::view::view(s),
         Tab::Settings => settings_tab::view(s),
-        Tab::Train => centered(text("Coming in a later version").font(type_::BODY).color(t.text_secondary)),
+        Tab::Train => train::data_step::view(&s.train),
     };
     col().w_full().h_full().fill(t.bg).child(bar).child(body)
-}
-
-fn centered(page: El) -> El {
-    col().w_full().grow(1.0).center().child(page)
 }
 
 #[cfg(test)]

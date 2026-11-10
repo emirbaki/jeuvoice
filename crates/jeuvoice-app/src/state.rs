@@ -7,6 +7,7 @@ use jeuvoice_whisper::Transcriber;
 use rune::{TextEdit, Tx, Waker};
 
 use crate::settings::{Settings, TokenStore};
+use crate::train::state::{TrainData, training_root};
 use crate::transcribe::TranscribeTab;
 use crate::voice::state::{VoiceDeps, projects_root};
 
@@ -52,6 +53,7 @@ pub struct Deps {
 pub struct App {
     pub tab: Tab,
     pub transcribe: TranscribeTab,
+    pub train: TrainData,
     pub voice: crate::voice::state::VoiceTab,
     pub settings: Settings,
     /// Why the last save of the settings failed, in plain words.
@@ -76,9 +78,12 @@ impl App {
             presets_dir: jeuvoice_core::preset::default_presets_dir().unwrap_or_else(std::env::temp_dir),
             projects_dir: projects_root(),
         });
+        let training_dir = training_root().join("My training");
+        let train = TrainData::new("My training", training_dir, deps.transcriber.clone(), deps.ensure_model.clone(), token_store.clone(), deps.sound);
         Self {
             tab: Tab::Transcribe,
             transcribe: TranscribeTab::new(deps),
+            train,
             voice,
             settings,
             settings_error: None,
@@ -148,6 +153,7 @@ impl App {
     /// `AppSpec::setup`: starts the transcription worker with the window's waker.
     pub fn setup(s: &mut App, waker: Waker) {
         s.transcribe.setup(waker.clone());
+        s.train.setup(waker.clone());
         s.voice.setup(waker);
     }
 
@@ -155,6 +161,11 @@ impl App {
     pub fn poll(s: &mut App, _clock: f64, tx: &mut Tx) -> bool {
         let voice_busy = s.voice.is_busy();
         let mut changed = s.transcribe.poll(tx, &s.settings, voice_busy);
+        // The Train tab shares the Voice engine once it is ready.
+        if s.train.engine_api.is_none() {
+            s.train.engine_api = s.transcribe.engine_api();
+        }
+        changed |= s.train.poll(&s.settings);
         // The voice tab uses the shared engine client once it is ready.
         if matches!(s.transcribe.engine_state(), crate::services::engine::EngineState::Ready(_)) {
             s.voice.engine_api = s.transcribe.engine_api();
