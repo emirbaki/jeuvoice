@@ -175,6 +175,8 @@ pub fn sentence_spans(words: &[Word], paragraph_text: &str) -> Vec<(f64, f64)> {
     }
     let mut spans = Vec::new();
     let mut prev_end = words.first().map(|w| w.start).unwrap_or(0.0);
+    // The script word count bounds the "next heard word" search below.
+    let script_len = ranges.iter().map(|&(_, hi)| hi).max().unwrap_or(0);
     for (lo, hi) in ranges {
         let mut heard: Vec<usize> = (lo..hi).filter_map(|s| heard_of.get(&s).copied()).collect();
         heard.sort_unstable();
@@ -183,7 +185,7 @@ pub fn sentence_spans(words: &[Word], paragraph_text: &str) -> Vec<(f64, f64)> {
             (Some(&a), Some(&b)) => (words[a].start, words[b].end),
             // No heard words: the gap between the neighbours.
             _ => {
-                let next_start = ((hi)..)
+                let next_start = (hi..script_len)
                     .filter_map(|s| heard_of.get(&s))
                     .map(|&h| words[h].start)
                     .next()

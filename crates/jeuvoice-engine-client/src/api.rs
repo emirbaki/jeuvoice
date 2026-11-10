@@ -316,6 +316,8 @@ impl EngineApi for FakeEngineApi {
         let wanted = req.paragraphs.clone();
         let mut parts = Vec::new();
         let mut index = 0;
+        // Duration varies with the seed, like real renders vary with their seeds.
+        let secs = 1.0 + (req.base_seed % 3) as f32 * 0.5;
         for (para, text) in paragraphs.iter().enumerate() {
             if let Some(w) = &wanted
                 && !w.contains(&para)
@@ -323,7 +325,7 @@ impl EngineApi for FakeEngineApi {
                 continue;
             }
             index += 1;
-            let samples = vec![0.0f32; 24_000];
+            let samples = vec![0.0f32; (24_000.0 * secs) as usize];
             let file = req.out_dir.join(format!("part_{index}.wav"));
             std::fs::create_dir_all(&req.out_dir).map_err(|_| EngineError::Failed("A file could not be saved.".into()))?;
             write_wav(&file, &samples).map_err(|_| EngineError::Failed("A file could not be saved.".into()))?;
@@ -335,7 +337,7 @@ impl EngineApi for FakeEngineApi {
                 seed: req.base_seed,
                 guidance: req.preset.guidance,
                 file: file.to_string_lossy().into_owned(),
-                audio_s: 1.0,
+                audio_s: secs,
             });
         }
         let id = format!("job-{}", self.jobs.lock().unwrap().len() + 1);

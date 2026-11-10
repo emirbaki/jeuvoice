@@ -1,6 +1,6 @@
 //! Project save/load and history tests.
 
-use jeuvoice_core::project::{History, Paragraph, Project, Take, load, save};
+use jeuvoice_core::project::{History, Paragraph, Project, RenderSettings, Take, load, save};
 use jeuvoice_core::terms::Terms;
 
 fn project() -> Project {
@@ -10,11 +10,11 @@ fn project() -> Project {
         script: "Joel giriyor.".into(),
         preset: "ses_0007".into(),
         terms: Terms::default(),
-        base_seed: 1,
+        render: RenderSettings::default(),
         paragraphs: vec![Paragraph {
             index: 0,
             text: "Joel giriyor.".into(),
-            takes: vec![Take { id: 1, seed: 1, guidance: 2.5, parts: vec![], file: "audio/p00_t1.wav".into() }],
+            takes: vec![Take { id: 1, seed: 1, guidance: 2.5, parts: vec![], file: "audio/p00_t1.wav".into(), words: vec![] }],
             base_take: 0,
             splices: vec![],
             words: vec![],

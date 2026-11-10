@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use jeuvoice_core::audio::Audio;
-use jeuvoice_core::project::{Paragraph, Take, TakePart};
+use jeuvoice_core::project::{Paragraph, RenderSettings, Take, TakePart};
 use jeuvoice_core::splice::{cut_points, paragraph_audio, plan_splice, sentence_spans, split_sentences, timeline};
 use jeuvoice_core::transcript::Word;
 
@@ -33,7 +33,7 @@ fn speech_like(words: &[Word], total: f64, freq: f64) -> Audio {
 }
 
 fn take(id: u32, file: &str) -> Take {
-    Take { id, seed: 1, guidance: 2.5, parts: vec![TakePart { index: 1, file: file.into(), language: "tr".into(), text: "".into(), audio_s: 0.0 }], file: file.into() }
+    Take { id, seed: 1, guidance: 2.5, parts: vec![TakePart { index: 1, file: file.into(), language: "tr".into(), text: "".into(), audio_s: 0.0 }], file: file.into(), words: vec![] }
 }
 
 fn paragraph(text: &str, words: Vec<Word>, file: &str) -> Paragraph {
@@ -67,6 +67,16 @@ fn sentence_spans_cover_three_sentences() {
     assert_eq!(spans[0], (0.2, 1.5));
     assert_eq!(spans[1], (2.2, 3.5));
     assert_eq!(spans[2], (4.2, 5.5));
+}
+
+#[test]
+fn unmatched_heard_words_still_terminate() {
+    // Whisper heard nothing like the script: the span covers the heard range.
+    // (Plain letters: "w1" would normalize to ["w", "bir"] and match script "bir".)
+    let words = vec![word("xa", 0.0, 0.25), word("xb", 0.25, 0.5), word("xc", 0.5, 0.75)];
+    let spans = sentence_spans(&words, "Tamamen başka bir cümle.");
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0], (0.0, 0.75));
 }
 
 #[test]
@@ -161,7 +171,7 @@ fn region_across_a_paragraph_boundary_gives_two_splices() {
         script: format!("{t1}\n\n{t2}"),
         preset: "s".into(),
         terms: Terms::default(),
-        base_seed: 1,
+        render: RenderSettings::default(),
         paragraphs: vec![p1, p2],
     };
     let mut files = HashMap::new();

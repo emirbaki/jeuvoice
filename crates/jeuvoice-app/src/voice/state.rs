@@ -1,10 +1,11 @@
-//! Voice tab state, part 1: generate, play, export and projects.
+//! Voice tab state: generate, play, export, projects — plus retakes, fix word and undo.
 //!
-//! Generate runs on a worker: load the preset model, render every paragraph, join the
-//! parts, run Whisper on each paragraph, save the project. Progress and the result come
-//! back through a channel that `poll` drains on the UI thread. The engine client in use
-//! comes from the shared [`EngineService`]; tests inject a fake.
+//! Generate and retakes run on workers: load the preset model, render, join the parts,
+//! run Whisper on each take, save the project. Progress and results come back through a
+//! channel that `poll` drains on the UI thread. The engine client in use comes from the
+//! shared [`EngineService`]; tests inject a fake.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -12,9 +13,9 @@ use std::time::Duration;
 use jeuvoice_core::audio::{self, Audio};
 use jeuvoice_core::peaks::{PEAKS_PER_SECOND, Peaks, peaks};
 use jeuvoice_core::preset::{AdapterRef, Preset, list_presets};
-use jeuvoice_core::project::{Paragraph, Project, Take, save as save_project};
+use jeuvoice_core::project::{History, Paragraph, Project, RenderSettings, Take, save as save_project};
 use jeuvoice_core::script_diff::{DiffOp, script_diff};
-use jeuvoice_core::splice::timeline;
+use jeuvoice_core::splice::{plan_splice, timeline};
 use jeuvoice_core::subtitles::to_srt;
 use jeuvoice_core::transcript::{Transcript, Word};
 use jeuvoice_engine_client::{EngineApi, JobId};
@@ -56,10 +57,11 @@ pub struct VoiceTimeline {
     pub duration: f64,
 }
 
-/// News from the Generate worker.
+/// News from the Generate and retake workers.
 enum VoiceEvent {
     Progress(String),
     Done(Box<VoiceDone>),
+    TakesDone(Vec<(usize, Take)>),
     Failed(String),
     Notice(String),
 }
@@ -69,6 +71,13 @@ struct VoiceDone {
     audio: Audio,
     words: Vec<Word>,
     language: String,
+    starts: Vec<(usize, f64)>,
+}
+
+/// Fix one word: its timeline index and the "say it as" field.
+pub struct FixWord {
+    pub index: usize,
+    pub field: TextEdit,
 }
 
 /// What the Voice tab runs on.
@@ -85,6 +94,15 @@ pub fn projects_root() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
+/// A word in Latin letters with inner capitals (`iPhone`, `NATO`) is likely a foreign
+/// name: Turkish text is lowercase except at sentence starts.
+pub fn looks_foreign(word: &str) -> bool {
+    let w = word.trim_matches(|c: char| !c.is_alphabetic());
+    w.len() > 1
+        && w.chars().all(|c| c.is_ascii_alphabetic() || c == '\'' || c == '\u{2019}')
+        && w[1..].chars().any(|c| c.is_ascii_uppercase())
+}
+
 pub struct VoiceTab {
     pub project: Option<Project>,
     pub script_field: TextEdit,
@@ -97,11 +115,28 @@ pub struct VoiceTab {
     pub diff: Vec<DiffOp>,
     pub view: WaveView,
     pub(crate) engine_api: Option<Arc<dyn EngineApi>>,
+    pub history: History,
+    pub active_para: Option<usize>,
+    pub picked_take: Option<u32>,
+    pub retake_regions: Vec<(usize, (f64, f64))>,
+    pub fix_word: Option<FixWord>,
+    pub term_suggest: Option<usize>,
+    pub advanced_open: bool,
+    pub adv_guidance: TextEdit,
+    pub adv_seed: TextEdit,
+    pub adv_pause: TextEdit,
+    pub adv_para_pause: TextEdit,
+    pub adv_en: TextEdit,
+    pub adv_quote: TextEdit,
+    pub adv_respell: TextEdit,
+    pub adv_para_guidance: TextEdit,
+    pub adv_para_seed: TextEdit,
     deps: VoiceDeps,
     waker: Waker,
     events_tx: mpsc::Sender<VoiceEvent>,
     events: mpsc::Receiver<VoiceEvent>,
     pub(crate) pending_generate: bool,
+    para_starts: Vec<(usize, f64)>,
     was_playing: bool,
     synced_playhead: f64,
 }
@@ -128,11 +163,28 @@ impl VoiceTab {
             diff: Vec::new(),
             view: WaveView { start: 0.0, span: 1.0, selection: None, playhead: 0.0 },
             engine_api: None,
+            history: History::default(),
+            active_para: None,
+            picked_take: None,
+            retake_regions: Vec::new(),
+            fix_word: None,
+            term_suggest: None,
+            advanced_open: false,
+            adv_guidance: TextEdit::new(""),
+            adv_seed: TextEdit::new(""),
+            adv_pause: TextEdit::new(""),
+            adv_para_pause: TextEdit::new(""),
+            adv_en: TextEdit::new(""),
+            adv_quote: TextEdit::new(""),
+            adv_respell: TextEdit::new(""),
+            adv_para_guidance: TextEdit::new(""),
+            adv_para_seed: TextEdit::new(""),
             deps,
             waker: Arc::new(|| {}),
             events_tx,
             events,
             pending_generate: false,
+            para_starts: Vec::new(),
             was_playing: false,
             synced_playhead: 0.0,
         }
@@ -152,8 +204,18 @@ impl VoiceTab {
         }
     }
 
-    /// Start a Generate run. The engine client comes from the shared service; the CPU
-    /// flag and token store come from the app.
+    fn refresh_presets(&mut self) {
+        self.presets = list_presets(&self.deps.presets_dir);
+    }
+
+    /// Paragraph for the takes panel: the retake context, else paragraph 0.
+    pub fn panel_para(&self) -> Option<usize> {
+        self.active_para
+            .or_else(|| self.retake_regions.first().map(|&(p, _)| p))
+            .or_else(|| self.project.as_ref().and_then(|p| p.paragraphs.first().map(|q| q.index)))
+    }
+
+    /// Start a Generate run with the shared engine service and settings.
     pub fn generate(
         &mut self,
         engine: &mut EngineService,
@@ -194,7 +256,8 @@ impl VoiceTab {
         };
         // The clip, resolved to an absolute path for the engine.
         let preset_dir = self.deps.presets_dir.join(&preset.name);
-        let ref_audio = preset.ref_audio.as_ref().map(|r| preset_dir.join(r).to_string_lossy().into_owned());
+        let ref_audio =
+            preset.ref_audio.as_ref().map(|r| preset_dir.join(r).to_string_lossy().into_owned());
         if project_fresh(&self.project, &script) {
             self.project = Some(Project {
                 version: 1,
@@ -202,7 +265,7 @@ impl VoiceTab {
                 script: script.clone(),
                 preset: preset.name.clone(),
                 terms: settings.terms.clone(),
-                base_seed: 1,
+                render: render_from_preset(&preset),
                 paragraphs: paragraphs_of(&script)
                     .into_iter()
                     .enumerate()
@@ -234,33 +297,42 @@ impl VoiceTab {
             return;
         }
         let script = self.script_field.text.clone();
+        let preset = self.presets.iter().find(|p| p.name == self.preset_name).cloned();
+        let (preset_name, render) = match preset {
+            Some(p) => (p.name.clone(), render_from_preset(&p)),
+            None => ("".into(), RenderSettings::default()),
+        };
         self.project = Some(Project {
             version: 1,
             name: name.clone(),
             script: script.clone(),
-            preset: self.preset_name.clone(),
+            preset: preset_name,
             terms: default_terms(),
-            base_seed: 1,
+            render,
             paragraphs: paragraphs_of(&script)
                 .into_iter()
                 .enumerate()
                 .map(|(index, text)| Paragraph { index, text, takes: vec![], base_take: 0, splices: vec![], words: vec![] })
                 .collect(),
         });
+        self.history = History::default();
+        self.sync_advanced_fields();
         self.save_project_async();
         self.notice = Some(format!("New project {name}."));
     }
 
-    /// Open `dir` (a folder with `project.json`) and rebuild its timeline.
+    /// Open `dir` (a folder with a `project.json`) and rebuild its timeline.
     pub fn open_project(&mut self, dir: &Path) {
         match jeuvoice_core::project::load(dir) {
             Ok(project) => {
                 self.script_field = TextEdit::new(project.script.clone());
                 self.name_field = TextEdit::new(project.name.clone());
                 self.preset_name = project.preset.clone();
-                self.presets = list_presets(&self.deps.presets_dir);
+                self.refresh_presets();
                 self.project = Some(project);
+                self.history = History::default();
                 self.rebuild_timeline();
+                self.sync_advanced_fields();
                 self.status = VoiceStatus::Ready;
                 self.notice = None;
             }
@@ -305,16 +377,17 @@ impl VoiceTab {
         let dir = self.deps.projects_dir.join(&project.name);
         let audio_dir = dir.join(TAKE_PREFIX);
         let load = |f: &str| audio::decode(&audio_dir.join(f)).unwrap_or(Audio { samples: vec![], rate: 24_000 });
-        let para_pause = self.presets.iter().find(|p| p.name == project.preset).map(|p| p.para_pause).unwrap_or(0.3);
-        let (joined, starts) = timeline(&project, &load, para_pause as f64);
-        self.set_timeline(joined, timeline_words(&project, &starts), project);
+        let para_pause = project.render.para_pause;
+        let (joined, starts) = timeline(&project, &load, para_pause);
+        self.set_timeline(joined, timeline_words(&project, &starts), project, &starts);
     }
 
-    fn set_timeline(&mut self, audio: Audio, words: Vec<Word>, project: Project) {
+    fn set_timeline(&mut self, audio: Audio, words: Vec<Word>, project: Project, starts: &[(usize, f64)]) {
         let duration = audio.samples.len() as f64 / f64::from(audio.rate.max(1));
         let peaks = peaks(&audio, PEAKS_PER_SECOND);
         self.view = WaveView { start: 0.0, span: duration.max(0.001), selection: None, playhead: 0.0 };
         self.synced_playhead = 0.0;
+        self.para_starts = starts.to_vec();
         self.timeline = Some(VoiceTimeline { audio, words, language: "tr".into(), peaks, duration });
         self.project = Some(project);
         self.refresh_diff();
@@ -333,6 +406,339 @@ impl VoiceTab {
     /// The timeline transcript, for export and the script check.
     pub fn transcript(&self) -> Option<Transcript> {
         self.timeline.as_ref().map(|t| Transcript { language: t.language.clone(), words: t.words.clone() })
+    }
+
+    /// Retake the dragged region (or the stored one for "try 3 more").
+    pub fn retake(&mut self, engine: &mut EngineService, settings: &Settings, store: Arc<dyn TokenStore>, force_cpu: bool) {
+        if self.timeline.is_none() {
+            self.notice = Some("Generate first.".into());
+            return;
+        }
+        let Some(region) = self.view.selection else {
+            if self.retake_regions.is_empty() {
+                self.notice = Some("Drag a region on the wave first.".into());
+            } else {
+                self.start_retakes(engine, settings, store, force_cpu, self.retake_regions.clone());
+            }
+            return;
+        };
+        let Some(project) = self.project.clone() else {
+            self.notice = Some("Generate first.".into());
+            return;
+        };
+        let mut regions = Vec::new();
+        for (para, &(_, start)) in project.paragraphs.iter().zip(self.para_starts.iter()) {
+            let len = para.words.last().map(|w| w.end).unwrap_or(0.0);
+            if region.0 < start + len && region.1 > start {
+                regions.push((para.index, ((region.0 - start).max(0.0), (region.1 - start).max(0.0))));
+            }
+        }
+        if regions.is_empty() {
+            self.notice = Some("Drag a region over spoken words.".into());
+            return;
+        }
+        self.retake_regions = regions.clone();
+        self.start_retakes(engine, settings, store, force_cpu, regions);
+    }
+
+    /// Three more takes for the last retake region.
+    pub fn try_more(&mut self, engine: &mut EngineService, settings: &Settings, store: Arc<dyn TokenStore>, force_cpu: bool) {
+        if self.retake_regions.is_empty() {
+            self.notice = Some("Drag a region on the wave first.".into());
+            return;
+        }
+        self.start_retakes(engine, settings, store, force_cpu, self.retake_regions.clone());
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_retakes(
+        &mut self,
+        engine: &mut EngineService,
+        settings: &Settings,
+        store: Arc<dyn TokenStore>,
+        force_cpu: bool,
+        regions: Vec<(usize, (f64, f64))>,
+    ) {
+        let Some(api) = self.engine_api.clone().or_else(|| engine.api()) else {
+            engine.ensure_started();
+            self.status = VoiceStatus::StartingEngine;
+            self.pending_generate = true;
+            return;
+        };
+        let Some(project) = self.project.clone() else {
+            self.notice = Some("Generate first.".into());
+            return;
+        };
+        let Some(preset) = self.presets.iter().find(|p| p.name == project.preset).cloned().or_else(|| {
+            self.presets.iter().find(|p| p.name == self.preset_name).cloned()
+        }) else {
+            self.status = VoiceStatus::Failed("Choose a preset first.".into());
+            return;
+        };
+        let adapter_dir = match &preset.model.adapter {
+            AdapterRef::None => None,
+            other => {
+                let ctx = ResolveCtx { store: store.as_ref(), engine: Some(api.clone()) };
+                match resolve_adapter(other, settings, &ctx) {
+                    Ok(dir) => Some(dir.to_string_lossy().into_owned()),
+                    Err(e) => {
+                        self.status = VoiceStatus::Failed(e);
+                        return;
+                    }
+                }
+            }
+        };
+        let preset_dir = self.deps.presets_dir.join(&preset.name);
+        let ref_audio =
+            preset.ref_audio.as_ref().map(|r| preset_dir.join(r).to_string_lossy().into_owned());
+        // Sync terms and render (the Advanced panel may have changed them).
+        let mut project = project;
+        if let Err(e) = self.read_advanced(&mut project) {
+            self.notice = Some(e);
+            return;
+        }
+        self.project = Some(project.clone());
+        self.save_project_async();
+        let transcriber = self.deps.transcriber.clone();
+        let projects_dir = self.deps.projects_dir.clone();
+        let language = settings.whisper_language.clone();
+        let use_gpu = settings.use_gpu && !force_cpu;
+        let (events_tx, wake) = (self.events_tx.clone(), self.waker.clone());
+        let say = move |e: VoiceEvent| {
+            let _ = events_tx.send(e);
+            wake();
+        };
+        self.status = VoiceStatus::Working("Retaking…".into());
+        self.active_para = regions.first().map(|&(p, _)| p);
+        std::thread::spawn(move || {
+            run_retakes(api, transcriber, preset, adapter_dir, ref_audio, project, projects_dir, regions, language, use_gpu, say);
+        });
+    }
+
+    /// Play a take in the shared player (and select it for "Use this take").
+    pub fn play_take(&mut self, player: &mut SharedPlayer, para: usize, take_id: u32) {
+        let Some(project) = &self.project else { return };
+        let Some(p) = project.paragraphs.iter().find(|p| p.index == para) else { return };
+        let Some(take) = p.takes.iter().find(|t| t.id == take_id) else { return };
+        let path = self.deps.projects_dir.join(&project.name).join(TAKE_PREFIX).join(&take.file);
+        let Ok(a) = audio::decode(&path) else {
+            self.notice = Some(format!("The take {} could not be played.", take.id));
+            return;
+        };
+        let start = self.para_starts.iter().find(|&&(i, _)| i == para).map(|&(_, s)| s).unwrap_or(0.0);
+        self.picked_take = Some(take_id);
+        self.active_para = Some(para);
+        self.view.playhead = start;
+        self.sync_para_override_fields();
+        player.load(PlayerOwner::Voice, a);
+        if let Some(pb) = player.player(PlayerOwner::Voice) {
+            pb.seek(0.0);
+            pb.play();
+        }
+    }
+
+    /// Use the picked take: splice it over its region and remember undo.
+    pub fn use_take(&mut self) {
+        let (Some(para_idx), Some(take_id)) = (self.active_para.or(self.retake_regions.first().map(|&(p, _)| p)), self.picked_take) else {
+            self.notice = Some("Pick a take first.".into());
+            return;
+        };
+        let Some(mut project) = self.project.clone() else { return };
+        let Some(region) = self.retake_regions.iter().find(|&&(p, _)| p == para_idx).map(|&(_, r)| r) else {
+            self.notice = Some("Retake first.".into());
+            return;
+        };
+        let Some(para_no) = project.paragraphs.iter().position(|p| p.index == para_idx) else { return };
+        let (old_audio, new_audio, take, new_words) = {
+            let para = &project.paragraphs[para_no];
+            let Some(take) = para.takes.iter().find(|t| t.id == take_id).cloned() else {
+                self.notice = Some("Pick a take first.".into());
+                return;
+            };
+            let dir = self.deps.projects_dir.join(&project.name).join(TAKE_PREFIX);
+            let load = |f: &str| audio::decode(&dir.join(f)).unwrap_or(Audio { samples: vec![], rate: 24_000 });
+            let Some(base) = para.takes.get(para.base_take) else { return };
+            (load(&base.file), load(&take.file), take.clone(), take.words.clone())
+        };
+        let sp = {
+            let para = &project.paragraphs[para_no];
+            plan_splice(para, &old_audio, &take, &new_audio, &new_words, region)
+        };
+        self.history.push(project.clone());
+        project.paragraphs[para_no].splices.push(sp);
+        self.project = Some(project);
+        self.rebuild_timeline();
+        self.save_project_async();
+        self.status = VoiceStatus::Ready;
+    }
+
+    /// Open the "say it as" field for timeline word `i`.
+    pub fn fix_word(&mut self, i: usize) {
+        let Some(w) = self.timeline.as_ref().and_then(|t| t.words.get(i)).cloned() else { return };
+        let mut field = TextEdit::new(w.text.clone());
+        (field.anchor, field.focus) = (0, field.text.len());
+        field.focused = true;
+        self.fix_word = Some(FixWord { index: i, field });
+        self.term_suggest = None;
+    }
+
+    pub fn cancel_fix(&mut self) {
+        self.fix_word = None;
+    }
+
+    /// Add the respell and retake the word's paragraph.
+    pub fn retake_word(
+        &mut self,
+        engine: &mut EngineService,
+        settings: &Settings,
+        store: Arc<dyn TokenStore>,
+        force_cpu: bool,
+    ) {
+        let (Some(fix), Some(project)) = (self.fix_word.take(), self.project.clone()) else { return };
+        let Some(word) = self.timeline.as_ref().and_then(|t| t.words.get(fix.index)).cloned() else { return };
+        let new_text = fix.field.text.trim().to_string();
+        if new_text.is_empty() {
+            return;
+        }
+        let mut project = project;
+        project.terms.respell.push((word.text.to_lowercase(), new_text.to_lowercase()));
+        self.adv_respell = TextEdit::new(
+            project.terms.respell.iter().map(|(o, n)| format!("{o}={n}")).collect::<Vec<_>>().join(", "),
+        );
+        self.project = Some(project);
+        self.save_project_async();
+        // The word's paragraph, in paragraph time.
+        for (para, &(_, start)) in self.project.as_ref().unwrap().paragraphs.iter().zip(self.para_starts.iter()) {
+            let len = para.words.last().map(|w| w.end).unwrap_or(0.0);
+            if word.start >= start && word.start < start + len {
+                let local = ((word.start - start).max(0.0), (word.end - start).max(0.0));
+                self.retake_regions = vec![(para.index, local)];
+                self.start_retakes(engine, settings, store, force_cpu, self.retake_regions.clone());
+                return;
+            }
+        }
+        // Fallback: the first paragraph.
+        if let Some(first) = self.project.as_ref().and_then(|p| p.paragraphs.first()).map(|p| p.index) {
+            self.retake_regions = vec![(first, (word.start, word.end))];
+            self.start_retakes(engine, settings, store, force_cpu, self.retake_regions.clone());
+        }
+    }
+
+    /// Click a word: play from it, and offer the English-terms hint for foreign words.
+    pub fn select_word(&mut self, i: usize) {
+        self.seek_word(i);
+        self.term_suggest = self
+            .timeline
+            .as_ref()
+            .and_then(|t| t.words.get(i))
+            .filter(|w| looks_foreign(&w.text))
+            .map(|_| i);
+    }
+
+    /// Add the suggested word to the project English terms.
+    pub fn add_en_term(&mut self) {
+        let Some(i) = self.term_suggest.take() else { return };
+        let Some(project) = self.project.clone() else { return };
+        let Some(word) = self.timeline.as_ref().and_then(|t| t.words.get(i)).map(|w| w.text.to_lowercase()) else { return };
+        let mut project = project;
+        if !project.terms.en.iter().any(|e| e == &word) {
+            project.terms.en.push(word.clone());
+        }
+        self.adv_en = TextEdit::new(project.terms.en.join(", "));
+        self.project = Some(project);
+        self.save_project_async();
+        self.notice = Some(format!("Added {word} to English terms."));
+    }
+
+    pub fn undo(&mut self) {
+        let Some(project) = self.project.clone() else { return };
+        if let Some(prev) = self.history.undo(project) {
+            self.project = Some(prev);
+            self.rebuild_timeline();
+            self.save_project_async();
+            self.status = VoiceStatus::Ready;
+        }
+    }
+
+    pub fn redo(&mut self) {
+        let Some(project) = self.project.clone() else { return };
+        if let Some(next) = self.history.redo(project) {
+            self.project = Some(next);
+            self.rebuild_timeline();
+            self.save_project_async();
+            self.status = VoiceStatus::Ready;
+        }
+    }
+
+    /// Fill the Advanced fields from the open project (or defaults).
+    pub fn sync_advanced_fields(&mut self) {
+        let (render, terms) = self
+            .project
+            .as_ref()
+            .map(|p| (p.render.clone(), p.terms.clone()))
+            .unwrap_or_else(|| (RenderSettings::default(), default_terms()));
+        self.adv_guidance = TextEdit::new(render.guidance.to_string());
+        self.adv_seed = TextEdit::new(render.base_seed.to_string());
+        self.adv_pause = TextEdit::new(render.pause.to_string());
+        self.adv_para_pause = TextEdit::new(render.para_pause.to_string());
+        self.adv_en = TextEdit::new(terms.en.join(", "));
+        self.adv_quote = TextEdit::new(terms.quote.join(", "));
+        self.adv_respell = TextEdit::new(
+            terms.respell.iter().map(|(o, n)| format!("{o}={n}")).collect::<Vec<_>>().join(", "),
+        );
+        self.sync_para_override_fields();
+    }
+
+    fn sync_para_override_fields(&mut self) {
+        let para = self.panel_para();
+        let ov = para.and_then(|p| self.project.as_ref()?.render.overrides.get(&p)).cloned().unwrap_or_default();
+        self.adv_para_guidance = TextEdit::new(ov.guidance.map(|g| g.to_string()).unwrap_or_default());
+        self.adv_para_seed = TextEdit::new(ov.seed.map(|s| s.to_string()).unwrap_or_default());
+    }
+
+    /// Read the Advanced panel into the project. Plain errors, nothing applied on error.
+    pub fn apply_advanced(&mut self) {
+        let Some(mut project) = self.project.clone() else {
+            self.notice = Some("Open a project first.".into());
+            return;
+        };
+        if let Err(e) = self.read_advanced(&mut project) {
+            self.notice = Some(e);
+            return;
+        }
+        self.project = Some(project);
+        self.save_project_async();
+        self.notice = Some("Advanced settings saved.".into());
+    }
+
+    /// Read the Advanced panel into `project` (retakes and Generate share this).
+    fn read_advanced(&self, project: &mut Project) -> Result<(), String> {
+        let guidance: f32 =
+            self.adv_guidance.text.trim().parse().map_err(|_| "Guidance must be a number.".to_string())?;
+        let base_seed: u64 =
+            self.adv_seed.text.trim().parse().map_err(|_| "The base seed must be a whole number.".to_string())?;
+        let pause: f64 = self.adv_pause.text.trim().parse().map_err(|_| "Pause must be a number.".to_string())?;
+        let para_pause: f64 =
+            self.adv_para_pause.text.trim().parse().map_err(|_| "Paragraph pause must be a number.".to_string())?;
+        project.render.guidance = guidance;
+        project.render.base_seed = base_seed;
+        project.render.pause = pause.max(0.0);
+        project.render.para_pause = para_pause.max(0.0);
+        project.terms.en = split_list(&self.adv_en.text);
+        project.terms.quote = split_list(&self.adv_quote.text);
+        project.terms.respell = split_respell(&self.adv_respell.text);
+        if let Some(para) = self.panel_para() {
+            let guidance = parse_opt::<f32>(&self.adv_para_guidance.text)
+                .map_err(|_| "Paragraph guidance must be a number or empty.".to_string())?;
+            let seed = parse_opt::<u64>(&self.adv_para_seed.text)
+                .map_err(|_| "Paragraph seed must be a whole number or empty.".to_string())?;
+            if guidance.is_none() && seed.is_none() {
+                project.render.overrides.remove(&para);
+            } else {
+                project.render.overrides.insert(para, jeuvoice_core::project::ParaOverride { guidance, seed });
+            }
+        }
+        Ok(())
     }
 
     /// Ask where to save the timeline as a 24 kHz 16-bit WAV.
@@ -447,7 +853,7 @@ impl VoiceTab {
         changed
     }
 
-    /// Take in what the Generate worker finished.
+    /// Take in what the workers finished.
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         while let Ok(e) = self.events.try_recv() {
@@ -456,9 +862,27 @@ impl VoiceTab {
                 VoiceEvent::Progress(m) => self.status = VoiceStatus::Working(m),
                 VoiceEvent::Done(done) => {
                     let done = *done;
-                    self.set_timeline(done.audio, done.words, done.project);
+                    let starts = done.starts.clone();
+                    self.set_timeline(done.audio, done.words, done.project, &starts);
                     self.status = VoiceStatus::Ready;
+                    self.sync_advanced_fields();
                     self.save_project_async();
+                }
+                VoiceEvent::TakesDone(takes) => {
+                    let mut project = match self.project.clone() {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    for (para, take) in takes {
+                        if let Some(p) = project.paragraphs.iter_mut().find(|p| p.index == para) {
+                            p.takes.push(take);
+                        }
+                    }
+                    self.active_para = self.panel_para();
+                    self.sync_para_override_fields();
+                    self.project = Some(project);
+                    self.save_project_async();
+                    self.status = VoiceStatus::Ready;
                 }
                 VoiceEvent::Failed(e) => self.status = VoiceStatus::Failed(e),
                 VoiceEvent::Notice(n) => self.notice = Some(n),
@@ -476,6 +900,17 @@ fn nonempty(s: &str, fallback: &str) -> String {
 /// A fresh project when there is none, or the script changed since.
 fn project_fresh(project: &Option<Project>, script: &str) -> bool {
     project.as_ref().is_none_or(|p| p.script != script)
+}
+
+/// Render settings from a preset (the Advanced starting point).
+fn render_from_preset(preset: &Preset) -> RenderSettings {
+    RenderSettings {
+        guidance: preset.guidance,
+        base_seed: preset.seed,
+        pause: preset.pause as f64,
+        para_pause: preset.para_pause as f64,
+        overrides: HashMap::new(),
+    }
 }
 
 /// Paragraph texts of a script, like the engine splits them: blank lines apart,
@@ -513,6 +948,28 @@ fn timeline_words(project: &Project, starts: &[(usize, f64)]) -> Vec<Word> {
     words
 }
 
+fn split_list(s: &str) -> Vec<String> {
+    s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()
+}
+
+fn split_respell(s: &str) -> Vec<(String, String)> {
+    s.split(',')
+        .filter_map(|pair| {
+            let (o, n) = pair.split_once('=')?;
+            let (o, n) = (o.trim().to_lowercase(), n.trim().to_lowercase());
+            (!o.is_empty() && !n.is_empty()).then_some((o, n))
+        })
+        .collect()
+}
+
+fn parse_opt<T: std::str::FromStr>(s: &str) -> Result<Option<T>, ()> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    s.parse().map(Some).map_err(|_| ())
+}
+
 /// The Generate worker: load, render, join, whisper, save. Reports through `say`.
 #[allow(clippy::too_many_arguments)]
 fn run_generate(
@@ -536,6 +993,7 @@ fn run_generate(
     if !wait_job(&api, &load) {
         return fail("The voice model could not be loaded.".into());
     }
+    let render = project.render.clone();
     let mut wire = match serde_json::from_value::<jeuvoice_engine_client::Preset>(jeuvoice_core::preset::to_engine_json(
         &preset,
         None,
@@ -544,25 +1002,26 @@ fn run_generate(
         Ok(w) => w,
         Err(_) => return fail("The preset is broken. Make it again in the preset editor.".into()),
     };
+    wire.guidance = render.guidance;
     wire.ref_audio = ref_audio;
     wire.ref_text = preset.ref_text.clone();
     let req = jeuvoice_engine_client::RenderRequest {
         script: project.script.clone(),
         paragraphs: None,
         preset: wire,
-        terms: default_terms(),
-        base_seed: project.base_seed,
+        terms: project.terms.clone(),
+        base_seed: render.base_seed,
         part_overrides: Default::default(),
         out_dir: PathBuf::from(projects_dir.join(&project.name).join(TAKE_PREFIX).join(".parts").to_string_lossy().into_owned()),
     };
-    let render = match api.render(&req) {
+    let render_job = match api.render(&req) {
         Ok(job) => job,
         Err(e) => return fail(e.to_string()),
     };
-    if !wait_job(&api, &render) {
+    if !wait_job(&api, &render_job) {
         return fail("The render failed. Try again.".into());
     }
-    let result = match api.job(&render).ok().and_then(|s| s.result) {
+    let result = match api.job(&render_job).ok().and_then(|s| s.result) {
         Some(r) => r,
         None => return fail("The render failed. Try again.".into()),
     };
@@ -581,10 +1040,9 @@ fn run_generate(
         let mut samples = Vec::new();
         for (k, pt) in parts.iter().enumerate() {
             if k > 0 {
-                samples.extend(std::iter::repeat_n(0.0, (preset.pause.max(0.0) * 24_000.0).round() as usize));
+                samples.extend(std::iter::repeat_n(0.0, (render.pause.max(0.0) * 24_000.0).round() as usize));
             }
             match hound::WavReader::open(&pt.file) {
-                // Hound reads the file's native format only: i16 in, f32 out.
                 Ok(mut reader) => samples.extend(reader.samples::<i16>().filter_map(|s| s.ok()).map(|s| s as f32 / i16::MAX as f32)),
                 Err(_) => return fail("The render failed. Try again.".into()),
             }
@@ -593,10 +1051,20 @@ fn run_generate(
         if write_wav_16(&audio_dir.join(&file), &Audio { samples, rate: 24_000 }).is_err() {
             return fail("The project folder could not be saved.".into());
         }
+        let path = audio_dir.join(&file);
+        let data = match audio::decode(&path) {
+            Ok(a) => audio::to_whisper(&a),
+            Err(e) => return fail(e.to_string()),
+        };
+        let opts = TranscribeOptions { language: language.clone(), use_gpu };
+        let words = match transcriber.transcribe(&data, &opts, &mut |_| {}) {
+            Ok(t) => t.words,
+            Err(e) => return fail(e.to_string()),
+        };
         para.takes.push(Take {
             id: take_id,
-            seed: project.base_seed,
-            guidance: preset.guidance,
+            seed: render.base_seed,
+            guidance: render.guidance,
             parts: parts
                 .iter()
                 .map(|pt| {
@@ -610,22 +1078,10 @@ fn run_generate(
                 })
                 .collect(),
             file: format!("p{para_no:02}_t{take_id}.wav"),
+            words: words.clone(),
         });
         para.base_take = para.takes.len() - 1;
-    }
-    say(VoiceEvent::Progress("Reading the words…".into()));
-    let opts = TranscribeOptions { language, use_gpu };
-    for para in &mut project.paragraphs {
-        let Some(take) = para.takes.last() else { continue };
-        let path = audio_dir.join(&take.file);
-        let data = match audio::decode(&path) {
-            Ok(a) => audio::to_whisper(&a),
-            Err(e) => return fail(e.to_string()),
-        };
-        match transcriber.transcribe(&data, &opts, &mut |_| {}) {
-            Ok(t) => para.words = t.words,
-            Err(e) => return fail(e.to_string()),
-        }
+        para.words = words;
     }
     let dir = projects_dir.join(&project.name);
     if jeuvoice_core::project::save(&project, &dir).is_err() {
@@ -634,9 +1090,138 @@ fn run_generate(
     let _ = std::fs::remove_dir_all(dir.join(TAKE_PREFIX).join(".parts"));
     // Joined timeline audio and words for the reply.
     let load = |f: &str| audio::decode(&dir.join(TAKE_PREFIX).join(f)).unwrap_or(Audio { samples: vec![], rate: 24_000 });
-    let (joined, starts) = timeline(&project, &load, preset.para_pause as f64);
+    let (joined, starts) = timeline(&project, &load, render.para_pause);
     let words = timeline_words(&project, &starts);
-    say(VoiceEvent::Done(Box::new(VoiceDone { project, audio: joined, words, language: opts.language.clone() })));
+    say(VoiceEvent::Done(Box::new(VoiceDone { project, audio: joined, words, language, starts })));
+}
+
+/// The retake worker: one render job per seed for each covering paragraph.
+#[allow(clippy::too_many_arguments)]
+fn run_retakes(
+    api: Arc<dyn EngineApi>,
+    transcriber: Arc<dyn Transcriber>,
+    preset: Preset,
+    adapter_dir: Option<String>,
+    ref_audio: Option<String>,
+    project: Project,
+    projects_dir: PathBuf,
+    regions: Vec<(usize, (f64, f64))>,
+    language: String,
+    use_gpu: bool,
+    say: impl Fn(VoiceEvent) + Send + 'static,
+) {
+    let fail = |e: String| say(VoiceEvent::Failed(e));
+    say(VoiceEvent::Progress("Loading the voice model…".into()));
+    let load = match api.load(&preset.model.base, adapter_dir.as_deref(), "auto") {
+        Ok(job) => job,
+        Err(e) => return fail(e.to_string()),
+    };
+    if !wait_job(&api, &load) {
+        return fail("The voice model could not be loaded.".into());
+    }
+    let audio_dir = projects_dir.join(&project.name).join(TAKE_PREFIX);
+    if std::fs::create_dir_all(&audio_dir).is_err() {
+        return fail("The project folder could not be saved.".into());
+    }
+    let mut next_id = project.paragraphs.iter().flat_map(|p| p.takes.iter().map(|t| t.id)).max().unwrap_or(0) + 1;
+    let mut done: Vec<(usize, Take)> = Vec::new();
+    for &(para_no, _) in &regions {
+        let ov = project.render.overrides.get(&para_no).cloned().unwrap_or_default();
+        for _ in 0..3 {
+            let take_id = next_id;
+            next_id += 1;
+            let base = ov.seed.unwrap_or_else(|| project.render.base_seed + 1000 * take_id as u64);
+            let mut wire = match serde_json::from_value::<jeuvoice_engine_client::Preset>(
+                jeuvoice_core::preset::to_engine_json(&preset, None, None),
+            ) {
+                Ok(w) => w,
+                Err(_) => return fail("The preset is broken. Make it again in the preset editor.".into()),
+            };
+            wire.guidance = ov.guidance.unwrap_or(project.render.guidance);
+            wire.ref_audio = ref_audio.clone();
+            wire.ref_text = preset.ref_text.clone();
+            let req = jeuvoice_engine_client::RenderRequest {
+                script: project.script.clone(),
+                paragraphs: Some(vec![para_no]),
+                preset: wire,
+                terms: project.terms.clone(),
+                base_seed: base,
+                part_overrides: Default::default(),
+                out_dir: PathBuf::from(
+                    projects_dir.join(&project.name).join(TAKE_PREFIX).join(".parts").to_string_lossy().into_owned(),
+                ),
+            };
+            say(VoiceEvent::Progress(format!("Take {take_id}…")));
+            let job = match api.render(&req) {
+                Ok(job) => job,
+                Err(e) => return fail(e.to_string()),
+            };
+            if !wait_job(&api, &job) {
+                return fail("The render failed. Try again.".into());
+            }
+            let result = match api.job(&job).ok().and_then(|s| s.result) {
+                Some(r) => r,
+                None => return fail("The render failed. Try again.".into()),
+            };
+            let mut parts: Vec<_> = result.parts.iter().filter(|pt| pt.paragraph == para_no).collect();
+            parts.sort_by_key(|pt| pt.index);
+            if parts.is_empty() {
+                return fail("The render failed. Try again.".into());
+            }
+            let mut samples = Vec::new();
+            for (k, pt) in parts.iter().enumerate() {
+                if k > 0 {
+                    samples.extend(std::iter::repeat_n(0.0, (project.render.pause.max(0.0) * 24_000.0).round() as usize));
+                }
+                match hound::WavReader::open(&pt.file) {
+                    Ok(mut reader) => samples.extend(reader.samples::<i16>().filter_map(|s| s.ok()).map(|s| s as f32 / i16::MAX as f32)),
+                    Err(_) => return fail("The render failed. Try again.".into()),
+                }
+            }
+            let file = format!("p{para_no:02}_t{take_id}.wav");
+            if write_wav_16(&audio_dir.join(&file), &Audio { samples, rate: 24_000 }).is_err() {
+                return fail("The project folder could not be saved.".into());
+            }
+            let path = audio_dir.join(&file);
+            let data = match audio::decode(&path) {
+                Ok(a) => audio::to_whisper(&a),
+                Err(e) => return fail(e.to_string()),
+            };
+            let opts = TranscribeOptions { language: language.clone(), use_gpu };
+            let words = match transcriber.transcribe(&data, &opts, &mut |_| {}) {
+                Ok(t) => t.words,
+                Err(e) => return fail(e.to_string()),
+            };
+            done.push((
+                para_no,
+                Take {
+                    id: take_id,
+                    seed: base,
+                    guidance: ov.guidance.unwrap_or(project.render.guidance),
+                    parts: parts
+                        .iter()
+                        .map(|pt| {
+                            jeuvoice_core::project::TakePart {
+                                index: pt.index,
+                                file: pt.file.clone(),
+                                language: pt.language.clone(),
+                                text: pt.text.clone(),
+                                audio_s: pt.audio_s,
+                            }
+                        })
+                        .collect(),
+                    file,
+                    words,
+                },
+            ));
+        }
+    }
+    let dir = projects_dir.join(&project.name);
+    if jeuvoice_core::project::save(&project, &dir).is_err() {
+        return fail("The project folder could not be saved.".into());
+    }
+    let _ = std::fs::remove_dir_all(dir.join(TAKE_PREFIX).join(".parts"));
+    say(VoiceEvent::TakesDone(done));
 }
 
 /// Wait for an engine job. `false` when it fails or is cancelled.
@@ -666,4 +1251,22 @@ fn write_wav_16(path: &Path, audio: &Audio) -> std::io::Result<()> {
     }
     w.finalize().map_err(std::io::Error::other)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_foreign;
+
+    #[test]
+    fn inner_capitals_look_foreign() {
+        assert!(looks_foreign("iPhone"));
+        assert!(looks_foreign("NATO"));
+        assert!(looks_foreign("McDonald"));
+        assert!(!looks_foreign("Joel"));
+        assert!(!looks_foreign("The"));
+        assert!(!looks_foreign("girdi"));
+        assert!(!looks_foreign("damara"));
+        assert!(!looks_foreign("a"));
+        assert!(!looks_foreign("50"));
+    }
 }

@@ -29,8 +29,34 @@ pub struct Project {
     pub preset: String,
     #[serde(default)]
     pub terms: Terms,
-    pub base_seed: u64,
+    #[serde(default)]
+    pub render: RenderSettings,
     pub paragraphs: Vec<Paragraph>,
+}
+
+/// How the next render runs: Advanced panel values, saved with the project.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RenderSettings {
+    pub guidance: f32,
+    pub base_seed: u64,
+    pub pause: f64,
+    pub para_pause: f64,
+    /// Per-paragraph overrides, keyed by paragraph index.
+    #[serde(default)]
+    pub overrides: std::collections::HashMap<usize, ParaOverride>,
+}
+
+/// Guidance and seed for one paragraph's render jobs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ParaOverride {
+    pub guidance: Option<f32>,
+    pub seed: Option<u64>,
+}
+
+impl Default for RenderSettings {
+    fn default() -> Self {
+        Self { guidance: 2.5, base_seed: 1, pause: 0.1, para_pause: 0.3, overrides: Default::default() }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -55,6 +81,9 @@ pub struct Take {
     pub parts: Vec<TakePart>,
     /// Joined paragraph WAV, relative to `audio/`.
     pub file: String,
+    /// The take's words in take time (for splicing and A/B play).
+    #[serde(default)]
+    pub words: Vec<Word>,
 }
 
 /// One rendered engine part inside a take.
