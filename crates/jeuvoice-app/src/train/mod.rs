@@ -4,6 +4,7 @@
 //! [`model_step`] and [`target_step`]; step 4 (run) comes in a later task.
 
 pub mod bundle;
+pub mod checkpoints;
 pub mod data_step;
 pub mod model_step;
 pub mod run;

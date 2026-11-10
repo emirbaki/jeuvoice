@@ -150,14 +150,18 @@ pub struct TrainData {
     pub lora_alpha_field: TextEdit,
     pub batch_field: TextEdit,
     pub save_steps_field: TextEdit,
+    /// Checkpoints with a kept replay (`(name, wav)`), newest last, at most two.
+    pub ck_replays: Vec<(String, PathBuf)>,
+    /// The checkpoint rendering now, if any.
+    pub ck_working: Option<String>,
     /// The last thing to tell the user.
     pub notice: Option<String>,
     pub(crate) engine_api: Option<Arc<dyn EngineApi>>,
     pub(crate) client: Option<Arc<dyn KaggleClient>>,
-    dir: PathBuf,
+    pub(crate) dir: PathBuf,
     token_store: Arc<dyn TokenStore>,
     kaggle_store: Arc<dyn KeyStore>,
-    run_events_tx: mpsc::Sender<RunEvent>,
+    pub(crate) run_events_tx: mpsc::Sender<RunEvent>,
     run_events: mpsc::Receiver<RunEvent>,
     statuses: HashMap<String, SourceStatus>,
     /// Clip ids waiting for Whisper text.
@@ -171,7 +175,7 @@ pub struct TrainData {
     player: SharedPlayer,
     events_tx: mpsc::Sender<TrainEvent>,
     events: mpsc::Receiver<TrainEvent>,
-    waker: Waker,
+    pub(crate) waker: Waker,
 }
 
 impl TrainData {
@@ -219,6 +223,8 @@ impl TrainData {
             batch_field: TextEdit::new(""),
             save_steps_field: TextEdit::new(""),
             notice: None,
+            ck_replays: Vec::new(),
+            ck_working: None,
             engine_api: None,
             client: None,
             dir,
@@ -887,6 +893,23 @@ impl TrainData {
                         self.save_bundle_dialog(tx, path);
                     }
                 }
+                RunEvent::CkDone { checkpoint, wav } => {
+                    self.ck_working = None;
+                    self.ck_replays.retain(|(c, _)| c != &checkpoint);
+                    self.ck_replays.push((checkpoint, wav));
+                    while self.ck_replays.len() > 2 {
+                        self.ck_replays.remove(0);
+                    }
+                    // Play the fresh take at once.
+                    if let Some((_, path)) = self.ck_replays.last() {
+                        let path = path.clone();
+                        self.replay_file(&path);
+                    }
+                }
+                RunEvent::CkFailed(message) => {
+                    self.ck_working = None;
+                    self.notice = Some(message);
+                }
             }
         }
         changed
@@ -911,6 +934,28 @@ impl TrainData {
                 c.clip.text = text;
                 self.save();
             }
+        }
+    }
+
+    /// Play a kept checkpoint replay (or pause it).
+    pub fn replay_file(&mut self, path: &Path) {
+        if self.player.is_playing_for(PlayerOwner::Train) {
+            if let Some(pb) = self.player.player(PlayerOwner::Train) {
+                pb.pause();
+            }
+            return;
+        }
+        match audio::decode(path) {
+            Ok(a) => {
+                self.player.load(PlayerOwner::Train, a);
+                if let Some(pb) = self.player.player(PlayerOwner::Train) {
+                    pb.play();
+                }
+                if let Some(e) = self.player.take_error() {
+                    self.notice = Some(e);
+                }
+            }
+            Err(e) => self.notice = Some(e.to_string()),
         }
     }
 

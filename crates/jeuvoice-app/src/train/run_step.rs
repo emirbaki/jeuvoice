@@ -232,12 +232,30 @@ fn checkpoints_card(s: &TrainData) -> El {
         return card.child(text("No checkpoints yet.").font(type_::BODY).color(t.text_secondary));
     }
     for ck in &s.checkpoints {
-        card = card.child(
-            row().w_full().gap(space::S2)
-                .child(text(ck.as_str()).key(format!("train-checkpoint-{ck}")).font(type_::BODY).color(t.text).grow(1.0).min_w(0.0))
-                // Task 8 wires Test to the checkpoint render.
-                .child(button(&format!("train-test-{ck}"), "Test", false, |_, _| {})),
-        );
+        let mut head = row()
+            .w_full()
+            .gap(space::S2)
+            .child(text(ck.as_str()).key(format!("train-checkpoint-{ck}")).font(type_::BODY).color(t.text).grow(1.0).min_w(0.0));
+        if s.ck_replays.iter().any(|(c, _)| c == ck) {
+            let slot = s.ck_replays.iter().position(|(c, _)| c == ck).unwrap_or(0);
+            let letter = ["A", "B"].get(slot).unwrap_or(&"•");
+            let ck = ck.clone();
+            head = head.child(button(&format!("train-replay-{ck}"), &format!("▶ {letter}"), true, move |s: &mut App, _| {
+                crate::train::checkpoints::replay_checkpoint(s, &ck)
+            }));
+        } else if s.ck_working.as_deref() == Some(ck) {
+            head = head.child(button(&format!("train-testing-{ck}"), "Testing…", false, |_, _| {}));
+        } else {
+            let ck = ck.clone();
+            head = head.child(button(&format!("train-test-{ck}"), "Test", true, move |s: &mut App, _| {
+                crate::train::checkpoints::test_checkpoint(s, &ck)
+            }));
+        }
+        let ck = ck.clone();
+        head = head.child(button(&format!("train-use-preset-{ck}"), "Use as preset", true, move |s: &mut App, _| {
+            crate::train::checkpoints::use_as_preset(s, &ck)
+        }));
+        card = card.child(head);
     }
     card
 }

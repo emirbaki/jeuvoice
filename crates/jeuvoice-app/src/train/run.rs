@@ -108,6 +108,10 @@ pub enum RunEvent {
     RunCancelled,
     /// The bundle is ready for "Download bundle only".
     BundleReady(PathBuf),
+    /// A checkpoint render finished: kept for replay (at most two).
+    CkDone { checkpoint: String, wav: PathBuf },
+    /// A checkpoint render failed.
+    CkFailed(String),
 }
 
 /// `(step, loss)` points from a `train.log` text. Reads lines shaped like

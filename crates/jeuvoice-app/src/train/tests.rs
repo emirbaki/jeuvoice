@@ -292,6 +292,16 @@ fn fixture() -> App {
         });
     }
     train.review = Some("my clips".into());
+    train.run = Some(crate::train::run::RunRecord {
+        name: "run-1".into(),
+        dataset: "someone/my-data".into(),
+        kernel: jeuvoice_kaggle::KernelRef { owner: "someone".into(), slug: "my-run".into(), version: Some(1) },
+        started_at: 1,
+        state: crate::train::run::RunState::Complete,
+        message: None,
+    });
+    train.checkpoints = vec!["checkpoint-3000".into(), "checkpoint-6000".into()];
+    train.ck_replays = vec![("checkpoint-6000".into(), std::path::PathBuf::from("C:/replay.wav"))];
     app.train = train;
     std::mem::forget(tmp);
     app
@@ -557,3 +567,120 @@ fn a_saved_running_run_resumes_after_a_restart() {
     rig.until("the resumed run completes", |s| s.train.run.as_ref().is_some_and(|r| r.state == crate::train::run::RunState::Complete));
     assert_eq!(rig.rt.state.train.checkpoints.len(), 3, "outputs collected after resume");
 }
+
+/// Records what the engine is asked to load and render.
+struct SpyEngine {
+    inner: FakeEngineApi,
+    loads: std::sync::Mutex<Vec<(String, Option<String>, String)>>,
+    scripts: std::sync::Mutex<Vec<String>>,
+}
+
+impl SpyEngine {
+    fn new() -> Self {
+        Self { inner: FakeEngineApi::new(), loads: Default::default(), scripts: Default::default() }
+    }
+}
+
+impl jeuvoice_engine_client::EngineApi for SpyEngine {
+    fn health(&self) -> Result<Health, jeuvoice_engine_client::EngineError> {
+        self.inner.health()
+    }
+    fn load(&self, m: &str, a: Option<&str>, d: &str) -> Result<JobId, jeuvoice_engine_client::EngineError> {
+        self.loads.lock().unwrap().push((m.into(), a.map(str::to_string), d.into()));
+        self.inner.load(m, a, d)
+    }
+    fn unload(&self) -> Result<(), jeuvoice_engine_client::EngineError> {
+        self.inner.unload()
+    }
+    fn render(&self, r: &RenderRequest) -> Result<JobId, jeuvoice_engine_client::EngineError> {
+        self.scripts.lock().unwrap().push(r.script.clone());
+        self.inner.render(r)
+    }
+    fn job(&self, id: &JobId) -> Result<JobStatus, jeuvoice_engine_client::EngineError> {
+        self.inner.job(id)
+    }
+    fn cancel(&self, id: &JobId) -> Result<(), jeuvoice_engine_client::EngineError> {
+        self.inner.cancel(id)
+    }
+    fn fetch_adapter(&self, r: &str, s: Option<&str>, t: Option<&str>) -> Result<PathBuf, jeuvoice_engine_client::EngineError> {
+        self.inner.fetch_adapter(r, s, t)
+    }
+    fn prep_clean(&self, clips: &[(String, String)], out: &std::path::Path) -> Result<JobId, jeuvoice_engine_client::EngineError> {
+        self.inner.prep_clean(clips, out)
+    }
+    fn prep_hf(&self, req: &jeuvoice_engine_client::HfPrep) -> Result<JobId, jeuvoice_engine_client::EngineError> {
+        self.inner.prep_hf(req)
+    }
+    fn prep_manifest(
+        &self,
+        clips: &[jeuvoice_engine_client::PrepClip],
+        weights: &[(String, u32)],
+        dev_ratio: f64,
+        out_dir: &std::path::Path,
+    ) -> Result<JobId, jeuvoice_engine_client::EngineError> {
+        self.inner.prep_manifest(clips, weights, dev_ratio, out_dir)
+    }
+}
+
+use jeuvoice_engine_client::{JobId, JobStatus, RenderRequest};
+
+/// A run with one checkpoint, ready to test by ear.
+fn checkpoint_rig() -> (Rig, Arc<SpyEngine>) {
+    use crate::train::run::{RunRecord, RunState};
+
+    let mut rig = Rig::new();
+    let presets = rig.tmp.path().join("presets");
+    rig.rt.state.voice.set_dirs(presets, rig.tmp.path().join("projects"));
+    let spy = Arc::new(SpyEngine::new());
+    rig.rt.state.train.set_engine(spy.clone());
+    rig.rt.update(|s, _| {
+        s.train.run = Some(RunRecord {
+            name: "run-1".into(),
+            dataset: "someone/my-data".into(),
+            kernel: KernelRef { owner: "someone".into(), slug: "my-run".into(), version: Some(1) },
+            started_at: 1,
+            state: RunState::Complete,
+            message: None,
+        });
+        s.train.checkpoints = vec!["checkpoint-3000".into()];
+    });
+    rig.rt.frame(1.0 / 60.0);
+    (rig, spy)
+}
+
+#[test]
+fn testing_a_checkpoint_loads_it_and_renders_the_fixed_text() {
+    let (mut rig, spy) = checkpoint_rig();
+    rig.train_tab();
+    rig.tap("train-test-checkpoint-3000");
+    rig.until("the replay is kept", |s| !s.train.ck_replays.is_empty());
+    let loads = spy.loads.lock().unwrap();
+    let ck = rig.tmp.path().join("training").join("runs").join("run-1").join("checkpoint-3000");
+    assert_eq!(
+        loads.last().unwrap(),
+        &("k2-fsa/OmniVoice".to_string(), Some(ck.to_string_lossy().into_owned()), "auto".to_string()),
+        "load carries the checkpoint folder"
+    );
+    assert_eq!(
+        spy.scripts.lock().unwrap().last().unwrap(),
+        crate::train::checkpoints::TEST_TEXT,
+        "render says the fixed sentence"
+    );
+    assert!(rig.rt.find("train-replay-checkpoint-3000").is_some(), "replay button appears");
+}
+
+#[test]
+fn use_as_preset_writes_a_preset_and_opens_voice() {
+    let (mut rig, _spy) = checkpoint_rig();
+    rig.train_tab();
+    rig.tap("train-use-preset-checkpoint-3000");
+    assert_eq!(rig.rt.state.tab, crate::state::Tab::Voice, "the Voice tab opens");
+    assert_eq!(rig.rt.state.voice.preset_name, "ses_0007 checkpoint-3000");
+    let preset: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(rig.tmp.path().join("presets").join("ses_0007 checkpoint-3000").join("preset.json")).unwrap(),
+    )
+    .unwrap();
+    let adapter = preset["model"]["adapter"]["Local"]["dir"].as_str().unwrap();
+    assert!(adapter.ends_with("checkpoint-3000"), "adapter is the checkpoint folder: {adapter}");
+}
+
