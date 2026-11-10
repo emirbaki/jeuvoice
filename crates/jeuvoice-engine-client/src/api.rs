@@ -539,13 +539,27 @@ impl EngineApi for FakeEngineApi {
 
     fn prep_manifest(
         &self,
-        _clips: &[PrepClip],
+        clips: &[PrepClip],
         _weights: &[(String, u32)],
         _dev_ratio: f64,
         out_dir: &std::path::Path,
     ) -> Result<JobId, EngineError> {
         std::fs::create_dir_all(out_dir).map_err(|_| EngineError::Failed("A file could not be saved.".into()))?;
-        Ok(self.done_job(serde_json::json!({"train": 0, "dev": 0})))
+        // All rows to train, like a dev_ratio of 0: the point is the files exist.
+        let mut train = String::new();
+        for c in clips {
+            let row = serde_json::json!({
+                "id": c.id,
+                "audio_path": c.audio,
+                "text": c.text,
+                "language_id": "tr",
+            });
+            train.push_str(&serde_json::to_string(&row).map_err(|_| EngineError::Failed("A file could not be saved.".into()))?);
+            train.push('\n');
+        }
+        std::fs::write(out_dir.join("train.jsonl"), train).map_err(|_| EngineError::Failed("A file could not be saved.".into()))?;
+        std::fs::write(out_dir.join("dev.jsonl"), "").map_err(|_| EngineError::Failed("A file could not be saved.".into()))?;
+        Ok(self.done_job(serde_json::json!({"train": clips.len(), "dev": 0})))
     }
 }
 

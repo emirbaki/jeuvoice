@@ -17,6 +17,11 @@ use crate::train::{StartFrom, TrainSettings};
 /// Commit of `k2-fsa/OmniVoice` the installs pin (PyPI has no LoRA training).
 const OMNIVOICE_COMMIT: &str = "08be0b4ccbac3e13e374e86fbfead4b4cac343e2";
 
+/// The tr2 run settings, shipped with the app.
+pub fn train_template() -> Value {
+    serde_json::from_str(include_str!("../../../assets/kaggle/train_template.json")).expect("the shipped train template parses")
+}
+
 /// Fill the tr2 template (`assets/kaggle/train_template.json`) with the run
 /// settings. Every other key stays exactly as tr2 ran it.
 pub fn train_config(settings: &TrainSettings, template: &Value) -> Value {

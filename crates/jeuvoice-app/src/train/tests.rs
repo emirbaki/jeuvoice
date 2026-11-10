@@ -1,5 +1,5 @@
-//! Headless tests of the Train tab data step with `FakeEngineApi` and WAVs in a
-//! temp dir: drop clips, add a Hugging Face source, weigh, exclude, reopen.
+//! Headless tests of the Train tab with `FakeEngineApi`, a fake Kaggle client
+//! and WAVs in a temp dir: data, model and target steps, then runs.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use jeuvoice_core::transcript::{Transcript, Word};
 use jeuvoice_engine_client::{FakeEngineApi, Health};
-use jeuvoice_kaggle::{KeyStore, MemStore as KaggleMem};
+use jeuvoice_kaggle::{DatasetRef, KaggleError, KernelRef, KernelSpec, KernelState, KernelStatus, KeyStore, MemStore as KaggleMem};
 use jeuvoice_whisper::{FakeTranscriber, TranscribeOptions, Transcriber, WhisperError};
 use rune::{Env, Runtime};
 
@@ -92,7 +92,7 @@ impl Rig {
         );
         app.train.set_engine(Arc::new(FakeEngineApi::new()));
         App::setup(&mut app, Arc::new(|| {}));
-        let mut rt = Runtime::new(app, view, (1100.0, 720.0), Env { system_dark: true, scale: 2.0 });
+        let mut rt = Runtime::new(app, view, (1100.0, 2400.0), Env { system_dark: true, scale: 2.0 });
         rt.poll = Some(App::poll);
         rt.frame(0.0);
         rt.frame(1.0 / 60.0);
@@ -369,4 +369,191 @@ fn picking_the_base_model_starts_from_base() {
     rig.rt.frame(1.0 / 60.0);
     rig.tap("train-model-base");
     assert_eq!(rig.rt.state.train.project.settings.start_from, StartFrom::Base);
+}
+
+/// A Kaggle client that plays a scripted run: statuses in order, one log,
+/// checkpoint folders plus `train.log` on download.
+struct FakeRun {
+    statuses: std::sync::Mutex<Vec<KernelState>>,
+    message: Option<String>,
+    log_lines: usize,
+    uploads: std::sync::atomic::AtomicUsize,
+    pushes: std::sync::atomic::AtomicUsize,
+    fail_upload: Option<String>,
+}
+
+impl FakeRun {
+    fn scripted(statuses: Vec<KernelState>) -> Self {
+        Self {
+            statuses: std::sync::Mutex::new(statuses),
+            message: None,
+            log_lines: 0,
+            uploads: Default::default(),
+            pushes: Default::default(),
+            fail_upload: None,
+        }
+    }
+}
+
+impl crate::train::run::KaggleClient for FakeRun {
+    fn upload_dataset(
+        &self,
+        _owner_slug: &str,
+        _title: &str,
+        files: &[PathBuf],
+        _private: bool,
+        progress: &mut dyn FnMut(u64, u64),
+    ) -> Result<DatasetRef, KaggleError> {
+        if let Some(e) = &self.fail_upload {
+            return Err(KaggleError::Refused(e.clone()));
+        }
+        self.uploads.fetch_add(1, Ordering::SeqCst);
+        let total: u64 = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
+        // Slow enough for a frame to see the progress.
+        progress(total / 2, total);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        progress(total, total);
+        Ok(DatasetRef { owner_slug: "someone".into(), slug: "my-data".into() })
+    }
+
+    fn push_kernel(&self, _spec: &KernelSpec) -> Result<KernelRef, KaggleError> {
+        self.pushes.fetch_add(1, Ordering::SeqCst);
+        Ok(KernelRef { owner: "someone".into(), slug: "my-run".into(), version: Some(1) })
+    }
+
+    fn kernel_status(&self, _k: &KernelRef) -> Result<KernelStatus, KaggleError> {
+        let mut script = self.statuses.lock().unwrap();
+        let state = if script.len() > 1 { script.remove(0) } else { script[0] };
+        Ok(KernelStatus { state, message: self.message.clone().filter(|_| state == KernelState::Error) })
+    }
+
+    fn kernel_log_tail(&self, _k: &KernelRef, _lines: usize) -> Result<String, KaggleError> {
+        Ok((1..=self.log_lines).map(|n| format!("step {n} loss {}", 5.0 - n as f32 * 0.1)).collect::<Vec<_>>().join("\n"))
+    }
+
+    fn download_output(&self, _k: &KernelRef, dest: &std::path::Path, progress: &mut dyn FnMut(u64, u64)) -> Result<Vec<PathBuf>, KaggleError> {
+        let mut out = Vec::new();
+        for ck in ["checkpoint-1000", "checkpoint-2000", "checkpoint-3000"] {
+            let dir = dest.join(ck);
+            std::fs::create_dir_all(&dir).unwrap();
+            let adapter = dir.join("adapter_model.safetensors");
+            std::fs::write(&adapter, b"adapter").unwrap();
+            out.push(adapter);
+        }
+        let log: Vec<String> = (1..=30).map(|n| format!("step {} loss {}", n * 100, 3.0 - n as f32 * 0.05)).collect();
+        std::fs::write(dest.join("train.log"), log.join("\n")).unwrap();
+        progress(10, 10);
+        Ok(out)
+    }
+}
+
+fn start_with_clips(rig: &mut Rig, fake: Arc<FakeRun>) {
+    use jeuvoice_kaggle::KaggleAuth;
+
+    rig.three_clips();
+    rig.kaggle.save(&KaggleAuth { username: "someone".into(), key: "abc123".into() }).unwrap();
+    rig.rt.state.train.run_poll_interval = std::time::Duration::from_millis(50);
+    rig.rt.state.train.set_client(fake);
+}
+
+#[test]
+fn the_confirm_dialog_comes_before_any_upload() {
+    let mut rig = Rig::new();
+    rig.three_clips();
+    rig.train_tab();
+    let fake = Arc::new(FakeRun::scripted(vec![KernelState::Complete]));
+    rig.rt.state.train.set_client(fake.clone());
+    rig.tap("train-run-start");
+    assert!(rig.text("train-confirm-text").contains("private Kaggle dataset"), "confirm: {}", rig.text("train-confirm-text"));
+    assert_eq!(fake.pushes.load(Ordering::SeqCst), 0, "nothing goes up before confirm");
+    assert_eq!(fake.uploads.load(Ordering::SeqCst), 0, "nothing goes up before confirm");
+    rig.tap("train-run-cancel");
+}
+
+#[test]
+fn upload_progress_shows_while_the_bundle_goes_up() {
+    let mut rig = Rig::new();
+    let fake = Arc::new(FakeRun::scripted(vec![KernelState::Running, KernelState::Running, KernelState::Complete]));
+    start_with_clips(&mut rig, fake);
+    rig.train_tab();
+    rig.tap("train-run-start");
+    rig.tap("train-run-confirm");
+    rig.until("the upload shows", |s| s.train.upload.is_some());
+    let (done, total) = rig.rt.state.train.upload.unwrap();
+    assert!(done <= total && total > 0, "{done}/{total}");
+}
+
+#[test]
+fn a_finished_run_downloads_outputs_and_lists_checkpoints() {
+    let mut rig = Rig::new();
+    let fake = Arc::new(FakeRun::scripted(vec![KernelState::Running, KernelState::Complete]));
+    start_with_clips(&mut rig, fake.clone());
+    rig.train_tab();
+    rig.tap("train-run-start");
+    rig.tap("train-run-confirm");
+    rig.until("the checkpoints list", |s| s.train.checkpoints.len() == 3);
+    rig.until("the run completes", |s| s.train.run.as_ref().is_some_and(|r| r.state == crate::train::run::RunState::Complete));
+    assert_eq!(fake.uploads.load(Ordering::SeqCst), 1, "one upload");
+    assert_eq!(fake.pushes.load(Ordering::SeqCst), 1, "one push");
+    assert!(!rig.rt.state.train.losses.is_empty(), "the loss curve parsed train.log");
+    assert!(rig.rt.find("train-test-checkpoint-3000").is_some(), "each checkpoint gets Test");
+    let run_dir = rig.tmp.path().join("training").join("runs").join("run-1");
+    assert!(run_dir.join("run.json").is_file(), "run.json saved");
+    assert!(run_dir.join("notebook.ipynb").is_file(), "notebook saved for a manual run");
+}
+
+#[test]
+fn an_error_state_shows_the_log_tail() {
+    let mut rig = Rig::new();
+    let mut fake = FakeRun::scripted(vec![KernelState::Error]);
+    fake.message = Some("out of memory".into());
+    fake.log_lines = 40;
+    let fake = Arc::new(fake);
+    start_with_clips(&mut rig, fake);
+    rig.train_tab();
+    rig.tap("train-run-start");
+    rig.tap("train-run-confirm");
+    rig.until("the run fails", |s| s.train.run.as_ref().is_some_and(|r| r.state == crate::train::run::RunState::Error));
+    let err = rig.text("train-run-error");
+    assert!(err.contains("out of memory"), "{err}");
+    assert!(err.contains("step 40"), "last lines shown: {err}");
+    assert!(!err.contains("step 1 loss"), "only the last 30 lines: {err}");
+}
+
+#[test]
+fn a_saved_running_run_resumes_after_a_restart() {
+    use crate::train::run::{RunRecord, RunState};
+
+    let mut rig = Rig::new();
+    rig.three_clips();
+    // The last session started a run and closed the app mid-poll.
+    let dir = rig.tmp.path().join("training");
+    let run_dir = dir.join("runs").join("run-1");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let record = RunRecord {
+        name: "run-1".into(),
+        dataset: "someone/my-data".into(),
+        kernel: KernelRef { owner: "someone".into(), slug: "my-run".into(), version: Some(1) },
+        started_at: 1,
+        state: RunState::Running,
+        message: None,
+    };
+    std::fs::write(run_dir.join("run.json"), serde_json::to_string(&record).unwrap()).unwrap();
+    // A restart: fresh tab on the same folder, fake client, short polls.
+    let mut fresh = TrainData::new(
+        "Test training",
+        dir,
+        rig.counting.clone(),
+        None,
+        Arc::new(MemStore::default()),
+        rig.kaggle.clone(),
+        false,
+    );
+    fresh.run_poll_interval = std::time::Duration::from_millis(50);
+    fresh.set_engine(Arc::new(FakeEngineApi::new()));
+    fresh.set_client(Arc::new(FakeRun::scripted(vec![KernelState::Complete])));
+    fresh.resume_if_active();
+    rig.rt.update(|s, _| s.train = fresh);
+    rig.until("the resumed run completes", |s| s.train.run.as_ref().is_some_and(|r| r.state == crate::train::run::RunState::Complete));
+    assert_eq!(rig.rt.state.train.checkpoints.len(), 3, "outputs collected after resume");
 }

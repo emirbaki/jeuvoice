@@ -6,6 +6,8 @@
 pub mod bundle;
 pub mod data_step;
 pub mod model_step;
+pub mod run;
+pub mod run_step;
 pub mod state;
 pub mod target_step;
 
@@ -32,7 +34,8 @@ pub fn view(s: &App) -> El {
         .child(text("Training").font(type_::TITLE).color(t.text))
         .child(data_step::view(&s.train))
         .child(model_step::view(&s.train, &adapters))
-        .child(target_step::view(&s.train, &s.transcribe.engine_state()));
+        .child(target_step::view(&s.train, &s.transcribe.engine_state()))
+        .child(run_step::view(&s.train));
     col()
         .w_full()
         .grow(1.0)

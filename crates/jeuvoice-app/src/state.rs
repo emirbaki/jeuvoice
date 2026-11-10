@@ -173,7 +173,7 @@ impl App {
         if s.train.engine_api.is_none() {
             s.train.engine_api = s.transcribe.engine_api();
         }
-        changed |= s.train.poll(&s.settings);
+        changed |= s.train.poll(&s.settings, tx);
         // The voice tab uses the shared engine client once it is ready.
         if matches!(s.transcribe.engine_state(), crate::services::engine::EngineState::Ready(_)) {
             s.voice.engine_api = s.transcribe.engine_api();

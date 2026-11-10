@@ -25,6 +25,7 @@ use rune::{TextEdit, Waker};
 use crate::services::player::{PlayerOwner, SharedPlayer};
 use crate::services::speech::{JobTicket, SpeechJob, SpeechService};
 use crate::settings::{HF_TOKEN_KEY, Settings, TokenStore};
+use crate::train::run::{KaggleClient, RunEvent, RunRecord, RunState};
 use crate::transcribe_tab::MEDIA;
 
 /// Minutes with one decimal, or none past ten. Normalizes -0.0 to 0.0.
@@ -119,17 +120,52 @@ pub struct TrainData {
     pub kaggle_key_field: TextEdit,
     /// The keychain user name, if the user saved a key.
     pub kaggle_user: Option<String>,
+    /// The run the tab follows, if one started.
+    pub run: Option<RunRecord>,
+    /// The latest polled run state.
+    pub run_status: Option<jeuvoice_kaggle::KernelStatus>,
+    /// The last 30 log lines.
+    pub run_log: Vec<String>,
+    /// `(step, loss)` points from `train.log` (or the live tail).
+    pub losses: Vec<(u32, f32)>,
+    /// Checkpoint folders under `runs/<name>/`.
+    pub checkpoints: Vec<String>,
+    /// Bytes of the dataset upload so far.
+    pub upload: Option<(u64, u64)>,
+    /// Bytes of the output download so far.
+    pub download: Option<(u64, u64)>,
+    /// The built bundle (`runs/<name>/<id>.zip`).
+    pub bundle_path: Option<PathBuf>,
+    /// The "Start on Kaggle" confirm dialog is open.
+    pub confirm_start: bool,
+    /// The full notebook text is shown.
+    pub show_script: bool,
+    /// A bundle export waits for the worker.
+    pub export_pending: bool,
+    /// How often the run worker polls Kaggle (tests shrink this).
+    pub run_poll_interval: std::time::Duration,
+    /// Settings editors (applied with Apply).
+    pub steps_field: TextEdit,
+    pub lora_r_field: TextEdit,
+    pub lora_alpha_field: TextEdit,
+    pub batch_field: TextEdit,
+    pub save_steps_field: TextEdit,
     /// The last thing to tell the user.
     pub notice: Option<String>,
     pub(crate) engine_api: Option<Arc<dyn EngineApi>>,
+    pub(crate) client: Option<Arc<dyn KaggleClient>>,
     dir: PathBuf,
     token_store: Arc<dyn TokenStore>,
     kaggle_store: Arc<dyn KeyStore>,
+    run_events_tx: mpsc::Sender<RunEvent>,
+    run_events: mpsc::Receiver<RunEvent>,
     statuses: HashMap<String, SourceStatus>,
     /// Clip ids waiting for Whisper text.
     pending: HashSet<String>,
     /// Sources with a clean job out.
     cleaning: HashSet<String>,
+    /// Whether the poll loop runs now (set on Start, cleared at the end).
+    polling: bool,
     tickets: HashMap<JobTicket, (String, String)>,
     speech: SpeechService,
     player: SharedPlayer,
@@ -149,6 +185,7 @@ impl TrainData {
         sound: bool,
     ) -> Self {
         let (events_tx, events) = mpsc::channel();
+        let (run_events_tx, run_events) = mpsc::channel();
         let mut s = Self {
             project: TrainProject { name: name.into(), sources: Vec::new(), clips: Vec::new(), settings: default_settings(), target: TrainTarget::default() },
             show_hf: false,
@@ -164,14 +201,35 @@ impl TrainData {
             kaggle_user_field: TextEdit::new(""),
             kaggle_key_field: TextEdit::new(""),
             kaggle_user: None,
+            run: None,
+            run_status: None,
+            run_log: Vec::new(),
+            losses: Vec::new(),
+            checkpoints: Vec::new(),
+            upload: None,
+            download: None,
+            bundle_path: None,
+            confirm_start: false,
+            show_script: false,
+            export_pending: false,
+            run_poll_interval: crate::train::run::POLL_INTERVAL,
+            steps_field: TextEdit::new(""),
+            lora_r_field: TextEdit::new(""),
+            lora_alpha_field: TextEdit::new(""),
+            batch_field: TextEdit::new(""),
+            save_steps_field: TextEdit::new(""),
             notice: None,
             engine_api: None,
+            client: None,
             dir,
             token_store,
             kaggle_store,
+            run_events_tx,
+            run_events,
             statuses: HashMap::new(),
             pending: HashSet::new(),
             cleaning: HashSet::new(),
+            polling: false,
             tickets: HashMap::new(),
             speech: SpeechService::new(transcriber, ensure_model, None),
             player: SharedPlayer::new(sound),
@@ -187,7 +245,17 @@ impl TrainData {
             }
         }
         s.refresh_kaggle_user();
+        s.sync_settings_fields();
+        // A run from the last session keeps going: resume its polling in setup.
+        s.run = crate::train::run::discover_run(&s.dir);
         s
+    }
+
+    /// Point the tab at a Kaggle client (tests inject the fake).
+    /// Later Train steps call the client the tab builds from the keychain key.
+    #[allow(dead_code)]
+    pub fn set_client(&mut self, client: Arc<dyn KaggleClient>) {
+        self.client = Some(client);
     }
 
     fn project_file(&self) -> PathBuf {
@@ -204,6 +272,9 @@ impl TrainData {
     pub(crate) fn setup(&mut self, waker: Waker) {
         self.speech.setup(waker.clone());
         self.waker = waker;
+        // The keychain key becomes the run client; a live run keeps polling.
+        self.kaggle_client();
+        self.resume_if_active();
     }
 
     // -- queries for the view and the tests --
@@ -494,6 +565,337 @@ impl TrainData {
         }
     }
 
+    /// Copy the settings into the edit fields.
+    fn sync_settings_fields(&mut self) {
+        let s = &self.project.settings;
+        self.steps_field = TextEdit::new(&s.steps.to_string());
+        self.lora_r_field = TextEdit::new(&s.lora_r.to_string());
+        self.lora_alpha_field = TextEdit::new(&s.lora_alpha.to_string());
+        self.batch_field = TextEdit::new(&s.batch_tokens.to_string());
+        self.save_steps_field = TextEdit::new(&s.save_steps.to_string());
+    }
+
+    /// Parse the edit fields back into the settings.
+    pub fn apply_settings(&mut self) {
+        let parse = |t: &TextEdit, name: &str| {
+            t.text.trim().parse::<u32>().ok().filter(|&v| v > 0).ok_or_else(|| format!("{name} takes a whole number above 0."))
+        };
+        let settings = (|| {
+            let steps = parse(&self.steps_field, "Steps")?;
+            let lora_r = parse(&self.lora_r_field, "LoRA r")?;
+            let lora_alpha = parse(&self.lora_alpha_field, "LoRA alpha")?;
+            let batch_tokens = parse(&self.batch_field, "Batch tokens")?;
+            let save_steps = parse(&self.save_steps_field, "Save steps")?;
+            Ok::<_, String>((steps, lora_r, lora_alpha, batch_tokens, save_steps))
+        })();
+        match settings {
+            Ok((steps, lora_r, lora_alpha, batch_tokens, save_steps)) => {
+                let s = &mut self.project.settings;
+                s.steps = steps;
+                s.lora_r = lora_r;
+                s.lora_alpha = lora_alpha;
+                s.batch_tokens = batch_tokens;
+                s.save_steps = save_steps;
+                self.notice = None;
+                self.save();
+            }
+            Err(e) => self.notice = Some(e),
+        }
+    }
+
+    /// Clips the run trains on: kept ones with their cleaned audio and text.
+    pub fn included_clips(&self) -> Vec<crate::train::run::ClipRef> {
+        self.project
+            .clips
+            .iter()
+            .filter(|c| c.clip.excluded.is_none() && !c.clip.audio.is_empty())
+            .map(|c| crate::train::run::ClipRef { id: c.clip.id.clone(), audio: c.clip.audio.clone(), text: c.clip.text.clone() })
+            .collect()
+    }
+
+    /// The next free run name: `run-1`, `run-2`, …
+    pub fn next_run_name(&self) -> String {
+        for n in 1.. {
+            let name = format!("run-{n}");
+            if !self.dir.join("runs").join(&name).exists() {
+                return name;
+            }
+        }
+        unreachable!()
+    }
+
+    /// Whether a run is going now (polling, uploading or downloading).
+    pub fn run_active(&self) -> bool {
+        matches!(self.run.as_ref().map(|r| r.state), Some(RunState::Queued | RunState::Running))
+    }
+
+    /// A client for the run: the injected one, or the keychain key.
+    fn kaggle_client(&mut self) -> Option<Arc<dyn KaggleClient>> {
+        if self.client.is_none()
+            && let Some(auth) = self.kaggle_store.load()
+        {
+            self.client = Some(Arc::new(jeuvoice_kaggle::Kaggle::new(auth)));
+        }
+        self.client.clone()
+    }
+
+    /// Start the confirmed run on Kaggle: manifests, bundle, upload, push, poll.
+    pub fn start_run(&mut self) {
+        self.confirm_start = false;
+        if self.run_active() {
+            return;
+        }
+        if self.project.target != TrainTarget::Kaggle {
+            self.notice = Some("Pick Kaggle under “Where to train” first.".into());
+            return;
+        }
+        let Some(kaggle) = self.kaggle_client() else {
+            self.notice = Some("Add your Kaggle key first.".into());
+            self.show_kaggle_form = true;
+            return;
+        };
+        let Some(engine) = self.engine_api.clone() else {
+            self.notice = Some("The voice engine is off. Open the Voice tab once to start it.".into());
+            return;
+        };
+        let clips = self.included_clips();
+        if clips.is_empty() {
+            self.notice = Some("Add clips first: there is nothing to train on.".into());
+            return;
+        }
+        let run_name = self.next_run_name();
+        let req = crate::train::run::StartRequest {
+            project_dir: self.dir.clone(),
+            project_name: self.project.name.clone(),
+            run_name,
+            clips,
+            sources: self.project.sources.iter().map(|s| (s.name.clone(), s.weight)).collect(),
+            settings: self.project.settings.clone(),
+            train_template: jeuvoice_core::kaggle_bundle::train_template(),
+            owner: self.kaggle_user.clone().unwrap_or_default(),
+            engine,
+            kaggle,
+            poll_interval: self.run_poll_interval,
+        };
+        self.run_status = None;
+        self.run_log.clear();
+        self.losses.clear();
+        self.checkpoints.clear();
+        self.upload = None;
+        self.download = None;
+        let (events, waker) = (self.run_events_tx.clone(), self.waker.clone());
+        self.polling = true;
+        std::thread::spawn(move || crate::train::run::start_run(req, events, waker));
+    }
+
+    /// A Queued or Running `run.json` keeps polling after an app restart.
+    /// Only the poll loop resumes: manifests, bundle and push already happened.
+    pub fn resume_if_active(&mut self) {
+        if self.polling {
+            return;
+        }
+        let Some(record) = self.run.clone() else { return };
+        if !matches!(record.state, RunState::Queued | RunState::Running) {
+            return;
+        }
+        let Some(kaggle) = self.client.clone() else { return };
+        let run_dir = self.dir.join("runs").join(&record.name);
+        // Rebuild what the last session already found.
+        self.bundle_path = std::fs::read_dir(&run_dir)
+            .ok()
+            .and_then(|entries| {
+                entries.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "zip"))
+            });
+        self.checkpoints = finished_checkpoints(&run_dir);
+        self.losses = std::fs::read_to_string(run_dir.join("train.log"))
+            .map(|t| crate::train::run::parse_losses(&t))
+            .unwrap_or_default();
+        let kernel = record.kernel.clone();
+        let interval = self.run_poll_interval;
+        let (events, waker) = (self.run_events_tx.clone(), self.waker.clone());
+        std::thread::spawn(move || {
+            crate::train::run::poll_loop(&kaggle, interval, &run_dir, &kernel, &events, &waker);
+        });
+        self.polling = true;
+    }
+
+    /// "Download bundle only": save the zip and the notebook with a Save dialog.
+    /// Builds the bundle first when the run never got that far.
+    pub fn export_bundle(&mut self, tx: &mut rune::Tx) {
+        if let Some(path) = self.bundle_path.clone().filter(|p| p.is_file()) {
+            self.save_bundle_dialog(tx, path);
+            return;
+        }
+        if self.run_active() || self.included_clips().is_empty() {
+            self.notice = Some("There is no bundle yet. Start the run first.".into());
+            return;
+        }
+        let Some(engine) = self.engine_api.clone() else {
+            self.notice = Some("The voice engine is off. Open the Voice tab once to start it.".into());
+            return;
+        };
+        self.export_pending = true;
+        self.notice = Some("Building the bundle…".into());
+        // A fixed scratch folder: never confused with a real run.
+        let run_name = "bundle-only".to_string();
+        let (events, waker) = (self.run_events_tx.clone(), self.waker.clone());
+        let project_dir = self.dir.clone();
+        let project_name = self.project.name.clone();
+        let clips = self.included_clips();
+        let sources: Vec<(String, u32)> = self.project.sources.iter().map(|s| (s.name.clone(), s.weight)).collect();
+        let settings = self.project.settings.clone();
+        std::thread::spawn(move || {
+            match crate::train::run::build_bundle_flow(
+                &project_dir,
+                &run_name,
+                &project_name,
+                &clips,
+                &sources,
+                &settings,
+                &jeuvoice_core::kaggle_bundle::train_template(),
+                &engine,
+            ) {
+                Ok(built) => {
+                    let _ = events.send(RunEvent::BundleReady(built.bundle));
+                    waker();
+                }
+                Err(e) => {
+                    let _ = events.send(RunEvent::RunFailed(e));
+                    waker();
+                }
+            }
+        });
+    }
+
+    fn save_bundle_dialog(&mut self, tx: &mut rune::Tx, path: PathBuf) {
+        let stem = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "bundle".into());
+        let options = rune::FileDialogOptions {
+            title: "Save the Kaggle bundle".into(),
+            directory: path.parent().map(Path::to_path_buf),
+            file_name: Some(format!("{stem}.zip")),
+            ..Default::default()
+        }
+        .filter("Zip", &["zip"]);
+        tx.save_file(options, move |s: &mut crate::state::App, result, _tx| match result {
+            Ok(Some(to)) => s.train.finish_bundle_export(to),
+            Ok(None) => s.train.export_pending = false,
+            Err(e) => s.train.notice = Some(format!("The Save window could not open: {e}")),
+        });
+    }
+
+    fn finish_bundle_export(&mut self, to: PathBuf) {
+        self.export_pending = false;
+        let Some(from) = self.bundle_path.clone() else { return };
+        let out = (|| {
+            std::fs::copy(&from, &to).map_err(|e| format!("The bundle could not be saved: {e}"))?;
+            let nb_to = to.with_extension("ipynb");
+            let nb_from = from.parent().map(|d| d.join("notebook.ipynb"));
+            if let Some(nb_from) = nb_from.filter(|p| p.is_file()) {
+                std::fs::copy(&nb_from, &nb_to).map_err(|e| format!("The notebook could not be saved: {e}"))?;
+            }
+            Ok::<_, String>(nb_to)
+        })();
+        match out {
+            Ok(nb_to) => {
+                self.notice = Some(format!(
+                    "Saved {} and {}.",
+                    to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    nb_to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                ));
+            }
+            Err(e) => self.notice = Some(e),
+        }
+    }
+
+    /// Drain run worker news. `true` when the view changed.
+    fn poll_run(&mut self, tx: &mut rune::Tx) -> bool {
+        let mut changed = false;
+        while let Ok(e) = self.run_events.try_recv() {
+            changed = true;
+            match e {
+                RunEvent::UploadProgress(done, total) => self.upload = Some((done, total)),
+                RunEvent::Started(record) => {
+                    self.run = Some(record.clone());
+                    self.polling = true;
+                    self.upload = None;
+                    self.notice = None;
+                    self.save_record(&record);
+                }
+                RunEvent::Status(status) => {
+                    let state = match status.state {
+                        jeuvoice_kaggle::KernelState::Queued => RunState::Queued,
+                        jeuvoice_kaggle::KernelState::Running => RunState::Running,
+                        jeuvoice_kaggle::KernelState::Complete
+                        | jeuvoice_kaggle::KernelState::Error
+                        | jeuvoice_kaggle::KernelState::Cancelled => continue,
+                    };
+                    self.run_status = Some(status);
+                    if let Some(r) = self.run.as_mut() {
+                        r.state = state;
+                        let record = r.clone();
+                        self.save_record(&record);
+                    }
+                }
+                RunEvent::LogTail(tail) => {
+                    self.run_log = tail.lines().map(str::to_string).collect();
+                    self.losses = crate::train::run::parse_losses(&tail);
+                }
+                RunEvent::PollFailed(message) => {
+                    // Transient: the loop keeps polling, the notice shows it.
+                    self.notice = Some(message);
+                }
+                RunEvent::DownloadProgress(done, total) => self.download = Some((done, total)),
+                RunEvent::Downloaded { checkpoints, losses } => {
+                    self.checkpoints = checkpoints;
+                    self.download = None;
+                    self.polling = false;
+                    if !losses.is_empty() {
+                        self.losses = losses;
+                    }
+                    if let Some(r) = self.run.as_mut() {
+                        r.state = RunState::Complete;
+                        r.message = None;
+                        let record = r.clone();
+                        self.save_record(&record);
+                    }
+                }
+                RunEvent::RunFailed(message) => {
+                    self.polling = false;
+                    if let Some(r) = self.run.as_mut() {
+                        r.state = RunState::Error;
+                        r.message = Some(message.clone());
+                        let record = r.clone();
+                        self.save_record(&record);
+                    } else {
+                        self.notice = Some(message);
+                    }
+                }
+                RunEvent::RunCancelled => {
+                    self.polling = false;
+                    if let Some(r) = self.run.as_mut() {
+                        r.state = RunState::Cancelled;
+                        r.message = Some("The run was cancelled.".into());
+                        let record = r.clone();
+                        self.save_record(&record);
+                    }
+                }
+                RunEvent::BundleReady(path) => {
+                    self.bundle_path = Some(path.clone());
+                    // "Download bundle only" before the run built one waits for this.
+                    if self.export_pending {
+                        self.export_pending = false;
+                        self.save_bundle_dialog(tx, path);
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    fn save_record(&self, record: &RunRecord) {
+        let _ = crate::train::run::save_record(&self.dir.join("runs").join(&record.name), record);
+    }
+
     /// Leave a clip out of the mix (`excluded`), or bring it back.
     pub fn set_excluded(&mut self, id: &str, excluded: bool) {
         if let Some(c) = self.project.clips.iter_mut().find(|c| c.clip.id == id) {
@@ -538,8 +940,8 @@ impl TrainData {
 
     /// Drain worker news, speech results and the edit field. `true` when the
     /// view changed.
-    pub(crate) fn poll(&mut self, settings: &Settings) -> bool {
-        let mut changed = false;
+    pub(crate) fn poll(&mut self, settings: &Settings, tx: &mut rune::Tx) -> bool {
+        let mut changed = self.poll_run(tx);
         for e in self.speech.drain_events() {
             changed = true;
             if let crate::services::speech::ServiceEvent::Notice(n) = e {
@@ -757,6 +1159,20 @@ impl TrainData {
             let _ = std::fs::write(self.project_file(), text);
         }
     }
+}
+
+/// Checkpoint folders under a run dir, sorted.
+fn finished_checkpoints(run_dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(run_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("checkpoint-")))
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    out
 }
 
 fn has_media_ext(path: &Path) -> bool {

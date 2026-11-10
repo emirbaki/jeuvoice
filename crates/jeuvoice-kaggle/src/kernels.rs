@@ -43,7 +43,7 @@ pub struct KernelSpec {
 }
 
 /// A pushed notebook: `owner/slug`, plus its version once pushed.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KernelRef {
     pub owner: String,
     pub slug: String,
