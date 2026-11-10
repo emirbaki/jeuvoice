@@ -79,7 +79,15 @@ impl App {
             projects_dir: projects_root(),
         });
         let training_dir = training_root().join("My training");
-        let train = TrainData::new("My training", training_dir, deps.transcriber.clone(), deps.ensure_model.clone(), token_store.clone(), deps.sound);
+        let train = TrainData::new(
+            "My training",
+            training_dir,
+            deps.transcriber.clone(),
+            deps.ensure_model.clone(),
+            token_store.clone(),
+            std::sync::Arc::new(jeuvoice_kaggle::KeyringStore),
+            deps.sound,
+        );
         Self {
             tab: Tab::Transcribe,
             transcribe: TranscribeTab::new(deps),

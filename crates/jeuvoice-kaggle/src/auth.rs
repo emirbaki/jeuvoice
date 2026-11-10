@@ -18,6 +18,63 @@ pub struct KaggleAuth {
     pub key: String,
 }
 
+/// Where the credentials live. The app uses the OS keychain; tests use memory.
+pub trait KeyStore: Send + Sync {
+    fn load(&self) -> Option<KaggleAuth>;
+    fn save(&self, auth: &KaggleAuth) -> Result<(), KaggleError>;
+    /// Forget the saved credentials. Missing credentials are fine.
+    fn delete(&self) -> Result<(), KaggleError>;
+}
+
+/// The OS keychain, service `JeuVoice-Kaggle`.
+#[derive(Default)]
+pub struct KeyringStore;
+
+impl KeyStore for KeyringStore {
+    fn load(&self) -> Option<KaggleAuth> {
+        load_auth()
+    }
+
+    fn save(&self, auth: &KaggleAuth) -> Result<(), KaggleError> {
+        save_auth(auth)
+    }
+
+    fn delete(&self) -> Result<(), KaggleError> {
+        let entry = keyring::Entry::new(SERVICE, ACCOUNT)
+            .map_err(|_| KaggleError::Keychain("The keychain is not available.".into()))?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err(KaggleError::Keychain("The Kaggle key could not be removed.".into())),
+        }
+    }
+}
+
+/// In-memory store for tests.
+#[derive(Default)]
+pub struct MemStore(std::sync::Mutex<Option<KaggleAuth>>);
+
+impl MemStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl KeyStore for MemStore {
+    fn load(&self) -> Option<KaggleAuth> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn save(&self, auth: &KaggleAuth) -> Result<(), KaggleError> {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(auth.clone());
+        Ok(())
+    }
+
+    fn delete(&self) -> Result<(), KaggleError> {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        Ok(())
+    }
+}
+
 /// The saved credentials, if the user ever saved them.
 pub fn load_auth() -> Option<KaggleAuth> {
     load_auth_from(SERVICE)

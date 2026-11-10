@@ -19,6 +19,7 @@ use jeuvoice_core::audio::{self, to_whisper};
 use jeuvoice_core::queue::Update;
 use jeuvoice_core::train::{Clip, Source, SourceKind, TrainSettings, minutes_by_source};
 use jeuvoice_engine_client::{EngineApi, HfPrep, PrepClip, parse_prep_clips};
+use jeuvoice_kaggle::{KaggleAuth, KeyStore};
 use rune::{TextEdit, Waker};
 
 use crate::services::player::{PlayerOwner, SharedPlayer};
@@ -49,6 +50,15 @@ pub struct TrainClip {
     pub band_khz: f32,
 }
 
+/// Where the run trains. Only Kaggle runs in this plan.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TrainTarget {
+    ThisPc,
+    #[default]
+    Kaggle,
+    RunPod,
+}
+
 /// What `train_project.json` holds.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TrainProject {
@@ -56,6 +66,8 @@ pub struct TrainProject {
     pub sources: Vec<Source>,
     pub clips: Vec<TrainClip>,
     pub settings: TrainSettings,
+    #[serde(default)]
+    pub target: TrainTarget,
 }
 
 /// News from the decode, fetch and clean workers.
@@ -101,11 +113,18 @@ pub struct TrainData {
     /// The clip whose text is open for editing.
     pub editing: Option<String>,
     pub edit_field: TextEdit,
+    /// The Kaggle key form is open.
+    pub show_kaggle_form: bool,
+    pub kaggle_user_field: TextEdit,
+    pub kaggle_key_field: TextEdit,
+    /// The keychain user name, if the user saved a key.
+    pub kaggle_user: Option<String>,
     /// The last thing to tell the user.
     pub notice: Option<String>,
     pub(crate) engine_api: Option<Arc<dyn EngineApi>>,
     dir: PathBuf,
     token_store: Arc<dyn TokenStore>,
+    kaggle_store: Arc<dyn KeyStore>,
     statuses: HashMap<String, SourceStatus>,
     /// Clip ids waiting for Whisper text.
     pending: HashSet<String>,
@@ -126,11 +145,12 @@ impl TrainData {
         transcriber: Arc<dyn jeuvoice_whisper::Transcriber>,
         ensure_model: Option<crate::services::speech::EnsureModel>,
         token_store: Arc<dyn TokenStore>,
+        kaggle_store: Arc<dyn KeyStore>,
         sound: bool,
     ) -> Self {
         let (events_tx, events) = mpsc::channel();
         let mut s = Self {
-            project: TrainProject { name: name.into(), sources: Vec::new(), clips: Vec::new(), settings: default_settings() },
+            project: TrainProject { name: name.into(), sources: Vec::new(), clips: Vec::new(), settings: default_settings(), target: TrainTarget::default() },
             show_hf: false,
             repo_field: TextEdit::new(""),
             split_field: TextEdit::new("train"),
@@ -140,10 +160,15 @@ impl TrainData {
             review: None,
             editing: None,
             edit_field: TextEdit::new(""),
+            show_kaggle_form: false,
+            kaggle_user_field: TextEdit::new(""),
+            kaggle_key_field: TextEdit::new(""),
+            kaggle_user: None,
             notice: None,
             engine_api: None,
             dir,
             token_store,
+            kaggle_store,
             statuses: HashMap::new(),
             pending: HashSet::new(),
             cleaning: HashSet::new(),
@@ -161,6 +186,7 @@ impl TrainData {
                 s.statuses.insert(src.name.clone(), SourceStatus::Ready);
             }
         }
+        s.refresh_kaggle_user();
         s
     }
 
@@ -384,6 +410,88 @@ impl TrainData {
             self.review = None;
         }
         self.save();
+    }
+
+    /// Where the run trains (This PC is off below 12 GB, RunPod is coming later).
+    pub fn set_target(&mut self, target: TrainTarget) {
+        if self.project.target != target {
+            self.project.target = target;
+            self.save();
+        }
+    }
+
+    /// What the run starts from: the base model or a checkpoint.
+    pub fn set_start(&mut self, start: jeuvoice_core::train::StartFrom) {
+        if self.project.settings.start_from != start {
+            self.project.settings.start_from = start;
+            self.save();
+        }
+    }
+
+    /// Read the keychain user name again (after saving or forgetting a key).
+    pub fn refresh_kaggle_user(&mut self) {
+        self.kaggle_user = self.kaggle_store.load().map(|a| a.username);
+    }
+
+    /// Save the Kaggle form to the keychain. Empty user or key stays on the form.
+    pub fn save_kaggle_key(&mut self) {
+        let username = self.kaggle_user_field.text.trim().to_string();
+        let key = self.kaggle_key_field.text.trim().to_string();
+        if username.is_empty() || key.is_empty() {
+            self.notice = Some("Name the Kaggle user and paste the key.".into());
+            return;
+        }
+        match self.kaggle_store.save(&KaggleAuth { username, key }) {
+            Ok(()) => {
+                self.notice = Some("Saved the Kaggle key.".into());
+                self.show_kaggle_form = false;
+                self.kaggle_user_field = TextEdit::new("");
+                self.kaggle_key_field = TextEdit::new("");
+                self.refresh_kaggle_user();
+            }
+            Err(e) => self.notice = Some(e.to_string()),
+        }
+    }
+
+    /// Read a `kaggle.json` file into the keychain.
+    pub fn import_kaggle_key(&mut self, path: &std::path::Path) {
+        match jeuvoice_kaggle::import_kaggle_json(path) {
+            Ok(auth) => match self.kaggle_store.save(&auth) {
+                Ok(()) => {
+                    self.notice = Some("Saved the Kaggle key.".into());
+                    self.show_kaggle_form = false;
+                    self.refresh_kaggle_user();
+                }
+                Err(e) => self.notice = Some(e.to_string()),
+            },
+            Err(e) => self.notice = Some(e.to_string()),
+        }
+    }
+
+    /// Ask for a `kaggle.json` file and read it into the keychain.
+    pub fn open_kaggle_import(&mut self, tx: &mut rune::Tx) {
+        let options = rune::FileDialogOptions {
+            title: "Import kaggle.json".into(),
+            file_name: Some("kaggle.json".into()),
+            ..Default::default()
+        }
+        .filter("Kaggle key", &["json"]);
+        tx.open_file(options, |s: &mut crate::state::App, result, _tx| match result {
+            Ok(Some(path)) => s.train.import_kaggle_key(&path),
+            Ok(None) => {}
+            Err(e) => s.train.notice = Some(format!("The Open window could not open: {e}")),
+        });
+    }
+
+    /// Forget the saved Kaggle key.
+    pub fn forget_kaggle_key(&mut self) {
+        match self.kaggle_store.delete() {
+            Ok(()) => {
+                self.notice = Some("Removed the Kaggle key.".into());
+                self.refresh_kaggle_user();
+            }
+            Err(e) => self.notice = Some(e.to_string()),
+        }
     }
 
     /// Leave a clip out of the mix (`excluded`), or bring it back.

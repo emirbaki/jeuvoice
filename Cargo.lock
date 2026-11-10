@@ -1878,6 +1878,7 @@ dependencies = [
  "hound",
  "jeuvoice-core",
  "jeuvoice-engine-client",
+ "jeuvoice-kaggle",
  "jeuvoice-whisper",
  "keyring",
  "rune",

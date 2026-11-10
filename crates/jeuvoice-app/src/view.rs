@@ -34,7 +34,7 @@ pub fn view(s: &App, _: &mut Cx<App>) -> El {
         Tab::Transcribe => transcribe_tab::view(&s.transcribe),
         Tab::Voice => voice::view::view(s),
         Tab::Settings => settings_tab::view(s),
-        Tab::Train => train::data_step::view(&s.train),
+        Tab::Train => train::view(s),
     };
     col().w_full().h_full().fill(t.bg).child(bar).child(body)
 }

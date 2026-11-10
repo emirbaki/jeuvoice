@@ -47,7 +47,7 @@ mod auth;
 mod datasets;
 mod kernels;
 
-pub use auth::{KaggleAuth, import_kaggle_json, load_auth, save_auth};
+pub use auth::{KaggleAuth, KeyStore, KeyringStore, MemStore, import_kaggle_json, load_auth, save_auth};
 pub use datasets::DatasetRef;
 pub use kernels::{KernelRef, KernelSpec, KernelState, KernelStatus};
 pub use kernels::{accelerator_t4_x2, slugify};

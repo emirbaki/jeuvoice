@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use jeuvoice_core::transcript::{Transcript, Word};
-use jeuvoice_engine_client::FakeEngineApi;
+use jeuvoice_engine_client::{FakeEngineApi, Health};
+use jeuvoice_kaggle::{KeyStore, MemStore as KaggleMem};
 use jeuvoice_whisper::{FakeTranscriber, TranscribeOptions, Transcriber, WhisperError};
 use rune::{Env, Runtime};
 
@@ -61,11 +62,13 @@ struct Rig {
     rt: Runtime<App>,
     tmp: tempfile::TempDir,
     counting: Arc<Counting>,
+    kaggle: Arc<KaggleMem>,
 }
 
 impl Rig {
     fn new() -> Self {
         let counting = Arc::new(Counting::new());
+        let kaggle = Arc::new(KaggleMem::new());
         let tmp = tempfile::tempdir().unwrap();
         let deps = Deps {
             transcriber: counting.clone(),
@@ -84,6 +87,7 @@ impl Rig {
             counting.clone(),
             None,
             Arc::new(MemStore::default()),
+            kaggle.clone(),
             false,
         );
         app.train.set_engine(Arc::new(FakeEngineApi::new()));
@@ -92,7 +96,7 @@ impl Rig {
         rt.poll = Some(App::poll);
         rt.frame(0.0);
         rt.frame(1.0 / 60.0);
-        Rig { rt, tmp, counting }
+        Rig { rt, tmp, counting, kaggle }
     }
 
     /// Run frames until `done` holds, as the window does when the worker wakes it.
@@ -115,6 +119,15 @@ impl Rig {
         self.rt.pointer_up(x, y);
         self.rt.frame(1.0 / 120.0);
         self.rt.frame(1.0 / 120.0);
+    }
+
+    fn text(&self, key: &str) -> String {
+        self.rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
+            .and_then(|e| e.text.or(e.label))
+            .unwrap_or_else(|| panic!("{key} shows text"))
     }
 
     fn train_tab(&mut self) {
@@ -201,7 +214,7 @@ fn reopening_the_project_restores_everything() {
     rig.three_clips();
     rig.tap("train-wplus-0");
     let dir = rig.tmp.path().join("training");
-    let reopened = TrainData::new("Test training", dir, rig.counting.clone(), None, Arc::new(MemStore::default()), false);
+    let reopened = TrainData::new("Test training", dir, rig.counting.clone(), None, Arc::new(MemStore::default()), rig.kaggle.clone(), false);
     assert_eq!(reopened.sources().len(), 1);
     assert_eq!(reopened.clips().len(), 1 * 3);
     assert!(reopened.clips().iter().all(|c| !c.clip.text.is_empty()));
@@ -231,6 +244,7 @@ fn fixture() -> App {
         Arc::new(FakeTranscriber(heard())),
         None,
         Arc::new(MemStore::default()),
+        Arc::new(KaggleMem::new()),
         false,
     );
     train.project.sources = vec![
@@ -292,4 +306,67 @@ fn snap_train() {
     let spec = rune::AppSpec::new("Train", (1100.0, 720.0), fixture, view);
     rune::App::new(spec).args(["--snap".to_string(), out.to_string()]).run();
     println!("wrote {out}");
+}
+
+fn small_cuda_engine() -> crate::services::engine::EngineState {
+    crate::services::engine::EngineState::Ready(Health {
+        ok: true,
+        backend: "omnivoice".into(),
+        device: "cuda".into(),
+        vram_total_gb: Some(4.0),
+        model_loaded: true,
+        version: "test".into(),
+    })
+}
+
+#[test]
+fn a_small_gpu_turns_this_pc_off_with_the_reason() {
+    let mut rig = Rig::new();
+    rig.rt.state.transcribe.engine_mut().set_test_api(Arc::new(FakeEngineApi::new()));
+    rig.rt.state.transcribe.engine_mut().set_state_for_tests(small_cuda_engine());
+    rig.train_tab();
+    assert_eq!(
+        rig.text("train-pc-status"),
+        "Your graphics card has 4 GB. Training needs at least 12 GB."
+    );
+}
+
+#[test]
+fn fewer_steps_mean_fewer_kaggle_hours() {
+    let mut rig = Rig::new();
+    rig.train_tab();
+    assert!(rig.text("train-kaggle-est").contains("about 6 hours"), "6000 steps: {}", rig.text("train-kaggle-est"));
+    rig.rt.update(|s, _| s.train.project.settings.steps = 3000);
+    rig.rt.frame(1.0 / 60.0);
+    assert!(rig.text("train-kaggle-est").contains("about 3 hours"), "3000 steps: {}", rig.text("train-kaggle-est"));
+}
+
+#[test]
+fn saving_the_kaggle_key_uses_the_store() {
+    use jeuvoice_kaggle::KaggleAuth;
+
+    let mut rig = Rig::new();
+    rig.train_tab();
+    rig.tap("train-kaggle-add");
+    rig.tap("train-kaggle-user-field");
+    rig.rt.paste("someone");
+    rig.tap("train-kaggle-key-field");
+    rig.rt.paste("abc123");
+    rig.tap("train-kaggle-save");
+    assert_eq!(rig.kaggle.load(), Some(KaggleAuth { username: "someone".into(), key: "abc123".into() }));
+    assert_eq!(rig.rt.state.train.kaggle_user.as_deref(), Some("someone"));
+}
+
+#[test]
+fn picking_the_base_model_starts_from_base() {
+    use jeuvoice_core::train::StartFrom;
+
+    let mut rig = Rig::new();
+    rig.train_tab();
+    rig.rt.update(|s, _| {
+        s.train.project.settings.start_from = StartFrom::Adapter { repo_or_dir: "someone/adapter".into() };
+    });
+    rig.rt.frame(1.0 / 60.0);
+    rig.tap("train-model-base");
+    assert_eq!(rig.rt.state.train.project.settings.start_from, StartFrom::Base);
 }

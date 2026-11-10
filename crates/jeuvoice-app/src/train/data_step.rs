@@ -2,7 +2,7 @@
 
 use jeuvoice_core::train::Source;
 use rune::tok::{self, radius, space, type_};
-use rune::{El, ScrollSpec, col, el, row, text, text_input};
+use rune::{El, col, el, row, text, text_input};
 
 use crate::state::App;
 use crate::train::state::{SourceStatus, TrainData, fmt_minutes};
@@ -27,10 +27,7 @@ pub fn view(s: &TrainData) -> El {
     let t = tok::theme(true);
     let mut page = col()
         .w_full()
-        .grow(1.0)
-        .min_h(0.0)
         .gap(space::S2)
-        .padding(space::S3)
         .child(text("Training data").font(type_::TITLE).color(t.text))
         .child(text(s.chips().as_str()).key("train-chips").font(type_::BODY).color(t.text_secondary).wrap())
         .child(drop_zone());
@@ -44,7 +41,7 @@ pub fn view(s: &TrainData) -> El {
     if let Some(n) = &s.notice {
         page = page.child(text(n.as_str()).key("train-notice").font(type_::LABEL).color(t.text_secondary).wrap());
     }
-    col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(page)
+    page
 }
 
 fn drop_zone() -> El {
