@@ -101,8 +101,6 @@ impl EngineService {
     }
 
     /// The engine API for a Voice render. `None` until the engine is ready.
-    /// The Voice tab (Plan 2) uses this; until then it stays unused.
-    #[allow(dead_code)]
     pub fn api(&self) -> Option<Arc<dyn EngineApi>> {
         #[cfg(test)]
         if let Some(api) = self.test_api.as_ref() {

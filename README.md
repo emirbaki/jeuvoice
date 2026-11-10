@@ -74,3 +74,59 @@ scripts\cargo.cmd test -p jeuvoice-app --release --test real_check -- --ignored 
 6. Fix one wrong word. Check that the new text stays.
 7. Paste a script. Check that the marked words are the real differences.
 8. Export SRT. Open it next to the video in a player. Check the timing.
+
+## Status (Plan 2, Voice)
+
+The Voice tab generates Turkish voice-overs with the OmniVoice model and the tr2 adapter, keeps projects in `Documents/JeuVoice`, and exports WAV + SRT.
+
+### First start: model files
+
+- The Hugging Face token lives in the OS keychain. Open Settings and paste a token with read permission, then Save. The token never lands in `settings.json`.
+- Without a token, point "Use a local adapter folder" at a tr2 checkpoint folder on disk (for example `tts_lab/outputs/omnivoice_tr2/checkpoint-6000`). The local folder wins over every Hugging Face adapter.
+- The default preset `ses_0007` installs on first start. It clones `ses_001_0007.wav` with the tr2 `checkpoint-6000` adapter.
+
+### How to use it
+
+1. Open the Voice tab. Pick a preset, paste a two-paragraph script, press **Generate**. The engine loads once ("Loading the voice model…"), then renders paragraph by paragraph.
+2. Press play. Click a word to play from it.
+3. Drag a region on the wave and press **Retake region**: three new takes appear. Press a take to hear it, then **Use this take** to splice it in. **+ Try 3 more** renders three more.
+4. Double-click a word to fix how it sounds ("Say it as"): the fix is stored as a respell and the paragraph renders again.
+5. A name in Latin letters gets an "Add to English terms?" hint next to the script check. Adding it puts the name in the project's English terms.
+6. **Undo** and **Redo** (or Ctrl+Z / Ctrl+Y) step through project changes. Every change saves `project.json` at once.
+7. **Export WAV** writes the 24 kHz timeline. **Export SRT** writes the timeline words.
+8. The **Advanced** panel (closed by default) holds guidance, base seed, pause, paragraph pause, the term lists and per-paragraph guidance and seed. **Apply** saves them into the project; the next render uses them.
+
+### Measured speed
+
+Measured on this machine (Windows, NVIDIA RTX 3050 Ti Laptop GPU, 4.29 GB VRAM; 16 GB RAM, no page file) with the release build. Default preset: base `k2-fsa/OmniVoice` + tr2 adapter `checkpoint-6000`, reference clip `ses_001_0007`, `guidance_scale = 2.5`, `num_step = 32`:
+
+| Step | Measured |
+|---|---|
+| Engine start + voice model load on CUDA | 25.5 s (2.37 GB VRAM used) |
+| Render 2 paragraphs (5.6 s of audio) | 12.1 s (0.46 audio-sec per wall-sec) |
+| Whisper `large-v3-turbo` on the CPU next to the loaded engine | 52.6 s, no out-of-memory |
+| Retake one paragraph with a new seed + splice planning | 33.2 s |
+| Export | 140,640-sample WAV + non-empty SRT |
+
+Whisper ran on the CPU while OmniVoice stayed on CUDA: no CUDA out-of-memory on the 4 GB card. VRAM stayed at about 2.4 GB of 4.3 GB through render and retake.
+
+Run it yourself:
+
+```
+scripts\cargo.cmd test -p jeuvoice-app --release --test real_voice -- --ignored --nocapture
+```
+
+### Known limits
+
+- Retakes render whole paragraphs; a retake never renders a lone sentence.
+- The term hint only flags Latin-letter words with inner capitals (`iPhone`, `NATO`).
+- The macOS build is not tested, and the voice engine has no Mac spike result yet: the Voice tab stays off there.
+- GPU cards under 8 GB run Whisper on the CPU while the voice model is loaded. Starting a Transcribe batch unloads the engine first; the next Voice job loads it again.
+
+### Try it by ear
+
+1. Set the Hugging Face token or the local adapter folder in Settings.
+2. Paste your real script (two paragraphs to start). Press **Generate** and listen from start to end.
+3. Compare a paragraph with `tts_lab/outputs/omni_tr2_para_gs25_s4/full.wav`. They should sound like the same voice.
+4. Drag a region over one sentence and press **Retake region**. Use the take that sounds best.
+5. Open **Advanced**, set guidance to 3, and retake the word "damara". Keep the take that reads it cleanly.

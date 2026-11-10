@@ -61,7 +61,7 @@ fn fake_engine_renders_a_paragraph() {
         std::thread::sleep(Duration::from_millis(50));
     };
     assert!(status.error.is_none(), "no error: {:?}", status.error);
-    let result = status.result.expect("a result");
+    let result = status.render_result().expect("a render result");
     assert_eq!(result.parts.len(), 2, "two paragraphs render");
     for p in &result.parts {
         assert!(std::path::Path::new(&p.file).exists(), "part file exists: {}", p.file);

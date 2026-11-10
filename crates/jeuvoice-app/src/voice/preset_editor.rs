@@ -151,7 +151,7 @@ impl PresetEditor {
             match status.state {
                 JobState::Done => {
                     t.done = true;
-                    t.file = status.result.and_then(|r| r.parts.into_iter().next()).map(|p| PathBuf::from(p.file));
+                    t.file = status.render_result().and_then(|r| r.parts.into_iter().next()).map(|p| PathBuf::from(p.file));
                 }
                 JobState::Failed => {
                     t.done = true;

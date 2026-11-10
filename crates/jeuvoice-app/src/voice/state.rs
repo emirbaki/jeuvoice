@@ -853,6 +853,11 @@ impl VoiceTab {
         changed
     }
 
+    /// Whether a Voice job runs right now. Transcribe batches leave the GPU alone then.
+    pub fn is_busy(&self) -> bool {
+        matches!(self.status, VoiceStatus::StartingEngine | VoiceStatus::Working(_))
+    }
+
     /// Take in what the workers finished.
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
@@ -1021,7 +1026,7 @@ fn run_generate(
     if !wait_job(&api, &render_job) {
         return fail("The render failed. Try again.".into());
     }
-    let result = match api.job(&render_job).ok().and_then(|s| s.result) {
+    let result = match api.job(&render_job).ok().and_then(|s| s.render_result()) {
         Some(r) => r,
         None => return fail("The render failed. Try again.".into()),
     };
@@ -1159,7 +1164,7 @@ fn run_retakes(
             if !wait_job(&api, &job) {
                 return fail("The render failed. Try again.".into());
             }
-            let result = match api.job(&job).ok().and_then(|s| s.result) {
+            let result = match api.job(&job).ok().and_then(|s| s.render_result()) {
                 Some(r) => r,
                 None => return fail("The render failed. Try again.".into()),
             };

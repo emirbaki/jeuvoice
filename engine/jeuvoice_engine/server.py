@@ -83,6 +83,11 @@ def make_handler(state: State, token: str, server_ref: dict):
     from .jobs import job_status, make_load_run, make_render_run
 
     class Handler(BaseHTTPRequestHandler):
+        # HTTP/1.1 keep-alive: Rust's HTTP client pools connections, and reusing a
+        # half-closed HTTP/1.0 socket truncated bodies mid-read. Every reply below
+        # carries a Content-Length, which keep-alive requires.
+        protocol_version = "HTTP/1.1"
+
         def log_message(self, fmt, *args):
             state.log.info("%s - %s", self.address_string(), fmt % args)
 

@@ -129,8 +129,17 @@ pub struct JobStatus {
     pub state: JobState,
     pub progress: f64,
     pub message: String,
-    pub result: Option<RenderResult>,
+    /// The finished job's payload: render jobs carry a [`RenderResult`], load jobs a
+    /// `{"model", "device"}` object. Kept generic so one shape never breaks the other.
+    pub result: Option<serde_json::Value>,
     pub error: Option<String>,
+}
+
+impl JobStatus {
+    /// The render payload, if this finished job was a render.
+    pub fn render_result(&self) -> Option<RenderResult> {
+        self.result.clone().and_then(|v| serde_json::from_value(v).ok())
+    }
 }
 
 /// The engine API. All methods are blocking; call them on a worker.
@@ -341,11 +350,12 @@ impl EngineApi for FakeEngineApi {
             });
         }
         let id = format!("job-{}", self.jobs.lock().unwrap().len() + 1);
+        let result = RenderResult { parts, pause: req.preset.pause, para_pause: req.preset.para_pause };
         self.jobs.lock().unwrap().push(JobStatus {
             state: JobState::Done,
             progress: 1.0,
             message: String::new(),
-            result: Some(RenderResult { parts, pause: req.preset.pause, para_pause: req.preset.para_pause }),
+            result: Some(serde_json::to_value(result).expect("a render result serializes")),
             error: None,
         });
         Ok(id)
@@ -406,7 +416,7 @@ mod tests {
         let id = api.render(&req).unwrap();
         let status = api.job(&id).unwrap();
         assert_eq!(status.state, JobState::Done);
-        let parts = status.result.unwrap().parts;
+        let parts = status.render_result().unwrap().parts;
         assert_eq!(parts.len(), 2);
         assert!(std::path::Path::new(&parts[0].file).exists());
     }
