@@ -116,6 +116,8 @@ pub struct TrainData {
     pub edit_field: TextEdit,
     /// The Kaggle key form is open.
     pub show_kaggle_form: bool,
+    /// The tr2 recipe page is open.
+    pub show_recipe: bool,
     pub kaggle_user_field: TextEdit,
     pub kaggle_key_field: TextEdit,
     /// The keychain user name, if the user saved a key.
@@ -202,6 +204,7 @@ impl TrainData {
             editing: None,
             edit_field: TextEdit::new(""),
             show_kaggle_form: false,
+            show_recipe: false,
             kaggle_user_field: TextEdit::new(""),
             kaggle_key_field: TextEdit::new(""),
             kaggle_user: None,
@@ -382,23 +385,31 @@ impl TrainData {
             note: dir.map(|d| format!("Added from this folder: {d}")),
         });
         self.statuses.insert(name.clone(), SourceStatus::Working("Reading the clips…".into()));
-        for (i, path) in files.iter().enumerate() {
-            let id = format!("{name}-{i:04}");
+        self.ingest(&name, files);
+        self.save();
+    }
+
+    /// Read local files into an existing source: decode, Whisper, clean.
+    fn ingest(&mut self, source: &str, files: Vec<PathBuf>) {
+        let start = self.project.clips.iter().filter(|c| c.clip.source == source).count();
+        let mut ids = Vec::with_capacity(files.len());
+        for (k, path) in files.iter().enumerate() {
+            let id = format!("{source}-{i:04}", i = start + k);
             self.project.clips.push(TrainClip {
                 clip: Clip {
                     id: id.clone(),
                     audio: path.to_string_lossy().into_owned(),
                     text: String::new(),
                     duration_s: 0.0,
-                    source: name.clone(),
+                    source: source.into(),
                     excluded: None,
                 },
                 band_khz: 0.0,
             });
-            self.pending.insert(id);
+            self.pending.insert(id.clone());
+            ids.push(id);
         }
-        self.decode_on_worker(name, files);
-        self.save();
+        self.decode_ids_on_worker(source.into(), ids, files);
     }
 
     /// Add a Hugging Face dataset source from the form. Hides the form when the
@@ -421,6 +432,26 @@ impl TrainData {
         }
         let short = repo.rsplit('/').next().unwrap_or(&repo).to_string();
         let name = unique_name(&self.project.sources, &short);
+        self.show_hf = false;
+        self.add_hf_source(name, repo, None, split, audio_col, text_col, limit, 1, None, None);
+    }
+
+    /// Add an HF source with a fixed name and config (the form and the tr2 recipe share this).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_hf_source(
+        &mut self,
+        name: String,
+        repo: String,
+        config: Option<String>,
+        split: String,
+        audio_col: String,
+        text_col: Option<String>,
+        limit: Option<u32>,
+        weight: u32,
+        license: Option<String>,
+        note: Option<String>,
+    ) {
+        let name = unique_name(&self.project.sources, &name);
         let Some(api) = self.engine_api.clone() else {
             self.notice = Some("The voice engine is off. Open the Voice tab once to start it, then try again.".into());
             return;
@@ -429,17 +460,16 @@ impl TrainData {
             name: name.clone(),
             kind: SourceKind::HfDataset {
                 repo: repo.clone(),
-                config: None,
+                config: config.clone(),
                 split: split.clone(),
                 audio_col: audio_col.clone(),
                 text_col: text_col.clone(),
             },
-            weight: 1,
-            license: None,
-            note: Some(format!("Hugging Face dataset {repo}.")),
+            weight,
+            license,
+            note: note.or_else(|| Some(format!("Hugging Face dataset {repo}."))),
         });
         self.statuses.insert(name.clone(), SourceStatus::Working("Fetching the dataset…".into()));
-        self.show_hf = false;
         self.notice = None;
         let (events, wake) = (self.events_tx.clone(), self.waker.clone());
         let out_dir = self.dir.join("hf").join(&name);
@@ -447,7 +477,7 @@ impl TrainData {
         std::thread::spawn(move || {
             let event = match api.prep_hf(&HfPrep {
                 repo,
-                config: None,
+                config,
                 split,
                 audio_col,
                 text_col,
@@ -476,6 +506,69 @@ impl TrainData {
             s.weight = weight;
             self.save();
         }
+    }
+
+    /// Fill the data step from the tr2 recipe: its settings, its HF sources
+    /// (downloads start at once), its local sources (the user points at a folder).
+    pub fn train_like_tr2(&mut self) {
+        let recipe = crate::train::recipe_page::tr2_recipe();
+        self.project.settings = recipe.settings.clone();
+        self.sync_settings_fields();
+        for src in recipe.sources {
+            match src.kind {
+                SourceKind::HfDataset { repo, config, split, audio_col, text_col } => {
+                    self.add_hf_source(src.name, repo, config, split, audio_col, text_col, None, src.weight, src.license, src.note);
+                }
+                SourceKind::LocalFolder { .. } | SourceKind::LocalFiles { .. } => {
+                    let name = unique_name(&self.project.sources, &src.name);
+                    self.project.sources.push(Source {
+                        name: name.clone(),
+                        kind: SourceKind::LocalFolder { dir: String::new() },
+                        weight: src.weight,
+                        license: src.license,
+                        note: src.note,
+                    });
+                    self.statuses.insert(name, SourceStatus::Ready);
+                }
+            }
+        }
+        self.show_recipe = false;
+        self.save();
+    }
+
+    /// Ask for the folder behind an unpointed local source.
+    pub fn pick_local_folder(&mut self, source: &str, tx: &mut rune::Tx) {
+        let options = rune::FileDialogOptions { title: "Pick the clip folder".into(), ..Default::default() };
+        let source = source.to_string();
+        tx.open_folder(options, move |s: &mut crate::state::App, result, _tx| match result {
+            Ok(Some(dir)) => s.train.point_local_source(&source, &dir),
+            Ok(None) => {}
+            Err(e) => s.train.notice = Some(format!("The Open window could not open: {e}")),
+        });
+    }
+
+    /// Point a local source at a folder and read its clips in.
+    pub fn point_local_source(&mut self, source: &str, dir: &std::path::Path) {
+        let Some(s) = self.project.sources.iter_mut().find(|x| x.name == source) else { return };
+        s.kind = SourceKind::LocalFolder { dir: dir.to_string_lossy().into_owned() };
+        s.note = Some(format!("Added from this folder: {}", dir.display()));
+        let mut files: Vec<PathBuf> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let path = e.path();
+                if path.is_file() && has_media_ext(&path) {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        if files.is_empty() {
+            self.notice = Some(format!("No audio files in {}.", dir.display()));
+            return;
+        }
+        self.statuses.insert(source.into(), SourceStatus::Working("Reading the clips…".into()));
+        self.ingest(source, files);
+        self.save();
     }
 
     pub fn remove_source(&mut self, source: &str) {
@@ -572,7 +665,7 @@ impl TrainData {
     }
 
     /// Copy the settings into the edit fields.
-    fn sync_settings_fields(&mut self) {
+    pub(crate) fn sync_settings_fields(&mut self) {
         let s = &self.project.settings;
         self.steps_field = TextEdit::new(&s.steps.to_string());
         self.lora_r_field = TextEdit::new(&s.lora_r.to_string());
@@ -1152,13 +1245,6 @@ impl TrainData {
         });
     }
 
-    /// Decode dropped files on a worker, then hand the samples to Whisper.
-    fn decode_on_worker(&self, source: String, files: Vec<PathBuf>) {
-        let ids: Vec<String> =
-            self.project.clips.iter().filter(|c| c.clip.source == source).map(|c| c.clip.id.clone()).collect();
-        self.decode_ids_on_worker(source, ids, files);
-    }
-
     fn decode_ids_on_worker(&self, source: String, ids: Vec<String>, files: Vec<PathBuf>) {
         let (events, wake) = (self.events_tx.clone(), self.waker.clone());
         std::thread::spawn(move || {
@@ -1229,7 +1315,7 @@ fn nonempty(text: &str, fallback: &str) -> String {
     if text.is_empty() { fallback.into() } else { text.into() }
 }
 
-fn unique_name(sources: &[Source], base: &str) -> String {
+pub(crate) fn unique_name(sources: &[Source], base: &str) -> String {
     if !sources.iter().any(|s| s.name == base) {
         return base.into();
     }

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 rune = { workspace = true, features = ["native-file-dialog"] }
+arboard = "3"
 hound = "3"
 jeuvoice-core = { path = "../jeuvoice-core" }
 jeuvoice-whisper = { path = "../jeuvoice-whisper" }

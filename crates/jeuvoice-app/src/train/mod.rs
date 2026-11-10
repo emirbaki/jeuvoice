@@ -7,6 +7,7 @@ pub mod bundle;
 pub mod checkpoints;
 pub mod data_step;
 pub mod model_step;
+pub mod recipe_page;
 pub mod run;
 pub mod run_step;
 pub mod state;
@@ -16,12 +17,12 @@ pub mod target_step;
 mod tests;
 
 use rune::tok::{space, type_};
-use rune::{El, col, text};
+use rune::{El, col, row, text};
 
 use crate::state::App;
 use crate::train::state::training_root;
 
-/// The whole Train tab: data, model and target steps.
+/// The whole Train tab: data, model, target and run steps.
 pub fn view(s: &App) -> El {
     let t = rune::tok::theme(true);
     let adapters = model_step::known_adapters(
@@ -32,11 +33,24 @@ pub fn view(s: &App) -> El {
     let page = col()
         .w_full()
         .gap(space::S3)
-        .child(text("Training").font(type_::TITLE).color(t.text))
+        .child(
+            row()
+                .w_full()
+                .gap(space::S2)
+                .child(text("Training").font(type_::TITLE).color(t.text).grow(1.0).min_w(0.0))
+                .child(crate::transcribe_tab::button("train-recipe-open", "How tr2 was made", true, |s, _| {
+                    s.train.show_recipe = true
+                })),
+        )
         .child(data_step::view(&s.train))
         .child(model_step::view(&s.train, &adapters))
         .child(target_step::view(&s.train, &s.transcribe.engine_state()))
         .child(run_step::view(&s.train));
+    let page = if s.train.show_recipe {
+        page.child(recipe_page::view(&recipe_page::tr2_recipe()))
+    } else {
+        page
+    };
     col()
         .w_full()
         .grow(1.0)

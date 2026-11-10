@@ -101,12 +101,17 @@ fn source_row(s: &TrainData, i: usize, source: &Source) -> El {
     let weighted = min * source.weight as f32;
     let min_text = fmt_minutes(min);
     let w_text = fmt_minutes(weighted);
-    let status = match s.status_of(&source.name) {
-        SourceStatus::Working(m) => m,
-        SourceStatus::Ready => format!("{} clips · {min_text} min · ×{} = {w_text} min", kept.len(), source.weight),
-        SourceStatus::Failed(e) => e,
+    let unpointed = matches!(&source.kind, jeuvoice_core::train::SourceKind::LocalFolder { dir } if dir.is_empty());
+    let status = if unpointed {
+        crate::train::recipe_page::LOCAL_PROMPT.to_string()
+    } else {
+        match s.status_of(&source.name) {
+            SourceStatus::Working(m) => m,
+            SourceStatus::Ready => format!("{} clips · {min_text} min · ×{} = {w_text} min", kept.len(), source.weight),
+            SourceStatus::Failed(e) => e,
+        }
     };
-    row()
+    let mut card = row()
         .w_full()
         .gap(space::S2)
         .padding(space::S2)
@@ -133,18 +138,24 @@ fn source_row(s: &TrainData, i: usize, source: &Source) -> El {
                 let w = s.train.sources().iter().find(|x| x.name == name).map(|x| x.weight).unwrap_or(1);
                 s.train.set_weight(&name, w + 1);
             }
-        }))
-        .child(button(&format!("train-review-{i}"), "Review", !clips.is_empty(), {
-            let name = source.name.clone();
-            move |s: &mut App, _| {
-                s.train.review = Some(name.clone());
-                s.train.editing = None;
-            }
-        }))
-        .child(button(&format!("train-remove-{i}"), "Remove", true, {
-            let name = source.name.clone();
-            move |s: &mut App, _| s.train.remove_source(&name)
-        }))
+        }));
+    if unpointed {
+        let name = source.name.clone();
+        card = card.child(button(&format!("train-pick-{i}"), "Pick folder", true, move |s: &mut App, tx| {
+            s.train.pick_local_folder(&name, tx)
+        }));
+    }
+    card = card.child(button(&format!("train-review-{i}"), "Review", !clips.is_empty(), {
+        let name = source.name.clone();
+        move |s: &mut App, _| {
+            s.train.review = Some(name.clone());
+            s.train.editing = None;
+        }
+    }));
+    card.child(button(&format!("train-remove-{i}"), "Remove", true, {
+        let name = source.name.clone();
+        move |s: &mut App, _| s.train.remove_source(&name)
+    }))
 }
 
 fn review_panel(s: &TrainData, name: &str) -> El {

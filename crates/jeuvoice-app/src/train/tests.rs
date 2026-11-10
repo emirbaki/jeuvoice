@@ -684,3 +684,58 @@ fn use_as_preset_writes_a_preset_and_opens_voice() {
     assert!(adapter.ends_with("checkpoint-3000"), "adapter is the checkpoint folder: {adapter}");
 }
 
+#[test]
+fn the_recipe_page_shows_five_sources_with_weights_and_licenses() {
+    let mut rig = Rig::new();
+    rig.train_tab();
+    rig.tap("train-recipe-open");
+    let weights = ["×1", "×1", "×1", "×2", "×2"];
+    for (i, w) in weights.iter().enumerate() {
+        assert!(rig.text(&format!("train-recipe-source-{i}")).contains(w), "source {i} weighs {w}");
+    }
+    for (i, license) in [(0, "CC-BY-4.0"), (1, "CC-BY-3.0"), (2, "CC-BY-4.0")] {
+        assert_eq!(rig.text(&format!("train-recipe-license-{i}")), format!("License: {license}"));
+    }
+    assert!(rig.text("train-recipe-base").contains("k2-fsa/OmniVoice"));
+    assert!(rig.text("train-recipe-settings").contains("6000"));
+}
+
+#[test]
+fn train_like_tr2_fills_sources_settings_and_starts_hf() {
+    let mut rig = Rig::new();
+    rig.train_tab();
+    rig.rt.update(|s, _| s.train.project.settings.steps = 3000);
+    rig.rt.frame(1.0 / 60.0);
+    rig.tap("train-recipe-open");
+    rig.tap("train-like-tr2");
+    rig.until("the five recipe sources", |s| s.train.sources().len() == 5);
+    assert_eq!(rig.rt.state.train.project.settings.steps, 6000, "the recipe settings land");
+    // The three HF sources download (the fake writes two clips each).
+    rig.until("the HF clips have text", |s| {
+        s.train.clips().len() == 6 && s.train.clips().iter().all(|c| !c.clip.text.is_empty())
+    });
+    // The local sources wait for a folder.
+    assert_eq!(rig.text("train-status-3"), crate::train::recipe_page::LOCAL_PROMPT);
+    assert_eq!(rig.text("train-status-4"), crate::train::recipe_page::LOCAL_PROMPT);
+}
+
+#[test]
+fn picking_a_folder_reads_its_clips() {
+    let mut rig = Rig::new();
+    rig.train_tab();
+    rig.tap("train-recipe-open");
+    rig.tap("train-like-tr2");
+    rig.until("the five recipe sources", |s| s.train.sources().len() == 5);
+    let dir = rig.tmp.path().join("mine");
+    std::fs::create_dir_all(&dir).unwrap();
+    wav(&dir, "a.wav");
+    wav(&dir, "b.wav");
+    rig.tap("train-pick-3");
+    assert!(rig.rt.file_dialog().is_some(), "a folder dialog opens");
+    rig.rt.resolve_file_dialog(Some(dir.clone())).unwrap();
+    rig.until("the folder clips have text", |s| {
+        s.train.clips_of("my_voice_a8").len() == 2 && s.train.clips_of("my_voice_a8").iter().all(|c| !c.clip.text.is_empty())
+    });
+    assert!(rig.text("train-status-3").contains("clips"), "the row counts them: {}", rig.text("train-status-3"));
+}
+
