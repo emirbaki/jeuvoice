@@ -8,5 +8,6 @@ pub mod script_diff;
 pub mod splice;
 pub mod subtitles;
 pub mod terms;
+pub mod train;
 pub mod transcript;
 pub mod turkish;
