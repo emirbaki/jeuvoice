@@ -3,20 +3,27 @@
 mod cache;
 mod marks;
 mod playback;
+mod services;
 mod settings;
 mod settings_tab;
 mod state;
+mod transcribe;
 mod transcribe_tab;
+/// Voice tab pieces. The Voice tab (Task 11) plugs these into the window.
+#[allow(dead_code)]
+mod voice;
 mod view;
 mod waveform;
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use jeuvoice_core::transcript::Transcript;
 use jeuvoice_whisper::{TranscribeOptions, Transcriber, WhisperError, WhisperRs, download_model, model_path};
 use rune::AppSpec;
 use settings::Settings;
-use state::{App, Deps, EnsureModel, ModelHost};
+use services::speech::EnsureModel;
+use state::{App, Deps, ModelHost};
 
 /// whisper.cpp, loaded on the first transcription (on the worker thread). A failed load is
 /// not kept, so the next file tries again. The app drops the loaded model when the GPU choice
@@ -70,6 +77,12 @@ fn ensure_model() -> EnsureModel {
 }
 
 fn init() -> App {
+    // Built-in voice presets on first start only; never overwrites user edits.
+    if let (Some(presets), Some(assets)) = (jeuvoice_core::preset::default_presets_dir(), dev_assets_dir())
+        && assets.join("presets").is_dir()
+    {
+        let _ = jeuvoice_core::preset::install_default_presets(&assets, &presets);
+    }
     let whisper = Arc::new(LazyWhisper::default());
     App::new(Deps {
         transcriber: whisper.clone(),
@@ -79,7 +92,16 @@ fn init() -> App {
         model: Some(whisper),
         settings: Settings::load(),
         settings_path: Settings::default_path(),
+        token_store: Arc::new(settings::KeyringStore),
     })
+}
+
+/// `assets/` next to the workspace root (development). Installed mode comes with
+/// runtime paths in Plan 4.
+fn dev_assets_dir() -> Option<PathBuf> {
+    let root = std::env::current_exe().ok()?.parent()?.parent()?.parent()?.to_path_buf();
+    let assets = root.join("assets");
+    assets.is_dir().then_some(assets)
 }
 
 fn main() {

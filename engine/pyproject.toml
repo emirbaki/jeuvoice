@@ -1,0 +1,23 @@
+[project]
+name = "jeuvoice-engine"
+version = "0.1.0"
+description = "JeuVoice voice engine (OmniVoice + tr2 LoRA) over local HTTP"
+requires-python = ">=3.12"
+dependencies = [
+    "huggingface_hub",
+]
+
+[project.optional-dependencies]
+cuda = [
+    "torch==2.14.0",
+    "transformers==5.19.0",
+    "peft==0.21.2",
+    "accelerate==1.15.0",
+]
+test = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gpu: needs the model and --gpu on this machine"]
