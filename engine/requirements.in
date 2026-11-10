@@ -1,0 +1,18 @@
+# Engine training/voice environment (Plan 2 pins, no index details: the lock
+# commands pick the torch index per platform). Git refs pin commits so a
+# relock resolves the same code; `uv pip compile --generate-hashes` records
+# every wheel hash in the per-platform lock files.
+torch==2.14.0
+torchaudio==2.11.0
+transformers==5.19.0
+peft==0.21.2
+accelerate==1.15.0
+omnivoice[lora] @ git+https://github.com/k2-fsa/OmniVoice@08be0b4ccbac3e13e374e86fbfead4b4cac343e2
+trnorm @ git+https://github.com/ozguradmin/ahenk-turkish-tts@8981df9354a6dc95a3a2b4730b7fbff196dda219
+soundfile
+numpy
+huggingface_hub
+datasets
+librosa
+scipy
+pytest
