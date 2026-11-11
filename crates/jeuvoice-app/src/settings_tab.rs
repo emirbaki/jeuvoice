@@ -38,7 +38,7 @@ pub fn view(s: &App) -> El {
         .child(section("Voice model files"))
         .child(adapter_block(s))
         .child(section("Voice engine"))
-        .child(engine_block(&s.transcribe));
+        .child(engine_block(s));
     if let Some(e) = &s.settings_error {
         page = page.child(text(e.as_str()).key("settings-error").font(type_::LABEL).color(red()).wrap());
     }
@@ -234,9 +234,11 @@ fn adapter_block(s: &App) -> El {
 }
 
 /// The voice engine state with a restart button.
-fn engine_block(s: &TranscribeTab) -> El {
+fn engine_block(app: &App) -> El {
     let t = tok::theme(true);
-    let (status, bad) = match s.engine_state() {
+    let state = app.transcribe.engine_state();
+    let repair = matches!(&state, EngineState::Failed(e) if crate::version::is_version_mismatch(e));
+    let (status, bad) = match state {
         EngineState::Off => ("Voice engine: off".to_string(), false),
         EngineState::Starting => ("Voice engine: starting…".to_string(), false),
         EngineState::Ready(h) => (format!("Voice engine: ready ({})", h.device), false),
@@ -251,7 +253,14 @@ fn engine_block(s: &TranscribeTab) -> El {
                 .color(if bad { red() } else { t.text })
                 .wrap(),
         )
-        .child(button("restart-engine", "Restart engine", true, |s, _| s.transcribe.restart_engine()))
+        .child(if repair {
+            button("repair-engine", "Repair", true, |s, _| {
+                s.setup.repair();
+                s.tab = crate::state::Tab::Voice;
+            })
+        } else {
+            button("restart-engine", "Restart engine", true, |s, _| s.transcribe.restart_engine())
+        })
 }
 
 #[cfg(test)]

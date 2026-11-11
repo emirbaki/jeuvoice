@@ -13,6 +13,7 @@ use rune::{Env, Runtime};
 
 use crate::services::speech::EnsureModel;
 use crate::settings::{HF_TOKEN_KEY, MemStore, Settings, TokenStore};
+use crate::services::engine::EngineState;
 use crate::state::{App, Deps, ModelHost};
 use crate::view::view;
 use jeuvoice_kaggle::{KaggleAuth, KeyStore, MemStore as KaggleMemStore};
@@ -168,6 +169,20 @@ fn the_voice_engine_shows_off_with_a_restart_button() {
     let rig = Rig::new(true);
     assert_eq!(rig.text("engine-status"), "Voice engine: off");
     assert!(rig.on_screen("restart-engine"));
+}
+
+#[test]
+fn an_engine_from_another_version_shows_repair() {
+    let mut rig = Rig::new(true);
+    assert!(!rig.on_screen("repair-engine"), "no Repair while the engine is fine");
+    rig.rt.update(|s, _| {
+        s.transcribe
+            .engine_mut()
+            .set_state_for_tests(EngineState::Failed(crate::version::ENGINE_VERSION_MISMATCH.into()))
+    });
+    rig.rt.frame(1.0 / 60.0);
+    assert!(rig.text("engine-status").contains("Click Repair"));
+    assert!(rig.on_screen("repair-engine"));
 }
 
 #[test]

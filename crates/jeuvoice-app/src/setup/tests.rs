@@ -214,6 +214,65 @@ fn the_driver_waits_only_for_an_installed_env_that_needs_it() {
 }
 
 
+/// A ready env: python, the ok marker with the current lock hash.
+fn make_ready_env(paths: &crate::runtime_paths::RuntimePaths) {
+    std::fs::create_dir_all(paths.python.parent().unwrap()).unwrap();
+    std::fs::write(&paths.python, b"x").unwrap();
+    std::fs::write(paths.engine_env.join(".jeuvoice-ok"), paths.lock_hash()).unwrap();
+}
+
+#[test]
+fn an_update_with_the_same_lock_skips_setup_and_keeps_user_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = installed_paths(tmp.path());
+    make_ready_env(&paths);
+    // User files live in Documents\JeuVoice, outside the bundle and the env.
+    let docs = tmp.path().join("Documents").join("JeuVoice");
+    let preset = docs.join("presets").join("mine").join("preset.json");
+    let project = docs.join("projects").join("ep1").join("project.json");
+    for f in [&preset, &project] {
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, b"{}").unwrap();
+    }
+    // The update: new resources over the old ones, the same lock file.
+    let new = tmp.path().join("new-bundle");
+    std::fs::create_dir_all(new.join("engine")).unwrap();
+    std::fs::write(new.join("engine").join("server.py"), b"v2").unwrap();
+    std::fs::write(new.join("jeuvoice-app.exe"), b"v2").unwrap();
+    for name in ["engine/server.py", "jeuvoice-app.exe"] {
+        let to = paths.resources.join(name);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(new.join(name), to).unwrap();
+    }
+    assert!(!needs_setup(&paths), "the same lock hash keeps the env");
+    assert!(preset.is_file() && project.is_file(), "presets and projects stay");
+    assert!(paths.engine_env.join(".jeuvoice-ok").is_file());
+}
+
+#[test]
+fn repair_clears_the_ok_marker_so_setup_runs_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = installed_paths(tmp.path());
+    make_ready_env(&paths);
+    let mut driver = SetupDriver::new(Some(paths.clone()));
+    assert!(driver.ready(), "a ready env needs no setup");
+    driver.repair();
+    assert!(needs_setup(&paths), "repair makes setup run again");
+    assert!(!driver.ready(), "the Voice tab waits for setup after Repair");
+}
+
+#[test]
+fn repair_in_dev_never_touches_the_dev_venv() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut paths = installed_paths(tmp.path());
+    paths.mode = crate::runtime_paths::RuntimeMode::Dev;
+    make_ready_env(&paths);
+    let mut driver = SetupDriver::new(Some(paths.clone()));
+    driver.repair();
+    assert!(paths.engine_env.join(".jeuvoice-ok").is_file(), "dev keeps engine/.venv as it is");
+    assert!(driver.ready());
+}
+
 /// Renders the setup screen at the torch download to `target/setup.png`:
 /// `scripts\cargo.cmd test -p jeuvoice-app snap_setup -- --ignored`.
 #[test]

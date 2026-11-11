@@ -43,6 +43,15 @@ pub fn unload_for_transcribe(api: Option<&dyn EngineApi>, engine: &EngineState, 
     api.unload().is_ok()
 }
 
+/// The state for a started engine: Ready, or Failed when it is from another
+/// JeuVoice version (Settings then offers Repair).
+pub fn state_for_health(health: Health) -> EngineState {
+    match crate::version::check_engine_version(&health.version) {
+        Ok(()) => EngineState::Ready(health),
+        Err(message) => EngineState::Failed(message),
+    }
+}
+
 /// Starts, watches and restarts the engine process.
 pub struct EngineService {
     state: Arc<Mutex<EngineState>>,
@@ -171,8 +180,14 @@ impl EngineService {
         })();
         match outcome {
             Ok((proc, health)) => {
-                *process.lock().unwrap_or_else(|e| e.into_inner()) = Some(proc);
-                *state.lock().unwrap_or_else(|e| e.into_inner()) = EngineState::Ready(health);
+                let next = state_for_health(health);
+                if matches!(next, EngineState::Ready(_)) {
+                    *process.lock().unwrap_or_else(|e| e.into_inner()) = Some(proc);
+                } else {
+                    // An engine from another version must not take jobs.
+                    proc.stop();
+                }
+                *state.lock().unwrap_or_else(|e| e.into_inner()) = next;
             }
             Err(e) => {
                 *state.lock().unwrap_or_else(|e| e.into_inner()) = EngineState::Failed(e.to_string());
@@ -186,6 +201,28 @@ impl EngineService {
 mod tests {
     use super::*;
     use jeuvoice_engine_client::{JobId, JobStatus, RenderRequest};
+
+    fn health(version: &str) -> Health {
+        Health {
+            ok: true,
+            backend: "omnivoice".into(),
+            device: "cuda".into(),
+            vram_total_gb: Some(12.0),
+            model_loaded: false,
+            version: version.into(),
+        }
+    }
+
+    #[test]
+    fn an_engine_from_another_version_is_refused() {
+        let state = state_for_health(health("0.0.9"));
+        assert_eq!(
+            state,
+            EngineState::Failed("The voice engine is from another JeuVoice version. Click Repair.".into())
+        );
+        let ok = health(crate::version::ENGINE_VERSION);
+        assert_eq!(state_for_health(ok.clone()), EngineState::Ready(ok));
+    }
 
     #[test]
     fn small_cuda_engine_forces_cpu_whisper() {

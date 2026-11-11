@@ -206,6 +206,20 @@ impl SetupDriver {
         self.spawn();
     }
 
+    /// Run setup again for an engine from another version. Only an installed
+    /// app does this: dev keeps `engine/.venv`, which `engine-dev.cmd` owns.
+    pub fn repair(&mut self) {
+        let Some(paths) = self.paths.as_ref() else { return };
+        if paths.mode != RuntimeMode::Installed || self.running {
+            return;
+        }
+        let _ = std::fs::remove_file(paths.engine_env.join(".jeuvoice-ok"));
+        self.state = SetupState::Checking;
+        if self.waker.is_some() {
+            self.spawn();
+        }
+    }
+
     fn spawn(&mut self) {
         let (Some(paths), Some(waker)) = (self.paths.clone(), self.waker.clone()) else {
             self.state = SetupState::NotNeeded;
