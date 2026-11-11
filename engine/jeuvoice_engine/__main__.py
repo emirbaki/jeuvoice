@@ -3,10 +3,23 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import threading
 from pathlib import Path
 
 from .server import READY_PREFIX, serve
+
+
+def _exit_when_parent_closes() -> None:
+    """The app holds our stdin pipe open. Its close (normal quit or a kill)
+    means nobody can use the engine: exit without waiting for a shutdown call."""
+    try:
+        while sys.stdin.buffer.read(1):
+            pass
+    except Exception:
+        pass
+    os._exit(0)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,6 +34,9 @@ def main(argv: list[str] | None = None) -> int:
     # Exactly one line on stdout, after the HTTP server listens.
     sys.stdout.write(f"{READY_PREFIX}{actual}\n")
     sys.stdout.flush()
+    # The app starts us with a stdin pipe; a terminal run has a TTY and skips this.
+    if not sys.stdin.isatty():
+        threading.Thread(target=_exit_when_parent_closes, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

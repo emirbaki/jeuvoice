@@ -11,8 +11,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def start_server(token="secret"):
+def start_server(token="secret", pipe_stdin=False):
     data_dir = Path(tempfile.mkdtemp(prefix="jeuvoice_fetch_test_"))
+    kwargs = {"stdin": subprocess.PIPE} if pipe_stdin else {}
     proc = subprocess.Popen(
         [sys.executable, "-m", "jeuvoice_engine", "--port", "0",
          "--token", token, "--data-dir", str(data_dir), "--backend", "fake"],
@@ -20,6 +21,7 @@ def start_server(token="secret"):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        **kwargs,
     )
     assert proc.stdout is not None
     line = proc.stdout.readline().strip()
@@ -53,6 +55,13 @@ def test_unknown_repo_gives_a_plain_error():
         except Exception:
             pass
         proc.wait(timeout=15)
+
+
+def test_closing_the_parent_pipe_stops_the_engine():
+    proc, _port = start_server(pipe_stdin=True)
+    assert proc.stdin is not None
+    proc.stdin.close()
+    assert proc.wait(timeout=10) == 0
 
 
 def test_a_missing_subfolder_falls_back_to_the_repo_root(monkeypatch, tmp_path):

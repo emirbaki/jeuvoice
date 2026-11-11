@@ -2,7 +2,7 @@
 
 use std::io::BufRead;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -21,6 +21,9 @@ pub struct EngineConfig {
 /// The running engine: its process, port, token and HTTP client.
 pub struct EngineProcess {
     child: Child,
+    /// Kept open and never written. When the app exits, even by force, the
+    /// other end closes and the engine's stdin watcher exits.
+    _stdin: ChildStdin,
     port: u16,
     api: HttpEngine,
 }
@@ -44,6 +47,7 @@ impl EngineProcess {
             .arg("--backend")
             .arg(&cfg.backend)
             .env("PYTHONPATH", &cfg.engine_dir)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         // A GUI app must not open a console for the engine. Without this the
@@ -54,6 +58,7 @@ impl EngineProcess {
             command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
         let mut child = command.spawn().map_err(|_| EngineError::StartFailed)?;
+        let stdin = child.stdin.take().ok_or(EngineError::StartFailed)?;
         let stdout = child.stdout.take().ok_or(EngineError::StartFailed)?;
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -73,7 +78,7 @@ impl EngineProcess {
                 let _ = child.kill();
                 EngineError::StartFailed
             })?;
-        Ok(Self { child, port, api: HttpEngine::new(port, token) })
+        Ok(Self { child, _stdin: stdin, port, api: HttpEngine::new(port, token) })
     }
 
     pub fn port(&self) -> u16 {
@@ -99,6 +104,15 @@ impl EngineProcess {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for EngineProcess {
+    /// A closed app must not leave the engine behind. The stdin pipe also
+    /// stops it after a force close, where this drop never runs.
+    fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
