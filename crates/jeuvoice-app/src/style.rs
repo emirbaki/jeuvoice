@@ -89,6 +89,11 @@ pub fn contrast(fg: Color, bg: Color) -> f32 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
+/// White fill with the look of CSS `rgba(255,255,255,css_alpha)` on the page.
+pub fn white_fill(css_alpha: f32) -> Color {
+    white(css_alpha)
+}
+
 /// The page background: a dark vertical gradient with a soft light spot at the top left.
 pub fn background(child: El) -> El {
     let p = palette();
