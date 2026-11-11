@@ -135,9 +135,10 @@ pub struct TranscribeTab {
     /// Keep drawing until this moment after a seek, so the word pill's flight and
     /// the scroll glide animate even when no sound plays.
     anim_until: Option<std::time::Instant>,
-    /// A horizontal pan of the wave (and its word row) after a click:
-    /// (from start, to start, start clock; negative until the first frame).
-    view_anim: Option<(f64, f64, f64)>,
+    /// A pan/zoom of the wave (and its word row) after a click:
+    /// (from start, to start, from span, to span, start clock; negative until the
+    /// first frame).
+    view_anim: Option<(f64, f64, f64, f64, f64)>,
 }
 
 impl TranscribeTab {
@@ -341,27 +342,49 @@ impl TranscribeTab {
         self.view.playhead = t;
         self.anim_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(350));
         if let Some(l) = &self.loaded {
-            let span = self.view.span;
-            let from = self.view.start;
-            let to = (t - span / 2.0).clamp(0.0, (l.duration - span).max(0.0));
-            if (to - from).abs() > 0.01 {
-                self.view_anim = Some((from, to, -1.0));
+            let duration = l.duration;
+            // Show the clicked word with about three words each side, not the
+            // whole clip: a full span has no room to pan and clips the row.
+            let mut to_span = (duration * 0.4).clamp(4.0, 20.0).min(duration);
+            if let Some((_, tr)) = self.selected_done()
+                && !tr.words.is_empty()
+            {
+                let i = tr
+                    .words
+                    .iter()
+                    .position(|w| t >= w.start && t <= w.end)
+                    .or_else(|| tr.words.iter().position(|w| w.start >= t))
+                    .unwrap_or(tr.words.len() - 1);
+                let a = i.saturating_sub(3);
+                let b = (i + 4).min(tr.words.len());
+                to_span = (tr.words[b - 1].end - tr.words[a].start).max(1.5).min(duration);
+            }
+            // Never zoom out a view the user already made closer.
+            let to_span = self.view.span.min(to_span).max(0.5);
+            let to_start = (t - to_span / 2.0).clamp(0.0, (duration - to_span).max(0.0));
+            let (from_start, from_span) = (self.view.start, self.view.span);
+            if (to_start - from_start).abs() > 0.01 || (to_span - from_span).abs() > 0.01 {
+                self.view_anim = Some((from_start, to_start, from_span, to_span, -1.0));
             }
         }
     }
 
-    /// Advance the click pan. `clock` is the app's frame clock.
+    /// Advance the click pan/zoom. `clock` is the app's frame clock.
     pub(crate) fn animate(&mut self, clock: f64) -> bool {
-        let Some((from, to, start)) = self.view_anim else { return false };
+        let Some((from_start, to_start, from_span, to_span, start)) = self.view_anim else {
+            return false;
+        };
         let start = if start < 0.0 { clock } else { start };
         let k = ((clock - start) / 0.25).clamp(0.0, 1.0);
         let eased = k * k * (3.0 - 2.0 * k);
-        self.view.start = from + (to - from) * eased;
+        self.view.start = from_start + (to_start - from_start) * eased;
+        self.view.span = from_span + (to_span - from_span) * eased;
         if k >= 1.0 {
-            self.view.start = to;
+            self.view.start = to_start;
+            self.view.span = to_span;
             self.view_anim = None;
         } else {
-            self.view_anim = Some((from, to, start));
+            self.view_anim = Some((from_start, to_start, from_span, to_span, start));
         }
         true
     }
