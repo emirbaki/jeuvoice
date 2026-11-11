@@ -131,6 +131,21 @@ impl Rig {
             .unwrap_or_else(|| panic!("{key} shows text"))
     }
 
+    /// Open a Train tile (`train-tile-data`, `-setup`, `-run`) by a tap on it.
+    fn open_tile(&mut self, key: &str) {
+        if self.rt.state.tab != crate::state::Tab::Train {
+            self.train_tab();
+        }
+        self.tap(key);
+        for _ in 0..30 {
+            self.rt.frame(1.0 / 60.0);
+        }
+    }
+
+    fn on_screen(&self, key: &str) -> bool {
+        self.rt.elements().iter().any(|e| e.key.as_deref() == Some(key) && !e.exiting)
+    }
+
     fn train_tab(&mut self) {
         self.tap("tab-train");
         assert_eq!(self.rt.state.tab, crate::state::Tab::Train);
@@ -173,6 +188,7 @@ fn dropped_clips_get_text_after_the_jobs() {
 fn an_hf_source_without_text_runs_whisper() {
     let mut rig = Rig::new();
     rig.train_tab();
+    rig.open_tile("train-tile-data");
     rig.tap("train-hf-open");
     rig.tap("train-hf-repo");
     rig.rt.paste("someone/some-dataset");
@@ -309,15 +325,44 @@ fn fixture() -> App {
     app
 }
 
-/// Renders the tab with the fixture to `target/train-data.png`:
+fn snap(name: &str, make: fn() -> App) {
+    let out = format!("{}/../../target/{name}.png", env!("CARGO_MANIFEST_DIR"));
+    let spec = rune::AppSpec::new("Train", (1100.0, 720.0), make, view);
+    rune::App::new(spec).args(["--snap".to_string(), out.clone()]).run();
+    println!("wrote {out}");
+}
+
+/// The board with the fixture: `target/train.png`.
 /// `scripts\cargo.cmd test -p jeuvoice-app snap_train -- --ignored`.
 #[test]
 #[ignore]
 fn snap_train() {
-    let out = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/train-data.png");
-    let spec = rune::AppSpec::new("Train", (1100.0, 720.0), fixture, view);
-    rune::App::new(spec).args(["--snap".to_string(), out.to_string()]).run();
-    println!("wrote {out}");
+    snap("train", fixture);
+}
+
+/// The Data tile open with the clip review: `target/train-data.png`.
+#[test]
+#[ignore]
+fn snap_train_data() {
+    snap("train-data", || {
+        let mut app = fixture();
+        app.train.open_tile = Some(TrainTile::Data);
+        app
+    });
+}
+
+/// The Run tile open before a run: `target/train-run.png`.
+#[test]
+#[ignore]
+fn snap_train_run() {
+    snap("train-run", || {
+        let mut app = fixture();
+        app.train.open_tile = Some(TrainTile::Run);
+        app.train.run = None;
+        app.train.checkpoints.clear();
+        app.train.ck_replays.clear();
+        app
+    });
 }
 
 fn small_cuda_engine() -> crate::services::engine::EngineState {
@@ -337,6 +382,7 @@ fn a_small_gpu_turns_this_pc_off_with_the_reason() {
     rig.rt.state.transcribe.engine_mut().set_test_api(Arc::new(FakeEngineApi::new()));
     rig.rt.state.transcribe.engine_mut().set_state_for_tests(small_cuda_engine());
     rig.train_tab();
+    rig.open_tile("train-tile-setup");
     assert_eq!(
         rig.text("train-pc-status"),
         "Your graphics card has 4 GB. Training needs at least 12 GB."
@@ -347,6 +393,7 @@ fn a_small_gpu_turns_this_pc_off_with_the_reason() {
 fn fewer_steps_mean_fewer_kaggle_hours() {
     let mut rig = Rig::new();
     rig.train_tab();
+    rig.open_tile("train-tile-setup");
     assert!(rig.text("train-kaggle-est").contains("about 6 hours"), "6000 steps: {}", rig.text("train-kaggle-est"));
     rig.rt.update(|s, _| s.train.project.settings.steps = 3000);
     rig.rt.frame(1.0 / 60.0);
@@ -359,6 +406,7 @@ fn saving_the_kaggle_key_uses_the_store() {
 
     let mut rig = Rig::new();
     rig.train_tab();
+    rig.open_tile("train-tile-setup");
     rig.tap("train-kaggle-add");
     rig.tap("train-kaggle-user-field");
     rig.rt.paste("someone");
@@ -375,6 +423,7 @@ fn picking_the_base_model_starts_from_base() {
 
     let mut rig = Rig::new();
     rig.train_tab();
+    rig.open_tile("train-tile-setup");
     rig.rt.update(|s, _| {
         s.train.project.settings.start_from = StartFrom::Adapter { repo_or_dir: "someone/adapter".into() };
     });
@@ -473,6 +522,7 @@ fn the_confirm_dialog_comes_before_any_upload() {
     let mut rig = Rig::new();
     rig.three_clips();
     rig.train_tab();
+    rig.open_tile("train-tile-run");
     let fake = Arc::new(FakeRun::scripted(vec![KernelState::Complete]));
     rig.rt.state.train.set_client(fake.clone());
     rig.tap("train-run-start");
@@ -488,6 +538,7 @@ fn upload_progress_shows_while_the_bundle_goes_up() {
     let fake = Arc::new(FakeRun::scripted(vec![KernelState::Running, KernelState::Running, KernelState::Complete]));
     start_with_clips(&mut rig, fake);
     rig.train_tab();
+    rig.open_tile("train-tile-run");
     rig.tap("train-run-start");
     rig.tap("train-run-confirm");
     rig.until("the upload shows", |s| s.train.upload.is_some());
@@ -501,6 +552,7 @@ fn a_finished_run_downloads_outputs_and_lists_checkpoints() {
     let fake = Arc::new(FakeRun::scripted(vec![KernelState::Running, KernelState::Complete]));
     start_with_clips(&mut rig, fake.clone());
     rig.train_tab();
+    rig.open_tile("train-tile-run");
     rig.tap("train-run-start");
     rig.tap("train-run-confirm");
     rig.until("the checkpoints list", |s| s.train.checkpoints.len() == 3);
@@ -523,6 +575,7 @@ fn an_error_state_shows_the_log_tail() {
     let fake = Arc::new(fake);
     start_with_clips(&mut rig, fake);
     rig.train_tab();
+    rig.open_tile("train-tile-run");
     rig.tap("train-run-start");
     rig.tap("train-run-confirm");
     rig.until("the run fails", |s| s.train.run.as_ref().is_some_and(|r| r.state == crate::train::run::RunState::Error));
@@ -658,6 +711,7 @@ fn checkpoint_rig() -> (Rig, Arc<SpyEngine>) {
 fn testing_a_checkpoint_loads_it_and_renders_the_fixed_text() {
     let (mut rig, spy) = checkpoint_rig();
     rig.train_tab();
+    rig.open_tile("train-tile-run");
     rig.tap("train-test-checkpoint-3000");
     rig.until("the replay is kept", |s| !s.train.ck_replays.is_empty());
     let loads = spy.loads.lock().unwrap();
@@ -679,6 +733,7 @@ fn testing_a_checkpoint_loads_it_and_renders_the_fixed_text() {
 fn use_as_preset_writes_a_preset_and_opens_voice() {
     let (mut rig, _spy) = checkpoint_rig();
     rig.train_tab();
+    rig.open_tile("train-tile-run");
     rig.tap("train-use-preset-checkpoint-3000");
     assert_eq!(rig.rt.state.tab, crate::state::Tab::Voice, "the Voice tab opens");
     assert_eq!(rig.rt.state.voice.preset_name, "ses_0007 checkpoint-3000");
@@ -762,3 +817,154 @@ fn the_active_profile_names_the_kaggle_user() {
     assert_eq!(rig.rt.state.train.kaggle_user.as_deref(), Some("home-user"));
 }
 
+
+// -- the tile board --
+
+use crate::train::board::{RunSummary, run_summary};
+use crate::train::state::TrainTile;
+
+/// The `[x, y, w, h]` layout target of the live element keyed `key`.
+fn rect_of(rt: &Runtime<App>, key: &str) -> [f32; 4] {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
+        .unwrap_or_else(|| panic!("{key} is on screen"))
+        .target
+}
+
+fn overlap(a: [f32; 4], b: [f32; 4]) -> bool {
+    a[0] < b[0] + b[2] - 0.5 && b[0] < a[0] + a[2] - 0.5 && a[1] < b[1] + b[3] - 0.5 && b[1] < a[1] + a[3] - 0.5
+}
+
+/// The fixture at a window size, a few frames in.
+fn fixture_at(w: f32, h: f32, change: impl FnOnce(&mut App)) -> Runtime<App> {
+    let mut app = fixture();
+    change(&mut app);
+    let mut rt = Runtime::new(app, view, (w, h), Env { system_dark: true, scale: 2.0 });
+    for _ in 0..5 {
+        rt.frame(1.0 / 60.0);
+    }
+    rt
+}
+
+fn glass_count(rt: &Runtime<App>) -> usize {
+    rt.elements().iter().filter(|e| !e.exiting && e.key.as_deref().is_some_and(|k| k.starts_with("glass-"))).count()
+}
+
+#[test]
+fn the_board_shows_three_tiles_and_no_controls() {
+    let mut rig = Rig::new();
+    rig.train_tab();
+    for key in ["train-tile-data", "train-tile-setup", "train-tile-run"] {
+        assert!(rig.on_screen(key), "{key} is on the board");
+    }
+    for key in ["train-run-start", "train-hf-open", "train-kaggle-add"] {
+        assert!(!rig.on_screen(key), "{key} is not on the board");
+    }
+}
+
+#[test]
+fn a_tile_click_opens_it_and_the_others_move_aside() {
+    let mut rig = Rig::new();
+    rig.open_tile("train-tile-run");
+    assert_eq!(rig.rt.state.train.open_tile, Some(TrainTile::Run));
+    assert!(rig.on_screen("train-run-start"));
+    let data = rect_of(&rig.rt, "train-tile-data");
+    let open = rect_of(&rig.rt, "glass-train-open");
+    assert!(data[2] < 1100.0 / 3.0, "the column tile is narrow: {data:?}");
+    assert!(data[0] >= open[0] + open[2], "the column is right of the open tile");
+    rig.open_tile("train-tile-data");
+    assert_eq!(rig.rt.state.train.open_tile, Some(TrainTile::Data));
+    rig.tap("train-tile-close");
+    assert_eq!(rig.rt.state.train.open_tile, None);
+}
+
+#[test]
+fn a_drop_on_the_board_opens_data_and_adds_the_files() {
+    let mut rig = Rig::new();
+    rig.three_clips();
+    assert_eq!(rig.rt.state.train.open_tile, Some(TrainTile::Data));
+    assert_eq!(rig.rt.state.train.clips().len(), 3);
+}
+
+#[test]
+fn the_board_fits_the_window() {
+    let rt = fixture_at(1100.0, 720.0, |a| a.train.open_tile = None);
+    let board = rect_of(&rt, "train-board");
+    assert!(board[1] + board[3] <= 720.0 + 0.5, "the board ends inside the window: {board:?}");
+}
+
+#[test]
+fn run_summary_follows_the_run_state() {
+    let mut app = fixture();
+    app.train.run = None;
+    app.train.checkpoints.clear();
+    assert!(matches!(run_summary(&app.train), RunSummary::Ready { hours } if (hours - 6.0).abs() < 1e-3));
+    app.train.project.settings.steps = 3000;
+    assert!(matches!(run_summary(&app.train), RunSummary::Ready { hours } if (hours - 3.0).abs() < 1e-3));
+    app.train.project.clips.clear();
+    assert_eq!(run_summary(&app.train), RunSummary::NotReady);
+    let mut app = fixture();
+    app.train.run.as_mut().unwrap().state = crate::train::run::RunState::Running;
+    app.train.losses = vec![(3700, 1.2)];
+    assert_eq!(run_summary(&app.train), RunSummary::Running { step: 3700, total: 6000 });
+    let app = fixture();
+    assert_eq!(run_summary(&app.train), RunSummary::Done { checkpoints: 2 });
+    let mut app = fixture();
+    app.train.run.as_mut().unwrap().state = crate::train::run::RunState::Error;
+    assert_eq!(run_summary(&app.train), RunSummary::Failed);
+}
+
+#[test]
+fn twelve_sources_show_plus_more() {
+    let rt = fixture_at(1100.0, 720.0, |a| {
+        a.train.open_tile = None;
+        let first = a.train.project.sources[0].clone();
+        for i in 0..10 {
+            a.train.project.sources.push(jeuvoice_core::train::Source { name: format!("extra {i}"), ..first.clone() });
+        }
+    });
+    let texts: Vec<String> = rt.elements().into_iter().filter_map(|e| e.text).collect();
+    assert!(texts.iter().any(|t| t.starts_with('+') && t.contains("more")), "{texts:?}");
+    let data = rect_of(&rt, "train-tile-data");
+    let board = rect_of(&rt, "train-board");
+    assert!(data[1] + data[3] <= board[1] + board[3] + 0.5, "the Data tile stays inside the board");
+}
+
+#[test]
+fn a_small_window_has_no_overlapping_tiles() {
+    let rt = fixture_at(900.0, 600.0, |a| a.train.open_tile = None);
+    let tiles: Vec<[f32; 4]> =
+        ["train-tile-data", "train-tile-setup", "train-tile-run"].iter().map(|k| rect_of(&rt, k)).collect();
+    for i in 0..3 {
+        for j in i + 1..3 {
+            assert!(!overlap(tiles[i], tiles[j]), "tiles {i} and {j} overlap: {tiles:?}");
+        }
+    }
+}
+
+#[test]
+fn a_long_source_name_stays_in_its_tile() {
+    let long = "a".repeat(40) + &"b".repeat(40);
+    let name = long.clone();
+    let rt = fixture_at(1100.0, 720.0, move |a| {
+        a.train.open_tile = None;
+        a.train.project.sources[0].name = name;
+    });
+    let data = rect_of(&rt, "train-tile-data");
+    let el = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.text.as_deref().is_some_and(|t| t.contains(&long[..20])) && !e.exiting)
+        .expect("the long name shows");
+    assert!(el.target[0] + el.target[2] <= data[0] + data[2] + 0.5, "{:?} inside {data:?}", el.target);
+}
+
+#[test]
+fn the_recipe_page_keeps_the_blur_budget() {
+    let rt = fixture_at(1100.0, 720.0, |a| {
+        a.train.open_tile = Some(TrainTile::Data);
+        a.train.show_recipe = true;
+    });
+    assert!(glass_count(&rt) <= 4, "{} blurred panels", glass_count(&rt));
+}

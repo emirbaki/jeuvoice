@@ -35,6 +35,14 @@ pub(crate) fn fmt_minutes(min: f32) -> String {
 }
 
 /// What a source row shows while its clips travel the pipeline.
+/// A tile of the Train board. `Setup` holds the model and the training place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrainTile {
+    Data,
+    Setup,
+    Run,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum SourceStatus {
     Working(String),
@@ -118,6 +126,8 @@ pub struct TrainData {
     pub show_kaggle_form: bool,
     /// The tr2 recipe page is open.
     pub show_recipe: bool,
+    /// The open tile. `None` shows the board. Not saved: the board shows on each start.
+    pub open_tile: Option<TrainTile>,
     pub kaggle_user_field: TextEdit,
     pub kaggle_key_field: TextEdit,
     /// The keychain user name, if the user saved a key.
@@ -207,6 +217,7 @@ impl TrainData {
             edit_field: TextEdit::new(""),
             show_kaggle_form: false,
             show_recipe: false,
+            open_tile: None,
             kaggle_user_field: TextEdit::new(""),
             kaggle_key_field: TextEdit::new(""),
             kaggle_user: None,
@@ -355,8 +366,20 @@ impl TrainData {
 
     // -- actions --
 
+    /// Open `tile`. The other tiles move into the side column.
+    pub fn open(&mut self, tile: TrainTile) {
+        self.open_tile = Some(tile);
+    }
+
+    /// Go back to the board.
+    pub fn close_tile(&mut self) {
+        self.open_tile = None;
+    }
+
     /// Drop files or folders. Each drop is one source; folders keep their name.
     pub fn add_files(&mut self, paths: &[PathBuf]) {
+        // A drop on the board shows the clips it adds.
+        self.open_tile = Some(TrainTile::Data);
         let mut files: Vec<PathBuf> = Vec::new();
         for p in paths {
             if p.is_dir() {
@@ -520,6 +543,9 @@ impl TrainData {
     /// Fill the data step from the tr2 recipe: its settings, its HF sources
     /// (downloads start at once), its local sources (the user points at a folder).
     pub fn train_like_tr2(&mut self) {
+        // The recipe page closes and the Data tile shows the new sources.
+        self.show_recipe = false;
+        self.open_tile = Some(TrainTile::Data);
         let recipe = crate::train::recipe_page::tr2_recipe();
         self.project.settings = recipe.settings.clone();
         self.sync_settings_fields();

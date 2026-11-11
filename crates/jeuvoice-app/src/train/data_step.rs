@@ -1,7 +1,7 @@
 //! The Train tab data step: drop zone, Hugging Face form, source rows and review.
 
 use jeuvoice_core::train::Source;
-use rune::tok::{self, radius, space, type_};
+use rune::tok::{space, type_};
 use rune::{El, col, el, row, text, text_input};
 
 use crate::state::App;
@@ -10,25 +10,24 @@ use crate::transcribe_tab::{MEDIA, button, section};
 
 /// Labeled single-line field bound to a `TextEdit` of the Train tab.
 fn field(s_key: &str, label_text: &str, value: &rune::TextEdit, on_edit: impl Fn(&mut App) -> &mut rune::TextEdit + 'static) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     col().gap(space::S1).child(text(label_text).font(type_::LABEL).color(t.text_secondary)).child(
         text_input(value, type_::BODY)
             .key(s_key)
             .single_line()
             .w_full()
             .padding(space::S2)
-            .radius(radius::SM)
+            .radius(10.0)
             .fill(t.card)
             .on_edit(on_edit),
     )
 }
 
 pub fn view(s: &TrainData) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let mut page = col()
         .w_full()
         .gap(space::S2)
-        .child(text("Training data").font(type_::TITLE).color(t.text))
         .child(text(s.chips().as_str()).key("train-chips").font(type_::BODY).color(t.text_secondary).wrap())
         .child(drop_zone());
     if s.show_hf { page = page.child(hf_form(s)); } else {
@@ -45,12 +44,12 @@ pub fn view(s: &TrainData) -> El {
 }
 
 fn drop_zone() -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     col()
         .key("train-drop")
         .w_full()
         .padding(space::S3)
-        .radius(radius::SM)
+        .radius(10.0)
         .fill(t.card)
         .child(text("Drop clips or a folder here").font(type_::TITLE).color(t.text))
         .child(text("WAV, MP3 or video — many at once").font(type_::LABEL).color(t.text_secondary))
@@ -63,8 +62,8 @@ fn hf_form(s: &TrainData) -> El {
         .w_full()
         .gap(space::S2)
         .padding(space::S2)
-        .radius(radius::SM)
-        .fill(tok::theme(true).card)
+        .radius(10.0)
+        .fill(crate::style::theme().card)
         .child(section("Hugging Face dataset"))
         .child(field("train-hf-repo", "Dataset (link or user/name)", &s.repo_field, |s| &mut s.train.repo_field))
         .child(field("train-hf-split", "Split", &s.split_field, |s| &mut s.train.split_field))
@@ -94,7 +93,7 @@ fn sources_list(s: &TrainData) -> El {
 }
 
 fn source_row(s: &TrainData, i: usize, source: &Source) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let clips = s.clips_of(&source.name);
     let kept: Vec<_> = clips.iter().filter(|c| c.clip.excluded.is_none()).collect();
     let min: f32 = kept.iter().map(|c| c.clip.duration_s).sum::<f32>() / 60.0;
@@ -115,7 +114,7 @@ fn source_row(s: &TrainData, i: usize, source: &Source) -> El {
         .w_full()
         .gap(space::S2)
         .padding(space::S2)
-        .radius(radius::SM)
+        .radius(10.0)
         .fill(t.card)
         .child(
             col()
@@ -159,11 +158,11 @@ fn source_row(s: &TrainData, i: usize, source: &Source) -> El {
 }
 
 fn review_panel(s: &TrainData, name: &str) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let mut list = col().w_full().gap(space::S1);
     for c in s.clips_of(name) {
         let id = c.clip.id.clone();
-        let mut card = col().w_full().gap(space::S1).padding(space::S2).radius(radius::SM).fill(t.card);
+        let mut card = col().w_full().gap(space::S1).padding(space::S2).radius(10.0).fill(t.card);
         let mut head = row().w_full().gap(space::S2);
         head = head.child(button(&format!("train-play-{id}"), "▶", c.clip.excluded.is_none(), {
             let id = id.clone();
@@ -194,8 +193,8 @@ fn review_panel(s: &TrainData, name: &str) -> El {
                     .single_line()
                     .w_full()
                     .padding(space::S2)
-                    .radius(radius::SM)
-                    .fill(tok::theme(true).control_track)
+                    .radius(10.0)
+                    .fill(crate::style::theme().control_track)
                     .on_edit(|s: &mut App| &mut s.train.edit_field),
             );
             card = card.child(button("train-edit-done", "Done", true, |s, _| s.train.editing = None));
@@ -227,7 +226,7 @@ fn review_panel(s: &TrainData, name: &str) -> El {
         .w_full()
         .gap(space::S2)
         .padding(space::S2)
-        .radius(radius::SM)
+        .radius(10.0)
         .fill(t.card)
         .child(
             row()

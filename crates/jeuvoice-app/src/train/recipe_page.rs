@@ -5,7 +5,7 @@
 //! the JSON on the clipboard; `Train like tr2` fills the data step from it.
 
 use jeuvoice_core::train::Recipe;
-use rune::tok::{self, radius, space, type_};
+use rune::tok::{space, type_};
 use rune::{El, col, row, text};
 
 use crate::transcribe_tab::{button, section};
@@ -24,7 +24,7 @@ pub fn copy_recipe() -> Result<(), String> {
 }
 
 pub fn view(recipe: &Recipe) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let mut page = col().w_full().gap(space::S2);
     page = page.child(
         row()
@@ -59,7 +59,7 @@ pub fn view(recipe: &Recipe) -> El {
     );
     let mut list = col().w_full().gap(space::S1);
     for (i, src) in recipe.sources.iter().enumerate() {
-        let mut card = col().w_full().gap(space::S1).padding(space::S2).radius(radius::SM).fill(t.card);
+        let mut card = col().w_full().gap(space::S1).padding(space::S2).radius(10.0).fill(t.card);
         card = card.child(
             text(format!("{} · ×{}", src.name, src.weight).as_str())
                 .key(format!("train-recipe-source-{i}"))
@@ -95,7 +95,7 @@ pub fn view(recipe: &Recipe) -> El {
         .w_full()
         .gap(space::S2)
         .padding(space::S2)
-        .radius(radius::SM)
+        .radius(10.0)
         .fill(t.card)
         .child(page)
 }

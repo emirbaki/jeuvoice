@@ -94,6 +94,24 @@ pub fn white_fill(css_alpha: f32) -> Color {
     white(css_alpha)
 }
 
+/// The rune theme with the Frost colors, for code that reads theme fields
+/// (`t.card`, `t.text`). Pages call this, never `tok::theme(true)`.
+pub fn theme() -> rune::tok::Theme {
+    let p = palette();
+    let mut t = rune::tok::theme(true);
+    t.bg = p.bg_bottom;
+    t.card = white(0.05);
+    t.card_border = p.glass_border;
+    t.text = p.text;
+    t.text_secondary = p.text_secondary;
+    t.separator = white(0.07);
+    t.control_track = white(0.08);
+    t.control_off = white(0.12);
+    t.hover = white(0.03);
+    t.press = white(0.06);
+    t
+}
+
 /// The page background: a dark vertical gradient with a soft light spot at the top left.
 pub fn background(child: El) -> El {
     let p = palette();

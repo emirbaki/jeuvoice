@@ -3,7 +3,7 @@
 //! This PC needs a 12 GB CUDA card (read from the engine `/health`). Kaggle is
 //! free T4 x2, about an hour per 1,000 steps. RunPod says "Coming later".
 
-use rune::tok::{self, radius, space, type_};
+use rune::tok::{self, space, type_};
 use rune::{El, col, row, text, text_input};
 
 use crate::services::engine::EngineState;
@@ -90,7 +90,7 @@ fn pc_card(s: &TrainData, engine: &EngineState) -> El {
 }
 
 fn kaggle_card(s: &TrainData) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let on = s.project.target == TrainTarget::Kaggle;
     let est = kaggle_estimate(s.project.settings.steps);
     let sub = format!("T4 ×2 · free · {est}");
@@ -121,8 +121,8 @@ fn kaggle_card(s: &TrainData) -> El {
 }
 
 fn kaggle_form(s: &TrainData) -> El {
-    let t = tok::theme(true);
-    let mut form = col().w_full().gap(space::S2).padding(space::S2).radius(radius::SM).fill(t.control_track);
+    let t = crate::style::theme();
+    let mut form = col().w_full().gap(space::S2).padding(space::S2).radius(10.0).fill(t.control_track);
     form = form.child(
         text("Find the key under your Kaggle account avatar → Settings → API → Create New Token.")
             .font(type_::LABEL)
@@ -135,7 +135,7 @@ fn kaggle_form(s: &TrainData) -> El {
             .single_line()
             .w_full()
             .padding(space::S2)
-            .radius(radius::SM)
+            .radius(10.0)
             .fill(t.card)
             .placeholder("Kaggle user name", t.text_secondary)
             .on_edit(|s: &mut App| &mut s.train.kaggle_user_field),
@@ -146,7 +146,7 @@ fn kaggle_form(s: &TrainData) -> El {
             .single_line()
             .w_full()
             .padding(space::S2)
-            .radius(radius::SM)
+            .radius(10.0)
             .fill(t.card)
             .placeholder("Kaggle key", t.text_secondary)
             .on_edit(|s: &mut App| &mut s.train.kaggle_key_field),
@@ -164,8 +164,8 @@ fn kaggle_form(s: &TrainData) -> El {
 fn runpod_card() -> El {
     card_wrap(
         col().w_full().gap(space::S1)
-            .child(text("RunPod").font(type_::BODY).color(tok::theme(true).text))
-            .child(text("Coming later").font(type_::LABEL).color(tok::theme(true).text_secondary)),
+            .child(text("RunPod").font(type_::BODY).color(crate::style::theme().text))
+            .child(text("Coming later").font(type_::LABEL).color(crate::style::theme().text_secondary)),
         "train-runpod",
         false,
         false,
@@ -183,13 +183,13 @@ fn card(
     enabled: bool,
     target: TrainTarget,
 ) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     row()
         .key(key)
         .w_full()
         .gap(space::S2)
         .padding(space::S2)
-        .radius(radius::SM)
+        .radius(10.0)
         .fill(if on { tok::accent(0, true) } else { t.card })
         .opacity(if enabled { 1.0 } else { 0.75 })
         .child(
@@ -207,13 +207,13 @@ fn card(
 
 /// The card box for cards with their own buttons (Kaggle, RunPod).
 fn card_wrap(inner: El, key: &str, on: bool, enabled: bool) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     col()
         .key(key)
         .w_full()
         .gap(space::S2)
         .padding(space::S2)
-        .radius(radius::SM)
+        .radius(10.0)
         .fill(if on { tok::accent(0, true) } else { t.card })
         .opacity(if enabled { 1.0 } else { 0.75 })
         .child(inner)

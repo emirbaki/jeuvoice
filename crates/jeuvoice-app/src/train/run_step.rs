@@ -5,14 +5,14 @@
 //! worker from [`run`](crate::train::run) takes over. Checkpoints list with a
 //! Test button each (Task 8 wires it).
 
-use rune::tok::{self, radius, space, type_};
+use rune::tok::{self, space, type_};
 use rune::{El, ScrollSpec, Shape, canvas, col, row, text, text_input};
 
 use crate::state::App;
 use crate::train::run::{elapsed_text, slug};
 use crate::train::state::{TrainData, TrainTarget};
 use crate::train::target_step::kaggle_estimate;
-use crate::transcribe_tab::{button, section};
+use crate::transcribe_tab::{button};
 
 const CURVE_H: f32 = 120.0;
 
@@ -20,7 +20,6 @@ pub fn view(s: &TrainData) -> El {
     col()
         .w_full()
         .gap(space::S2)
-        .child(section("Run"))
         .child(settings_card(s))
         .child(script_card(s))
         .child(start_card(s))
@@ -29,8 +28,8 @@ pub fn view(s: &TrainData) -> El {
 }
 
 fn settings_card(s: &TrainData) -> El {
-    let t = tok::theme(true);
-    let mut card = col().w_full().gap(space::S1).padding(space::S2).radius(radius::SM).fill(t.card);
+    let t = crate::style::theme();
+    let mut card = col().w_full().gap(space::S1).padding(space::S2).radius(10.0).fill(t.card);
     let settings = &s.project.settings;
     let rows = [
         ("Steps", &s.steps_field, "train-set-steps"),
@@ -41,15 +40,16 @@ fn settings_card(s: &TrainData) -> El {
     ];
     for (label, field, key) in rows {
         card = card.child(
-            row().w_full().gap(space::S2)
-                .child(text(label).font(type_::LABEL).color(t.text_secondary).grow(1.0).min_w(0.0))
+            row().w_full().gap(space::S2).center_y()
+                .child(text(label).font(type_::LABEL).color(t.text_secondary).w(130.0))
                 .child(
                     text_input(field, type_::BODY)
                         .key(key)
                         .single_line()
-                        .w_full()
+                        .grow(1.0)
+                        .min_w(0.0)
                         .padding(space::S2)
-                        .radius(radius::SM)
+                        .radius(10.0)
                         .fill(t.control_track)
                         .on_edit(field_editor(key)),
                 ),
@@ -71,12 +71,12 @@ fn field_editor(key: &str) -> impl Fn(&mut App) -> &mut rune::TextEdit + 'static
 }
 
 fn script_card(s: &TrainData) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let mut card = col()
         .w_full()
         .gap(space::S1)
         .padding(space::S2)
-        .radius(radius::SM)
+        .radius(10.0)
         .fill(t.card)
         .child(button("train-run-script", if s.show_script { "Hide script" } else { "View full script" }, true, |s, _| {
             s.train.show_script = !s.train.show_script;
@@ -103,12 +103,12 @@ fn preview_notebook(s: &TrainData) -> String {
 }
 
 fn start_card(s: &TrainData) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let can_start = s.project.target == TrainTarget::Kaggle && !s.run_active() && !s.included_clips().is_empty();
-    let mut card = col().w_full().gap(space::S1).padding(space::S2).radius(radius::SM).fill(t.card);
+    let mut card = col().w_full().gap(space::S1).padding(space::S2).radius(10.0).fill(t.card);
     card = card.child(
         row().w_full().gap(space::S2)
-            .child(button("train-run-start", "Start on Kaggle", can_start, |s, _| s.train.confirm_start = true))
+            .child(crate::style::button_kind("train-run-start", "Start on Kaggle", crate::style::ButtonKind::Main, can_start, |s, _| s.train.confirm_start = true))
             .child(button("train-bundle-save", "Download bundle only", !s.included_clips().is_empty(), |s, tx| {
                 s.train.export_bundle(tx)
             })),
@@ -133,8 +133,8 @@ fn start_card(s: &TrainData) -> El {
 }
 
 fn status_card(s: &TrainData) -> El {
-    let t = tok::theme(true);
-    let mut card = col().w_full().gap(space::S1).padding(space::S2).radius(radius::SM).fill(t.card);
+    let t = crate::style::theme();
+    let mut card = col().w_full().gap(space::S1).padding(space::S2).radius(10.0).fill(t.card);
     let Some(run) = &s.run else {
         return card.child(text("No run yet.").font(type_::BODY).color(t.text_secondary));
     };
@@ -198,7 +198,7 @@ fn estimate(s: &TrainData, now: u64) -> String {
 }
 
 fn loss_curve(losses: &[(u32, f32)]) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let width = rune::memo::layout_size("train-loss-curve").map_or(600.0, |v| v[0]).max(1.0);
     let (s_min, s_max) = (losses[0].0 as f32, losses[losses.len() - 1].0 as f32);
     let mut l_min = f32::INFINITY;
@@ -226,8 +226,8 @@ fn loss_curve(losses: &[(u32, f32)]) -> El {
 }
 
 fn checkpoints_card(s: &TrainData) -> El {
-    let t = tok::theme(true);
-    let mut card = col().w_full().gap(space::S1).padding(space::S2).radius(radius::SM).fill(t.card);
+    let t = crate::style::theme();
+    let mut card = col().w_full().gap(space::S1).padding(space::S2).radius(10.0).fill(t.card);
     if s.checkpoints.is_empty() {
         return card.child(text("No checkpoints yet.").font(type_::BODY).color(t.text_secondary));
     }

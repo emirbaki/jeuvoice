@@ -7,7 +7,7 @@ use std::path::Path;
 
 use jeuvoice_core::preset::{AdapterRef, Preset};
 use jeuvoice_core::train::StartFrom;
-use rune::tok::{self, radius, space, type_};
+use rune::tok::{self, space, type_};
 use rune::{El, col, row, text};
 
 use crate::state::App;
@@ -90,13 +90,13 @@ pub fn view(s: &TrainData, choices: &[AdapterChoice]) -> El {
 }
 
 fn choice_row(key: &str, label: &str, sub: &str, start: &StartFrom, current: &StartFrom) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let on = current == start;
     row()
         .w_full()
         .gap(space::S2)
         .padding(space::S2)
-        .radius(radius::SM)
+        .radius(10.0)
         .fill(if on { tok::accent(0, true) } else { t.card })
         .child(
             col()
