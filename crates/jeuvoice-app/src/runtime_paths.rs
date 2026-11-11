@@ -63,7 +63,7 @@ pub fn detect_from(exe: &Path, data_dir: &Path) -> RuntimePaths {
             mode: RuntimeMode::Dev,
         }
     } else {
-        let resources = exe.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        let resources = installed_resources(exe);
         let engine_env = data_dir.join("engine-env");
         RuntimePaths {
             python: env_python_for(&engine_env, cfg!(windows)),
@@ -77,6 +77,19 @@ pub fn detect_from(exe: &Path, data_dir: &Path) -> RuntimePaths {
             mode: RuntimeMode::Installed,
         }
     }
+}
+
+/// The resources folder of an installed app. A macOS `.app` keeps the exe in
+/// `Contents/MacOS` and the resources in `Contents/Resources`. Everywhere else
+/// the resources are next to the exe.
+fn installed_resources(exe: &Path) -> PathBuf {
+    let dir = exe.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    if dir.file_name().is_some_and(|n| n == "MacOS") {
+        if let Some(res) = dir.parent().map(|c| c.join("Resources")).filter(|r| r.is_dir()) {
+            return res;
+        }
+    }
+    dir
 }
 
 /// The env python for an explicit platform (tests cover both).
@@ -188,6 +201,33 @@ mod tests {
         assert_eq!(p.engine_env, data.join("engine-env"));
         assert_eq!(p.lock_file, exe.parent().unwrap().join(lock_file_name_for(true)));
         assert!(p.engine_config().is_none(), "no env yet: the engine waits for setup");
+    }
+
+    #[test]
+    fn macos_app_bundle_uses_contents_resources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let contents = tmp.path().join("Çağrı Öz").join("JeuVoice.app").join("Contents");
+        let exe = contents.join("MacOS").join("jeuvoice-app");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(contents.join("Resources")).unwrap();
+        std::fs::write(&exe, b"x").unwrap();
+        let p = detect_from(&exe, &tmp.path().join("data"));
+        let res = contents.join("Resources");
+        assert_eq!(p.mode, RuntimeMode::Installed);
+        assert_eq!(p.resources, res);
+        assert_eq!(p.engine_src, res.join("engine"));
+        assert_eq!(p.assets, res.join("assets"));
+        assert_eq!(p.uv, uv_for(&res, cfg!(windows)));
+    }
+
+    #[test]
+    fn a_macos_folder_without_resources_stays_next_to_the_exe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("MacOS").join("jeuvoice-app");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"x").unwrap();
+        let p = detect_from(&exe, &tmp.path().join("data"));
+        assert_eq!(p.resources, exe.parent().unwrap());
     }
 
     #[test]
