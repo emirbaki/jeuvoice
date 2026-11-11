@@ -21,3 +21,10 @@ serde_json = "1"
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# Read by cargo-packager (Plan 4 Task 5 builds the NSIS installer from this).
+# collect.ps1 makes dist\windows\JeuVoice; the installer packs that folder.
+[package.metadata.packager]
+productName = "JeuVoice"
+identifier = "com.jeu.jeuvoice"
+description = "Speech, transcription and voice training in one window."

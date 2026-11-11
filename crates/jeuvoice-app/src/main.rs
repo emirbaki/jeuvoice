@@ -18,7 +18,6 @@ mod voice;
 mod view;
 mod waveform;
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use jeuvoice_core::transcript::Transcript;
@@ -80,11 +79,13 @@ fn ensure_model() -> EnsureModel {
 }
 
 fn init() -> App {
+    // The layout also points at the bundled assets, in dev and installed mode.
+    let paths = runtime_paths::detect();
     // Built-in voice presets on first start only; never overwrites user edits.
-    if let (Some(presets), Some(assets)) = (jeuvoice_core::preset::default_presets_dir(), dev_assets_dir())
-        && assets.join("presets").is_dir()
+    if let Some(presets) = jeuvoice_core::preset::default_presets_dir()
+        && paths.assets.join("presets").is_dir()
     {
-        let _ = jeuvoice_core::preset::install_default_presets(&assets, &presets);
+        let _ = jeuvoice_core::preset::install_default_presets(&paths.assets, &presets);
     }
     let whisper = Arc::new(LazyWhisper::default());
     App::new(Deps {
@@ -96,16 +97,8 @@ fn init() -> App {
         settings: Settings::load(),
         settings_path: Settings::default_path(),
         token_store: Arc::new(settings::KeyringStore),
-        setup_paths: Some(runtime_paths::detect()),
+        setup_paths: Some(paths),
     })
-}
-
-/// `assets/` next to the workspace root (development). Installed mode comes with
-/// runtime paths in Plan 4.
-fn dev_assets_dir() -> Option<PathBuf> {
-    let root = std::env::current_exe().ok()?.parent()?.parent()?.parent()?.to_path_buf();
-    let assets = root.join("assets");
-    assets.is_dir().then_some(assets)
 }
 
 fn main() {

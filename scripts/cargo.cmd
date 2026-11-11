@@ -33,7 +33,8 @@ for %%p in ("%INCLUDE:;=";"%") do (
 set "BINDGEN_EXTRA_CLANG_ARGS=!ARGS!"
 
 set "CMAKE_GENERATOR=Visual Studio 17 2022"
-if not defined CMAKE_CUDA_ARCHITECTURES set "CMAKE_CUDA_ARCHITECTURES=86"
+rem Turing (75), Ampere (86) and Ada (89) cards: the release bundle runs on all three.
+if not defined CMAKE_CUDA_ARCHITECTURES set "CMAKE_CUDA_ARCHITECTURES=75;86;89"
 
 cd /d "%~dp0.."
 cargo %*
