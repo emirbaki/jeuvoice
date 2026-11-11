@@ -287,7 +287,8 @@ fn export_wav_matches_the_timeline() {
     assert_eq!(rig.rt.file_dialog().map(|(k, _)| k), Some(FileDialogKind::Save));
     let to = rig.dir().join("out.wav");
     rig.rt.resolve_file_dialog(Some(to.clone())).unwrap();
-    rig.until("the export is saved", |s| s.voice.notice.as_deref().is_some_and(|n| n.starts_with("Saved")));
+    // The project save also says "Saved Untitled.": wait for the WAV notice only.
+    rig.until("the export is saved", |s| s.voice.notice.as_deref() == Some("Saved out.wav."));
     let mut reader = hound::WavReader::open(&to).unwrap();
     assert_eq!(reader.spec().sample_rate, 24_000);
     assert_eq!(reader.samples::<i16>().count(), samples);

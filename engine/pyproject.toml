@@ -29,4 +29,6 @@ test = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The lock-file venv has no editable install: import the package from here.
+pythonpath = ["."]
 markers = ["gpu: needs the model and --gpu on this machine"]
