@@ -64,6 +64,8 @@ pub struct EngineService {
     #[allow(dead_code)]
     paths: crate::runtime_paths::RuntimePaths,
     waker: Waker,
+    /// No supported graphics card: the engine refuses to start (CPU mode).
+    gpu_missing: bool,
     /// A test double that answers instead of the process (tests only).
     #[cfg(test)]
     test_api: Option<Arc<dyn EngineApi>>,
@@ -85,6 +87,7 @@ impl EngineService {
             config,
             paths,
             waker,
+            gpu_missing: false,
             #[cfg(test)]
             test_api: None,
         }
@@ -100,6 +103,22 @@ impl EngineService {
     /// Point at a newly installed engine; setup just made the env python.
     pub(crate) fn set_config(&mut self, config: Option<EngineConfig>) {
         self.config = config;
+    }
+
+    /// The GPU probe found no supported card. The engine then refuses to start.
+    pub fn set_gpu_missing(&mut self, missing: bool) {
+        self.gpu_missing = missing;
+    }
+
+    /// In CPU mode, fail with the plain text instead of starting. True when refused.
+    fn refuse_without_gpu(&mut self) -> bool {
+        if !self.gpu_missing {
+            return false;
+        }
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) =
+            EngineState::Failed(crate::services::gpu::NO_GPU_ENGINE.into());
+        (self.waker)();
+        true
     }
 
     pub fn state(&self) -> EngineState {
@@ -139,6 +158,9 @@ impl EngineService {
         if !matches!(*self.state.lock().unwrap_or_else(|e| e.into_inner()), EngineState::Off | EngineState::Failed(_)) {
             return;
         }
+        if self.refuse_without_gpu() {
+            return;
+        }
         *self.state.lock().unwrap_or_else(|e| e.into_inner()) = EngineState::Starting;
         let (state, process, waker, config) =
             (self.state.clone(), self.process.clone(), self.waker.clone(), self.config.clone());
@@ -149,6 +171,9 @@ impl EngineService {
     /// state goes to Starting at once. The Voice tab (Plan 2) uses this.
     #[allow(dead_code)]
     pub fn restart(&mut self) {
+        if self.refuse_without_gpu() {
+            return;
+        }
         let proc = self.process.lock().unwrap_or_else(|e| e.into_inner()).take();
         *self.state.lock().unwrap_or_else(|e| e.into_inner()) = EngineState::Starting;
         let (state, process, waker, config) =
@@ -211,6 +236,16 @@ mod tests {
             model_loaded: false,
             version: version.into(),
         }
+    }
+
+    #[test]
+    fn without_a_gpu_the_engine_refuses_to_start() {
+        let mut svc = EngineService::from_paths(crate::runtime_paths::detect(), None, std::sync::Arc::new(|| {}));
+        svc.set_gpu_missing(true);
+        svc.ensure_started();
+        assert_eq!(svc.state(), EngineState::Failed(crate::services::gpu::NO_GPU_ENGINE.into()));
+        svc.restart();
+        assert_eq!(svc.state(), EngineState::Failed(crate::services::gpu::NO_GPU_ENGINE.into()));
     }
 
     #[test]

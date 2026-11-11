@@ -4,6 +4,7 @@
 //! each owning a worker, a player and an engine client.
 
 pub mod engine;
+pub mod gpu;
 pub mod models;
 pub mod player;
 pub mod speech;

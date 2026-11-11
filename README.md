@@ -190,6 +190,7 @@ The user guide for teammates is in [docs/user-guide.md](docs/user-guide.md).
 - The app finds its files in dev mode, in the Windows install folder, and in a macOS `.app`.
 - First-start setup makes the engine environment with a progress screen. An interrupted setup cleans up and starts again. A changed lock file runs setup again. An unchanged lock file keeps the environment.
 - An engine from another JeuVoice version does not start. Settings shows **Repair**, which runs setup again.
+- With no NVIDIA card, Settings shows "No supported graphics card found. Speech will be slow." Transcribe runs on the CPU. The voice engine does not start and says why.
 - Windows installer: `scripts\make-installer.cmd` makes `dist\windows\jeuvoice-app_<version>_x64-setup.exe`. It installs per user with no admin rights. The uninstaller asks before it deletes the engine and the models. It never deletes `Documents\JeuVoice`.
 - macOS: `scripts/make-dmg.sh` makes the `.app` and the `.dmg` on an Apple Silicon Mac.
 - Tests: `scripts\cargo.cmd test --workspace` passes. The engine tests pass (`pytest`: 28 passed, 1 skipped. `-m gpu --gpu`: 1 passed).
@@ -204,6 +205,5 @@ The user guide for teammates is in [docs/user-guide.md](docs/user-guide.md).
 
 ### Known gaps
 
-- Setup does not show "No supported graphics card found. Speech will be slow." when there is no NVIDIA card. The engine then runs on the CPU with no message.
 - The free-space check does not work on macOS. It never blocks setup there.
 - The macOS build is not tested.

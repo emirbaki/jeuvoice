@@ -1,0 +1,98 @@
+//! Which graphics card the app can use.
+//!
+//! On Windows, `nvidia-smi` names the NVIDIA card. No `nvidia-smi` or no card
+//! means CPU mode: Transcribe still works but is slow, and the voice engine
+//! does not start. A Mac build is for Apple Silicon only, so it always has a GPU.
+
+use crate::setup::state::CommandRunner;
+
+/// What the probe found.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GpuProbe {
+    /// The probe did not run yet (or tests turned it off).
+    Unknown,
+    Nvidia { name: String, vram_gb: f64 },
+    AppleSilicon,
+    /// No supported card: CPU mode.
+    Missing,
+}
+
+/// Settings shows this in CPU mode.
+pub const NO_GPU_SETTINGS: &str = "No supported graphics card found. Speech will be slow.";
+
+/// The voice engine state in CPU mode.
+pub const NO_GPU_ENGINE: &str = "No supported graphics card found. The voice engine needs an NVIDIA graphics card.";
+
+/// Ask `nvidia-smi` for the card (Windows) or report Apple Silicon (macOS).
+pub fn probe(runner: &dyn CommandRunner) -> GpuProbe {
+    if cfg!(target_os = "macos") {
+        let _ = runner;
+        return GpuProbe::AppleSilicon;
+    }
+    let args = vec!["--query-gpu=name,memory.total,driver_version".to_string(), "--format=csv".to_string()];
+    match runner.run("nvidia-smi", &args, &[]) {
+        Ok(out) if out.status => match parse_nvidia_smi(&String::from_utf8_lossy(&out.stdout)) {
+            Some((name, vram_gb)) => GpuProbe::Nvidia { name, vram_gb },
+            None => GpuProbe::Missing,
+        },
+        _ => GpuProbe::Missing,
+    }
+}
+
+/// The first card in `nvidia-smi --format=csv` output, or `None`.
+pub fn parse_nvidia_smi(stdout: &str) -> Option<(String, f64)> {
+    // Skip the header line. A data line is `name, 4096 MiB, driver`.
+    let line = stdout.lines().skip(1).find(|l| !l.trim().is_empty())?;
+    let mut parts = line.split(',').map(str::trim);
+    let name = parts.next().filter(|n| !n.is_empty())?.to_string();
+    let mib: f64 = parts.next()?.split_whitespace().next()?.parse().ok()?;
+    Some((name, mib / 1024.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::setup::state::RunResult;
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    struct Answer(Result<RunResult, String>);
+
+    impl CommandRunner for Answer {
+        fn run(&self, _cmd: &str, _args: &[String], _envs: &[(String, String)]) -> Result<RunResult, String> {
+            self.0.clone()
+        }
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn out(text: &str, ok: bool) -> Answer {
+        Answer(Ok(RunResult { status: ok, stdout: text.as_bytes().to_vec(), stderr: Vec::new() }))
+    }
+
+    const SMI: &str = "name, memory.total [MiB], driver_version\nNVIDIA GeForce RTX 3050 Ti Laptop GPU, 4096 MiB, 581.57\n";
+
+    #[test]
+    fn the_csv_gives_name_and_vram() {
+        let (name, gb) = parse_nvidia_smi(SMI).unwrap();
+        assert_eq!(name, "NVIDIA GeForce RTX 3050 Ti Laptop GPU");
+        assert!((gb - 4.0).abs() < 0.01, "{gb}");
+        assert_eq!(parse_nvidia_smi("name, memory.total [MiB], driver_version\n"), None);
+        assert_eq!(parse_nvidia_smi(""), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_probe_reads_nvidia_smi() {
+        assert_eq!(
+            probe(&out(SMI, true)),
+            GpuProbe::Nvidia { name: "NVIDIA GeForce RTX 3050 Ti Laptop GPU".into(), vram_gb: 4.0 }
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn no_nvidia_smi_or_no_card_is_missing() {
+        assert_eq!(probe(&Answer(Err("program not found".into()))), GpuProbe::Missing);
+        assert_eq!(probe(&out("NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.", false)), GpuProbe::Missing);
+        assert_eq!(probe(&out("name, memory.total [MiB], driver_version\n", true)), GpuProbe::Missing);
+    }
+}

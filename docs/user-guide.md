@@ -138,6 +138,8 @@ You can close JeuVoice during a run. The run continues on Kaggle. On the next st
 | Kaggle is still preparing the dataset. Wait a minute and start again. | Wait one minute, then click **Start on Kaggle** again. |
 | Kaggle could not be reached ... Check your connection and try again. | Check your internet connection. |
 | Your graphics card has ... GB. Training needs at least 12 GB. | Train on Kaggle. |
+| No supported graphics card found. Speech will be slow. | JeuVoice found no NVIDIA graphics card. Transcribe works, but it is slow. Update the NVIDIA driver if the PC has an NVIDIA card. |
+| No supported graphics card found. The voice engine needs an NVIDIA graphics card. | Use the Voice tab on a PC with an NVIDIA card. |
 
 If a run fails on Kaggle, the Train tab shows the last 30 log lines. Click **Download bundle only** to save the data and the notebook. Send them to the team.
 

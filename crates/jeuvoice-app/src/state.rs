@@ -76,6 +76,11 @@ pub struct App {
     kaggle_store: Arc<dyn jeuvoice_kaggle::KeyStore>,
     /// What the last token/adapter save did.
     pub files_status: Option<String>,
+    /// The graphics card the app can use. `Missing` means CPU mode.
+    pub gpu: crate::services::gpu::GpuProbe,
+    /// Probe the card in `setup` (off in tests, which have no setup paths).
+    probe_gpu: bool,
+    gpu_rx: Option<std::sync::mpsc::Receiver<crate::services::gpu::GpuProbe>>,
 }
 
 impl App {
@@ -101,6 +106,7 @@ impl App {
         );
         // A fresh install opens on the setup screen; dev and tests open on Transcribe.
         let setup = SetupDriver::new(deps.setup_paths.clone());
+        let probe_gpu = deps.setup_paths.is_some();
         let first_tab = if matches!(setup.state(), SetupState::Checking) { Tab::Voice } else { Tab::Transcribe };
         let mut app = Self {
             tab: first_tab,
@@ -119,6 +125,9 @@ impl App {
             profile_key_field: TextEdit::new(""),
             kaggle_store,
             files_status: None,
+            gpu: crate::services::gpu::GpuProbe::Unknown,
+            probe_gpu,
+            gpu_rx: None,
         };
         app.migrate_legacy_kaggle_key();
         app
@@ -263,12 +272,29 @@ impl App {
         s.transcribe.setup(waker.clone());
         s.train.setup(waker.clone());
         s.voice.setup(waker.clone());
+        if s.probe_gpu {
+            // nvidia-smi can take a second: never block the first frame.
+            let (tx, rx) = std::sync::mpsc::channel();
+            s.gpu_rx = Some(rx);
+            let wake = waker.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::services::gpu::probe(&crate::setup::state::OsRunner));
+                wake();
+            });
+        }
         s.setup.start(waker);
     }
 
     /// `AppSpec::poll`: takes in what the other threads finished.
     pub fn poll(s: &mut App, _clock: f64, tx: &mut Tx) -> bool {
         let mut changed = s.setup.poll();
+        if let Some(probe) = s.gpu_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            let missing = probe == crate::services::gpu::GpuProbe::Missing;
+            s.transcribe.engine_mut().set_gpu_missing(missing);
+            s.gpu = probe;
+            s.gpu_rx = None;
+            changed = true;
+        }
         if changed && s.setup.ready() {
             // Setup just made the env the engine service was built without.
             s.transcribe.refresh_engine_config();

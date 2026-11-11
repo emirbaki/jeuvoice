@@ -165,6 +165,18 @@ fn saving_the_adapter_folder_writes_it_to_settings() {
 }
 
 #[test]
+fn cpu_mode_shows_the_no_gpu_message() {
+    let mut rig = Rig::new(true);
+    assert!(!rig.on_screen("gpu-warning"), "no warning before the probe");
+    rig.rt.update(|s, _| s.gpu = crate::services::gpu::GpuProbe::Missing);
+    rig.rt.frame(1.0 / 60.0);
+    assert_eq!(rig.text("gpu-warning"), "No supported graphics card found. Speech will be slow.");
+    rig.rt.update(|s, _| s.gpu = crate::services::gpu::GpuProbe::Nvidia { name: "RTX".into(), vram_gb: 4.0 });
+    rig.rt.frame(1.0 / 60.0);
+    assert!(!rig.on_screen("gpu-warning"));
+}
+
+#[test]
 fn the_voice_engine_shows_off_with_a_restart_button() {
     let rig = Rig::new(true);
     assert_eq!(rig.text("engine-status"), "Voice engine: off");

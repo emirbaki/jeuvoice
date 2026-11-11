@@ -29,6 +29,7 @@ pub fn view(s: &App) -> El {
         )
         .child(section("Graphics card"))
         .child(gpu_switch(s.settings.use_gpu))
+        .child(gpu_warning(&s.gpu))
         .child(section("Speech model"))
         .child(model_block(&s.transcribe))
         .child(section("Hugging Face token"))
@@ -91,6 +92,14 @@ fn gpu_switch(on: bool) -> El {
         .gap(space::S2)
         .child(track.on_press(move |s: &mut App| s.set_use_gpu(!on)).child(knob))
         .child(text("Use GPU").font(type_::BODY).color(t.text))
+}
+
+/// The CPU mode warning, or an empty element when a card was found.
+fn gpu_warning(gpu: &crate::services::gpu::GpuProbe) -> El {
+    if *gpu != crate::services::gpu::GpuProbe::Missing {
+        return el();
+    }
+    text(crate::services::gpu::NO_GPU_SETTINGS).key("gpu-warning").font(type_::BODY).color(red()).wrap()
 }
 
 /// What the status line says about the model.
