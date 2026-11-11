@@ -16,7 +16,6 @@ pub enum GpuProbe {
     /// No supported card: CPU mode.
     Missing,
 }
-
 /// Settings shows this in CPU mode.
 pub fn no_gpu_settings() -> &'static str {
     crate::i18n::tr!(
@@ -34,29 +33,50 @@ pub fn no_gpu_engine() -> &'static str {
 }
 
 /// Ask `nvidia-smi` for the card (Windows) or report Apple Silicon (macOS).
+/// A GUI app may start with a PATH that misses the tool, so the well-known
+/// full paths are tried too.
 pub fn probe(runner: &dyn CommandRunner) -> GpuProbe {
     if cfg!(target_os = "macos") {
         let _ = runner;
         return GpuProbe::AppleSilicon;
     }
     let args = vec!["--query-gpu=name,memory.total,driver_version".to_string(), "--format=csv".to_string()];
-    match runner.run("nvidia-smi", &args, &[]) {
-        Ok(out) if out.status => match parse_nvidia_smi(&String::from_utf8_lossy(&out.stdout)) {
-            Some((name, vram_gb)) => GpuProbe::Nvidia { name, vram_gb },
-            None => GpuProbe::Missing,
-        },
-        _ => GpuProbe::Missing,
+    for cmd in nvidia_smi_commands() {
+        let Ok(out) = runner.run(cmd, &args, &[]) else { continue };
+        if !out.status {
+            continue;
+        }
+        if let Some((name, vram_gb)) = parse_nvidia_smi(&String::from_utf8_lossy(&out.stdout)) {
+            return GpuProbe::Nvidia { name, vram_gb };
+        }
     }
+    GpuProbe::Missing
 }
 
-/// The first card in `nvidia-smi --format=csv` output, or `None`.
+/// `nvidia-smi` as the PATH finds it, then the two usual driver folders.
+fn nvidia_smi_commands() -> Vec<&'static str> {
+    let mut commands = vec!["nvidia-smi"];
+    #[cfg(windows)]
+    {
+        commands.push(r"C:\Windows\System32\nvidia-smi.exe");
+        commands.push(r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe");
+    }
+    commands
+}
+
+/// The first card in `nvidia-smi --format=csv` output, or `None`. A driver
+/// sometimes prints a warning line before the header; parse every line and
+/// take the first real data line.
 pub fn parse_nvidia_smi(stdout: &str) -> Option<(String, f64)> {
-    // Skip the header line. A data line is `name, 4096 MiB, driver`.
-    let line = stdout.lines().skip(1).find(|l| !l.trim().is_empty())?;
-    let mut parts = line.split(',').map(str::trim);
-    let name = parts.next().filter(|n| !n.is_empty())?.to_string();
-    let mib: f64 = parts.next()?.split_whitespace().next()?.parse().ok()?;
-    Some((name, mib / 1024.0))
+    stdout.lines().find_map(|line| {
+        let mut parts = line.split(',').map(str::trim);
+        let name = parts.next()?;
+        if name.is_empty() || name.eq_ignore_ascii_case("name") {
+            return None;
+        }
+        let mib: f64 = parts.next()?.split_whitespace().next()?.parse().ok()?;
+        Some((name.to_string(), mib / 1024.0))
+    })
 }
 
 #[cfg(test)]
@@ -89,6 +109,12 @@ mod tests {
         assert_eq!(parse_nvidia_smi(""), None);
     }
 
+    #[test]
+    fn a_warning_before_the_table_does_not_hide_the_card() {
+        let text = "\nNVIDIA-SMI warning: the driver is busy\nname, memory.total [MiB], driver_version\nNVIDIA RTX 4000, 8192 MiB, 1.0\n";
+        assert_eq!(parse_nvidia_smi(text), Some(("NVIDIA RTX 4000".into(), 8.0)));
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_probe_reads_nvidia_smi() {
@@ -100,9 +126,36 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn the_absolute_nvidia_smi_path_is_tried() {
+        struct Fallback;
+
+        impl CommandRunner for Fallback {
+            fn run(&self, cmd: &str, _args: &[String], _envs: &[(String, String)]) -> Result<RunResult, String> {
+                if cmd == "nvidia-smi" {
+                    Err("program not found".into())
+                } else {
+                    Ok(RunResult { status: true, stdout: SMI.as_bytes().to_vec(), stderr: Vec::new() })
+                }
+            }
+        }
+
+        assert!(matches!(probe(&Fallback), GpuProbe::Nvidia { .. }));
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn no_nvidia_smi_or_no_card_is_missing() {
         assert_eq!(probe(&Answer(Err("program not found".into()))), GpuProbe::Missing);
         assert_eq!(probe(&out("NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.", false)), GpuProbe::Missing);
         assert_eq!(probe(&out("name, memory.total [MiB], driver_version\n", true)), GpuProbe::Missing);
+    }
+
+    /// Manual check on this machine:
+    /// `scripts\cargo.cmd test -p jeuvoice-app real_probe -- --ignored --nocapture`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn real_probe() {
+        println!("{:?}", probe(&crate::setup::state::OsRunner));
     }
 }

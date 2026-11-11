@@ -22,6 +22,14 @@ serde_json = "1"
 [dev-dependencies]
 tempfile.workspace = true
 
+# keyring 3 ships no backend by default; without a platform feature every
+# Entry::new fails, so the Hugging Face token is never saved.
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
 [build-dependencies]
 winresource = "0.1"
 

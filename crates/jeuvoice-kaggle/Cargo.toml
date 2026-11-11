@@ -10,6 +10,14 @@ serde_json = "1"
 ureq = { workspace = true, features = ["json"] }
 keyring = "3"
 
+# keyring 3 ships no backend by default; without a platform feature every
+# Entry::new fails, so tokens and Kaggle keys are never saved.
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
 [dev-dependencies]
 mockito = "1"
 tempfile.workspace = true

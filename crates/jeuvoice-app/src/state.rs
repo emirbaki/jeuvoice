@@ -306,8 +306,15 @@ impl App {
         let mut changed = s.setup.poll();
         if let Some(probe) = s.gpu_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             let missing = probe == crate::services::gpu::GpuProbe::Missing;
+            let nvidia = matches!(probe, crate::services::gpu::GpuProbe::Nvidia { .. });
             s.transcribe.engine_mut().set_gpu_missing(missing);
             s.gpu = probe;
+            // An NVIDIA card is used by default. The switch stays a manual
+            // fallback for a user who turns it off during this run.
+            if nvidia && !s.settings.use_gpu {
+                s.settings.use_gpu = true;
+                s.save_settings();
+            }
             s.gpu_rx = None;
             changed = true;
         }

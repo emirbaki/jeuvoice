@@ -1,5 +1,9 @@
 //! JeuVoice desktop app: speech, transcription and training in one window.
 
+// The release build is a GUI app: no console window behind the main window.
+// Debug builds keep the console for logs and panics.
+#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+
 mod cache;
 mod core_text;
 mod i18n;

@@ -54,7 +54,12 @@ pub fn view(s: &App) -> El {
         )
         .child(section(tr!("Speech model", "Konuşma modeli")))
         .child(model_block(&s.transcribe));
-    let gpu = col().w_full().gap(space::S2).child(gpu_switch(s.settings.use_gpu)).child(gpu_warning(&s.gpu));
+    let gpu = col()
+        .w_full()
+        .gap(space::S2)
+        .child(gpu_switch(s.settings.use_gpu))
+        .child(gpu_line(&s.gpu))
+        .child(gpu_warning(&s.gpu));
     let engine = col()
         .w_full()
         .gap(space::S2)
@@ -162,6 +167,27 @@ fn gpu_switch(on: bool) -> El {
         .gap(space::S2)
         .child(track.cursor(rune::Cursor::Pointer).on_press(move |s: &mut App| s.set_use_gpu(!on)).child(knob))
         .child(text(tr!("Use GPU", "GPU kullan")).font(type_::BODY).color(t.text))
+}
+
+/// The card the probe found, in green, so "detected" does not look like
+/// "nothing found". Empty before the probe answers and in CPU mode.
+fn gpu_line(gpu: &crate::services::gpu::GpuProbe) -> El {
+    use crate::services::gpu::GpuProbe;
+    match gpu {
+        GpuProbe::Nvidia { name, vram_gb } => text(trf!(
+            "{name} ({vram_gb:.0} GB)",
+            "{name} ({vram_gb:.0} GB)"
+        ))
+        .key("gpu-name")
+        .font(type_::LABEL)
+        .color(crate::style::green())
+        .wrap(),
+        GpuProbe::AppleSilicon => text(tr!("Apple Silicon graphics", "Apple Silicon grafik"))
+            .key("gpu-name")
+            .font(type_::LABEL)
+            .color(crate::style::green()),
+        _ => el(),
+    }
 }
 
 /// The CPU mode warning, or an empty element when a card was found.

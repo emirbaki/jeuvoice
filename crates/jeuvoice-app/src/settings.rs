@@ -228,4 +228,18 @@ mod tests {
         store.delete(HF_TOKEN_KEY).unwrap();
         assert_eq!(store.get(HF_TOKEN_KEY), None);
     }
+
+    /// Manual check of the real Windows/macOS keychain:
+    /// `scripts\cargo.cmd test -p jeuvoice-app real_keyring -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_keyring_round_trip() {
+        let store = KeyringStore;
+        let key = "jeuvoice_test_round_trip";
+        store.set(key, "abc").unwrap();
+        assert_eq!(store.get(key), Some("abc".into()));
+        store.delete(key).unwrap();
+        assert_eq!(store.get(key), None);
+        println!("the OS keychain round trip works");
+    }
 }

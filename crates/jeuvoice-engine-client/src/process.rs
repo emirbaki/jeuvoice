@@ -31,7 +31,8 @@ impl EngineProcess {
     pub fn start(cfg: &EngineConfig) -> Result<Self, EngineError> {
         std::fs::create_dir_all(&cfg.data_dir).map_err(|_| EngineError::StartFailed)?;
         let token = new_token();
-        let mut child = Command::new(&cfg.python)
+        let mut command = Command::new(&cfg.python);
+        command
             .arg("-m")
             .arg("jeuvoice_engine")
             .arg("--port")
@@ -44,9 +45,15 @@ impl EngineProcess {
             .arg(&cfg.backend)
             .env("PYTHONPATH", &cfg.engine_dir)
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| EngineError::StartFailed)?;
+            .stderr(Stdio::null());
+        // A GUI app must not open a console for the engine. Without this the
+        // python process gets its own console window on Windows.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let mut child = command.spawn().map_err(|_| EngineError::StartFailed)?;
         let stdout = child.stdout.take().ok_or(EngineError::StartFailed)?;
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {

@@ -366,6 +366,10 @@ fn snap_settings_to(name: &str, view: fn(&App, &mut rune::Cx<App>) -> rune::El) 
         app.tab = crate::state::Tab::Settings;
         app.transcribe.model.ready = false;
         app.transcribe.download = Some(Some(40));
+        app.gpu = crate::services::gpu::GpuProbe::Nvidia {
+            name: "NVIDIA GeForce RTX 3050 Ti Laptop GPU".into(),
+            vram_gb: 4.0,
+        };
         app
     }
     let out = format!("{}/../../target/{name}.png", env!("CARGO_MANIFEST_DIR"));
