@@ -22,6 +22,9 @@ serde_json = "1"
 [dev-dependencies]
 tempfile.workspace = true
 
+[build-dependencies]
+winresource = "0.1"
+
 # Read by cargo-packager: `cargo packager -p jeuvoice-app --release` from the
 # repo root (scripts\make-installer.cmd does this). The bundle comes first from
 # packaging\windows\collect.ps1. cargo-packager changes to this crate folder,
@@ -33,6 +36,8 @@ description = "Speech, transcription and voice training in one window."
 outDir = "../../dist/windows"
 binariesDir = "../../dist/windows/JeuVoice"
 formats = ["nsis"]
+# The app exe embeds the same icon through build.rs.
+icons = ["../../packaging/windows/icon.ico"]
 resources = [
     "../../dist/windows/JeuVoice/*.dll",
     "../../dist/windows/JeuVoice/python-3.12.16-20261110.tar.gz",
@@ -52,3 +57,5 @@ appdataPaths = ['$APPDATA\Jeu\JeuVoice']
 # A copy of the stock template with the install folder and the uninstall
 # question changed. See the comments at its top.
 template = "../../packaging/windows/installer.nsi"
+# Without this, NSIS keeps its own blue setup icon; `icons` alone is not enough.
+installerIcon = "../../packaging/windows/icon.ico"

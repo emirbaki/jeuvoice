@@ -1,10 +1,14 @@
-//! The window: a tab bar and the page for the open tab.
+//! The window: a custom titlebar, a tab bar and the page for the open tab.
 
 use crate::state::{App, Tab};
 use crate::{settings_tab, train, transcribe_tab, voice};
 use rune::tok::{space, type_};
 use crate::style;
 use rune::{Cx, El, col, el, row, text};
+
+/// The band the app draws in place of the native title bar. `main` gives the
+/// same height to `rune::Titlebar`, so the window's buttons sit over it.
+pub const TITLEBAR_HEIGHT: f32 = 44.0;
 
 fn tab_list() -> [(Tab, &'static str, &'static str); 4] {
     use crate::i18n::tr;
@@ -16,7 +20,40 @@ fn tab_list() -> [(Tab, &'static str, &'static str); 4] {
     ]
 }
 
-pub fn view(s: &App, _: &mut Cx<App>) -> El {
+/// The JEU mark: three tiny bars, the same soundwave as the app icon.
+fn mark(accent: rune::Color) -> El {
+    let bar = |h: f32| el().w(3.0).h(h).radius(1.5).fill(accent);
+    row().gap(2.0).center_y().child(bar(8.0)).child(bar(14.0)).child(bar(10.0))
+}
+
+/// The app's title bar: a drag band with the JEU mark. Rune draws the window's
+/// own minimize, maximize and close buttons over the trailing edge on Windows,
+/// and keeps the traffic lights at the leading edge on macOS; `insets` keeps
+/// the content clear of both.
+fn titlebar(cx: &mut Cx<App>, p: &style::Palette) -> El {
+    let insets = cx.chrome_insets();
+    // Light glyphs for the caption buttons on the dark band.
+    cx.caption_color(p.text);
+    let band = row()
+        .key("titlebar")
+        .w_full()
+        .h(TITLEBAR_HEIGHT)
+        .window_drag()
+        .center_y()
+        .pl(insets.leading + space::S3)
+        .pr(insets.trailing + space::S3)
+        .gap(space::S2)
+        .child(mark(p.accent))
+        .child(text("JeuVoice").font(type_::LABEL).color(p.text))
+        .child(el().grow(1.0));
+    col()
+        .key("titlebar-frame")
+        .w_full()
+        .child(band)
+        .child(el().w_full().h(1.0).fill(p.glass_border))
+}
+
+pub fn view(s: &App, cx: &mut Cx<App>) -> El {
     let p = style::palette();
     let mut tabs = row().gap(space::S1).padding(4.0).radius(999.0);
     for (tab, key, name) in tab_list() {
@@ -66,8 +103,15 @@ pub fn view(s: &App, _: &mut Cx<App>) -> El {
         .min_h(0.0)
         .transition(style::page_exit())
         .child(col().w_full().grow(1.0).min_h(0.0).transition(style::page_transition()).child(body));
-    let top = row().w_full().padding(space::S2).child(tabs);
-    style::background(col().w_full().h_full().child(top).child(page))
+    let top = row().key("tabs-row").w_full().padding(space::S2).child(tabs);
+    style::background(
+        col()
+            .w_full()
+            .h_full()
+            .child(titlebar(cx, &p))
+            .child(top)
+            .child(page),
+    )
 }
 
 #[cfg(test)]
@@ -100,6 +144,18 @@ mod tests {
 
     fn inside(a: [f32; 4], b: [f32; 4]) -> bool {
         a[0] >= b[0] - 0.5 && a[1] >= b[1] - 0.5 && a[0] + a[2] <= b[0] + b[2] + 0.5 && a[1] + a[3] <= b[1] + b[3] + 0.5
+    }
+
+    #[test]
+    fn the_custom_titlebar_sits_above_the_tabs() {
+        let deps = Deps { transcriber: Arc::new(FakeTranscriber(Default::default())), ensure_model: None, cache_dir: None, sound: false, model: None, settings: Default::default(), settings_path: None, token_store: Arc::new(crate::settings::MemStore::default()), setup_paths: None };
+        let mut rt = Runtime::new(App::new(deps), view, (1100.0, 720.0), Env { system_dark: true, scale: 2.0 });
+        rt.frame(0.0);
+        let bar = rect(&rt, "titlebar");
+        let tabs = rect(&rt, "tabs-row");
+        assert!((bar[3] - super::TITLEBAR_HEIGHT).abs() < 0.5, "the band is 44 points tall: {bar:?}");
+        assert!(tabs[1] >= bar[1] + bar[3] - 0.5, "the tabs start below the band: {tabs:?}");
+        assert!(rt.find("tab-settings").is_some(), "the tab bar still lays out");
     }
 
     #[test]

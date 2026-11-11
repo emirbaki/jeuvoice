@@ -106,10 +106,13 @@ fn init() -> App {
 }
 
 fn main() {
-    rune::run(AppSpec::<App> {
+    rune::App::new(AppSpec::<App> {
         min_size: Some((900.0, 560.0)),
         setup: Some(App::setup),
         poll: Some(App::poll),
         ..AppSpec::new("JeuVoice", (1100.0, 720.0), init, view::view)
-    });
+    })
+    // The window draws its own title bar; Windows keeps its caption buttons over it.
+    .titlebar(rune::Titlebar::new(view::TITLEBAR_HEIGHT))
+    .run();
 }

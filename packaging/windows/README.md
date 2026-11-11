@@ -69,6 +69,24 @@ in this table.
 Setup writes only to the app data folder (`%APPDATA%\Jeu\JeuVoice\data` by
 default). It never deletes presets or projects in `Documents\JeuVoice`.
 
+## App icon
+
+`make-icon.py` draws the icon with Pillow: a Frost-dark tile, white "JEU" and
+five orange soundwave bars. It writes `icon.png` (1024 px, for reference) and
+`icon.ico` (16 to 256 px) in this folder.
+
+```cmd
+engine\.venv\Scripts\python packaging\windows\make-icon.py
+```
+
+The colors are the constants at the top of the script; keep them in step with
+`crates\jeuvoice-app\src\style.rs`. The script uses Arial Black from
+`C:\Windows\Fonts\ariblk.ttf`.
+
+`crates\jeuvoice-app\build.rs` embeds `icon.ico` in the exe, so Explorer, the
+taskbar and the window use it. `cargo-packager` reads the same file from
+`[package.metadata.packager] icons` and `nsis.installerIcon` for the installer.
+
 ## Make the installer
 
 1. Run `scripts\make-installer.cmd` from any folder.
