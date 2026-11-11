@@ -1,7 +1,7 @@
 //! The setup screen: the step list with ticks, a progress bar, the current
 //! package, and a note that the Transcribe tab stays usable.
 
-use rune::tok::{self, space, type_};
+use rune::tok::{space, type_};
 use rune::{El, col, el, row, text};
 
 use crate::setup::{SetupState, SetupStep};
@@ -19,7 +19,7 @@ const STEPS: [(SetupStep, &str); 6] = [
 
 /// The full setup page. `retry` runs setup again after a failure.
 pub fn view(state: &SetupState, retry: impl Fn(&mut crate::state::App, &mut rune::Tx) + 'static) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let mut page = col()
         .w(520.0)
         .gap(space::S2)
@@ -39,18 +39,18 @@ pub fn view(state: &SetupState, retry: impl Fn(&mut crate::state::App, &mut rune
             return wrap(page);
         }
     };
+    let p = crate::style::palette();
     for (step, label) in STEPS {
-        let tick = match current {
-            Some(c) if step < c => "✓",
-            Some(c) if step == c => "…",
-            _ => "•",
+        let (tick, color) = match current {
+            Some(c) if step < c => ("✓", p.green),
+            Some(c) if step == c => ("…", p.accent),
+            _ => ("•", t.text_secondary),
         };
         page = page.child(
-            text(format!("{tick} {label}"))
-                .key(format!("setup-step-{step:?}"))
-                .font(type_::LABEL)
-                .color(t.text)
-                .wrap(),
+            row()
+                .gap(space::S2)
+                .child(text(tick).font(type_::LABEL).color(color).w(14.0))
+                .child(text(label).key(format!("setup-step-{step:?}")).font(type_::LABEL).color(t.text).wrap()),
         );
     }
     let done = BAR_W * progress.clamp(0.0, 1.0);
@@ -64,7 +64,7 @@ pub fn view(state: &SetupState, retry: impl Fn(&mut crate::state::App, &mut rune
                 .h(8.0)
                 .radius(4.0)
                 .fill(t.control_track)
-                .child(el().w(done).h(8.0).radius(4.0).fill(tok::accent(0, true))),
+                .child(el().w(done).h(8.0).radius(4.0).fill(p.accent)),
         )
         .child(text(detail.as_str()).key("setup-detail").font(type_::LABEL).color(t.text_secondary).wrap())
         .child(
@@ -76,8 +76,9 @@ pub fn view(state: &SetupState, retry: impl Fn(&mut crate::state::App, &mut rune
     wrap(page)
 }
 
+/// The page as one glass card in the middle of the window.
 fn wrap(page: El) -> El {
-    row().w_full().grow(1.0).min_h(0.0).justify_center().child(page)
+    col().w_full().grow(1.0).min_h(0.0).center().child(crate::style::glass_blur("glass-setup", page))
 }
 
 /// What the Voice and Train tabs show while setup runs.
@@ -90,7 +91,7 @@ pub fn waiting_hint() -> El {
             text("Setting up the voice engine…")
                 .key("setup-waiting")
                 .font(type_::BODY)
-                .color(tok::theme(true).text_secondary),
+                .color(crate::style::theme().text_secondary),
         )
 }
 

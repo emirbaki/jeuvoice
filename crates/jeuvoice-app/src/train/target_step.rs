@@ -3,7 +3,7 @@
 //! This PC needs a 12 GB CUDA card (read from the engine `/health`). Kaggle is
 //! free T4 x2, about an hour per 1,000 steps. RunPod says "Coming later".
 
-use rune::tok::{self, space, type_};
+use rune::tok::{space, type_};
 use rune::{El, col, row, text, text_input};
 
 use crate::services::engine::EngineState;
@@ -190,7 +190,7 @@ fn card(
         .gap(space::S2)
         .padding(space::S2)
         .radius(10.0)
-        .fill(if on { tok::accent(0, true) } else { t.card })
+        .fill(if on { crate::style::palette().accent.alpha(0.18) } else { t.card })
         .opacity(if enabled { 1.0 } else { 0.75 })
         .child(
             col()
@@ -214,7 +214,7 @@ fn card_wrap(inner: El, key: &str, on: bool, enabled: bool) -> El {
         .gap(space::S2)
         .padding(space::S2)
         .radius(10.0)
-        .fill(if on { tok::accent(0, true) } else { t.card })
+        .fill(if on { crate::style::palette().accent.alpha(0.18) } else { t.card })
         .opacity(if enabled { 1.0 } else { 0.75 })
         .child(inner)
 }

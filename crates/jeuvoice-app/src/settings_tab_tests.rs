@@ -396,3 +396,23 @@ fn kaggle_profiles_add_select_and_remove() {
     assert_eq!(Settings::load_from(&rig.settings_path()).kaggle_profiles, vec!["home".to_string()]);
 }
 
+
+#[test]
+fn settings_tiles_sit_in_two_columns() {
+    let rig = Rig::new(true);
+    let mut lefts: Vec<i32> = ["settings-tile-speech", "settings-tile-gpu", "settings-tile-engine", "settings-tile-accounts"]
+        .iter()
+        .map(|k| {
+            let e = rig
+                .rt
+                .elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some(*k) && !e.exiting)
+                .unwrap_or_else(|| panic!("{k} is on screen"));
+            e.target[0].round() as i32
+        })
+        .collect();
+    lefts.sort();
+    lefts.dedup();
+    assert_eq!(lefts.len(), 2, "two columns: {lefts:?}");
+}

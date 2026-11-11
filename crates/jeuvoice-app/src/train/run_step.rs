@@ -5,7 +5,7 @@
 //! worker from [`run`](crate::train::run) takes over. Checkpoints list with a
 //! Test button each (Task 8 wires it).
 
-use rune::tok::{self, space, type_};
+use rune::tok::{space, type_};
 use rune::{El, ScrollSpec, Shape, canvas, col, row, text, text_input};
 
 use crate::state::App;
@@ -222,7 +222,7 @@ fn loss_curve(losses: &[(u32, f32)]) -> El {
         .w_full()
         .gap(space::S1)
         .child(text("Loss").font(type_::LABEL).color(t.text_secondary))
-        .child(canvas(Shape::new().stroke(points, 2.0, tok::accent(0, true))).key("train-loss-curve").w_full().h(CURVE_H).fill(t.control_track))
+        .child(canvas(Shape::new().stroke(points, 2.0, crate::style::palette().accent)).key("train-loss-curve").w_full().h(CURVE_H).fill(t.control_track))
 }
 
 fn checkpoints_card(s: &TrainData) -> El {

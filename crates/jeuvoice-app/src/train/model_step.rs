@@ -7,7 +7,7 @@ use std::path::Path;
 
 use jeuvoice_core::preset::{AdapterRef, Preset};
 use jeuvoice_core::train::StartFrom;
-use rune::tok::{self, space, type_};
+use rune::tok::{space, type_};
 use rune::{El, col, row, text};
 
 use crate::state::App;
@@ -97,7 +97,7 @@ fn choice_row(key: &str, label: &str, sub: &str, start: &StartFrom, current: &St
         .gap(space::S2)
         .padding(space::S2)
         .radius(10.0)
-        .fill(if on { tok::accent(0, true) } else { t.card })
+        .fill(if on { crate::style::palette().accent.alpha(0.18) } else { t.card })
         .child(
             col()
                 .gap(space::S1)

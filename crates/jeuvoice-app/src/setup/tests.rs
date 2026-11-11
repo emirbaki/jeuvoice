@@ -273,6 +273,44 @@ fn repair_in_dev_never_touches_the_dev_venv() {
     assert!(driver.ready());
 }
 
+#[test]
+fn the_setup_card_is_centered() {
+    use std::sync::Arc;
+
+    use jeuvoice_whisper::FakeTranscriber;
+    use rune::{Env, Runtime};
+
+    use crate::settings::{MemStore, Settings};
+    use crate::state::{App, Deps, Tab};
+
+    let deps = Deps {
+        transcriber: Arc::new(FakeTranscriber(Default::default())),
+        ensure_model: None,
+        cache_dir: None,
+        sound: false,
+        model: None,
+        settings: Settings::default(),
+        settings_path: None,
+        token_store: Arc::new(MemStore::default()),
+        setup_paths: None,
+    };
+    let mut app = App::new(deps);
+    app.tab = Tab::Voice;
+    app.setup.set_state_for_tests(SetupState::Running { step: SetupStep::InstallPackages, progress: 0.5, detail: "torch".into() });
+    let mut rt = Runtime::new(app, crate::view::view, (1100.0, 720.0), Env { system_dark: true, scale: 2.0 });
+    for _ in 0..3 {
+        rt.frame(1.0 / 60.0);
+    }
+    let card = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("glass-setup") && !e.exiting)
+        .expect("the setup card is a glass panel")
+        .target;
+    let center = card[0] + card[2] / 2.0;
+    assert!((center - 550.0).abs() <= 20.0, "card center {center}");
+}
+
 /// Renders the setup screen at the torch download to `target/setup.png`:
 /// `scripts\cargo.cmd test -p jeuvoice-app snap_setup -- --ignored`.
 #[test]
