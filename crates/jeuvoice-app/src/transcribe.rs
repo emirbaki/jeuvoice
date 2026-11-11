@@ -135,9 +135,7 @@ pub struct TranscribeTab {
 impl TranscribeTab {
     pub(crate) fn new(deps: Deps) -> Self {
         let (events_tx, events) = std::sync::mpsc::channel();
-        let data_dir = cache::default_dir()
-            .and_then(|p| p.parent().map(Path::to_path_buf))
-            .unwrap_or_else(std::env::temp_dir);
+        let paths = crate::runtime_paths::detect();
         Self {
             queue: Queue::default(),
             selected: None,
@@ -156,7 +154,7 @@ impl TranscribeTab {
             tickets: HashMap::new(),
             speech: SpeechService::new(deps.transcriber.clone(), deps.ensure_model.clone(), deps.cache_dir.clone()),
             player: SharedPlayer::new(deps.sound),
-            engine: EngineService::new(EngineService::dev_config(data_dir), Arc::new(|| {})),
+            engine: EngineService::from_paths(paths.clone(), paths.engine_config(), Arc::new(|| {})),
             deps,
             waker: Arc::new(|| {}),
             events_tx,

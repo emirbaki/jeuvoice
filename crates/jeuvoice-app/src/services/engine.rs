@@ -4,7 +4,6 @@
 //! While the engine holds OmniVoice on CUDA on a card under 8 GB, Whisper runs on
 //! the CPU ([`whisper_must_use_cpu`]).
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use jeuvoice_engine_client::{EngineApi, EngineConfig, EngineError, EngineProcess, Health};
@@ -52,6 +51,9 @@ pub struct EngineService {
     process: Arc<Mutex<Option<EngineProcess>>>,
     #[allow(dead_code)]
     config: Option<EngineConfig>,
+    /// The folders this service runs from (Task 3 setup reads these).
+    #[allow(dead_code)]
+    paths: crate::runtime_paths::RuntimePaths,
     waker: Waker,
     /// A test double that answers instead of the process (tests only).
     #[cfg(test)]
@@ -60,36 +62,30 @@ pub struct EngineService {
 
 impl EngineService {
     /// Off. Pass the engine folders; `None` when they are unknown (tests).
+    /// Task 3 constructs from paths instead.
+    #[allow(dead_code)]
     pub fn new(config: Option<EngineConfig>, waker: Waker) -> Self {
+        Self::from_paths(crate::runtime_paths::detect(), config, waker)
+    }
+
+    /// Off with known folders; the config starts the process, the paths locate it.
+    pub fn from_paths(paths: crate::runtime_paths::RuntimePaths, config: Option<EngineConfig>, waker: Waker) -> Self {
         Self {
             state: Arc::new(Mutex::new(EngineState::Off)),
             process: Arc::new(Mutex::new(None)),
             config,
+            paths,
             waker,
             #[cfg(test)]
             test_api: None,
         }
     }
 
-    /// Development folders: `engine/` next to the workspace root. Installed mode comes
-    /// with runtime paths in Plan 4.
-    pub fn dev_config(data_dir: PathBuf) -> Option<EngineConfig> {
-        let root = std::env::current_exe()
-            .ok()?
-            .parent()?
-            .parent()?
-            .parent()?
-            .to_path_buf();
-        let engine_dir = root.join("engine");
-        if !engine_dir.is_dir() {
-            return None;
-        }
-        let python = if cfg!(windows) {
-            engine_dir.join(".venv").join("Scripts").join("python.exe")
-        } else {
-            engine_dir.join(".venv").join("bin").join("python")
-        };
-        Some(EngineConfig { python, engine_dir, data_dir, backend: "omnivoice".into() })
+    /// The folders this service runs from (the setup flow in Plan 4 reads these).
+    /// Task 3 is its first reader.
+    #[allow(dead_code)]
+    pub(crate) fn paths(&self) -> &crate::runtime_paths::RuntimePaths {
+        &self.paths
     }
 
     pub fn state(&self) -> EngineState {

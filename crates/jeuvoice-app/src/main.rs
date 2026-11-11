@@ -3,6 +3,7 @@
 mod cache;
 mod marks;
 mod playback;
+mod runtime_paths;
 mod services;
 mod settings;
 mod settings_tab;
