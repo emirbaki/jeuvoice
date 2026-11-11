@@ -109,7 +109,14 @@ fn init() -> App {
     })
 }
 
+/// The app icon, drawn by `packaging/windows/make-icon.py`. The exe resource from build.rs
+/// gives Explorer its icon. The window, the taskbar and Alt+Tab need this call too.
+const APP_ICON: &[u8] = include_bytes!("../../../packaging/windows/icon.png");
+
 fn main() {
+    if let Err(e) = rune::set_app_icon(APP_ICON) {
+        eprintln!("{e}");
+    }
     rune::App::new(AppSpec::<App> {
         min_size: Some((900.0, 560.0)),
         setup: Some(App::setup),
