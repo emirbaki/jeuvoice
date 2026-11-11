@@ -343,16 +343,26 @@ fn name_row(s: &App) -> El {
 
 fn script_field(s: &App) -> El {
     let t = crate::style::theme();
-    text_input(&s.voice.script_field, type_::BODY)
+    let field = text_input(&s.voice.script_field, type_::BODY)
         .key("voice-script")
         .w_full()
-        .h(220.0)
         .padding(space::S2)
+        .placeholder(tr!("Paste the script here, one paragraph per block", "Metni buraya yapıştırın, her blokta bir paragraf"), t.text_secondary)
+        .on_edit(|s: &mut App| &mut s.voice.script_field);
+    // A multi-line field paints its whole text, so a fixed height on the field itself
+    // would spill the lines over the status below. The scroll viewport clips them and
+    // keeps the caret in view.
+    col()
+        .key("voice-script-viewport")
+        .w_full()
+        .h(220.0)
+        .min_h(0.0)
         .radius(10.0)
         .fill(t.card)
         .border(1.0, t.card_border)
-        .placeholder(tr!("Paste the script here, one paragraph per block", "Metni buraya yapıştırın, her blokta bir paragraf"), t.text_secondary)
-        .on_edit(|s: &mut App| &mut s.voice.script_field)
+        .scroll(ScrollSpec { stick_bottom: false })
+        .scroll_margin(space::S2)
+        .child(field)
 }
 
 fn wave_card(s: &App, tl: &VoiceTimeline) -> El {

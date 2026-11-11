@@ -244,6 +244,30 @@ impl Rig {
 }
 
 #[test]
+fn a_long_script_scrolls_inside_its_panel_instead_of_covering_the_status() {
+    let mut rig = Rig::with_engine(Arc::new(FakeEngineApi::new()));
+    let script = (1..=60)
+        .map(|i| format!("Paragraf {i} burada duruyor ve satır uzuyor."))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    rig.paste_script(&script);
+    let elements = rig.rt.elements();
+    let find = |key: &str| {
+        elements
+            .iter()
+            .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
+            .unwrap_or_else(|| panic!("{key} is on screen"))
+    };
+    let viewport = find("voice-script-viewport");
+    let field = find("voice-script");
+    let status = find("voice-status");
+    assert!((viewport.target[3] - 220.0).abs() < 0.5, "the script panel keeps its 220 pt height: {:?}", viewport.target);
+    assert!(field.target[3] > viewport.target[3], "the whole script lays out in the scroll content: {:?}", field.target);
+    assert!(field.visible[3] <= viewport.target[3] + 0.5, "the panel clips the field: {:?} in {:?}", field.visible, viewport.target);
+    assert!(status.target[1] >= viewport.target[1] + viewport.target[3] - 0.5, "the status stays below the panel");
+}
+
+#[test]
 fn generate_builds_a_timeline_with_words() {
     let mut rig = Rig::with_engine(Arc::new(FakeEngineApi::new()));
     rig.paste_script("Birinci paragraf burada bitiyor.\n\nİkinci paragraf şimdi başlıyor.");

@@ -333,14 +333,23 @@ fn script_column(s: &TranscribeTab) -> El {
     let field = text_input(&s.script_field, type_::BODY)
         .key("script")
         .w_full()
-        .h(180.0)
         .padding(space::S2)
-        .radius(10.0)
-        .fill(t.card)
-        .border(1.0, t.card_border)
         .placeholder(tr!("Paste the script here", "Metni buraya yapıştırın"), t.text_secondary)
         .on_edit(|s: &mut App| &mut s.transcribe.script_field)
         .on_submit(|s: &mut App, _| s.transcribe.script_field.insert("\n"));
+    // A multi-line field paints its whole text; the scroll viewport clips it to 180 pt
+    // instead of spilling over the counts and the diff list below.
+    let field = col()
+        .key("script-viewport")
+        .w_full()
+        .h(180.0)
+        .min_h(0.0)
+        .radius(10.0)
+        .fill(t.card)
+        .border(1.0, t.card_border)
+        .scroll(ScrollSpec { stick_bottom: false })
+        .scroll_margin(space::S2)
+        .child(field);
     let summary = if s.script.trim().is_empty() {
         tr!("Paste a script to check what the speaker said.", "Konuşmacının ne dediğini denetlemek için bir metin yapıştırın.").to_string()
     } else if s.selected_done().is_none() {
