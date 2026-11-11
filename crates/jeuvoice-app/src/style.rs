@@ -3,9 +3,6 @@
 //! Every page takes its colors and panels from here. Do not call
 //! `tok::theme(true)` in a page.
 
-// Later tasks move each page to these parts. Task 9 removes this allow.
-#![allow(dead_code)]
-
 use rune::tok::{space, type_};
 use rune::{Color, El, Transition, Tx, col, el, oklch, text};
 
@@ -83,6 +80,7 @@ pub fn green() -> Color {
 
 /// WCAG contrast ratio. Rune colors are linear already, so the luminance needs no
 /// gamma step. Alpha is ignored: blend first.
+#[cfg(test)]
 pub fn contrast(fg: Color, bg: Color) -> f32 {
     let lum = |c: Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
     let (a, b) = (lum(fg), lum(bg));

@@ -5,7 +5,7 @@
 
 use jeuvoice_core::peaks::Peaks;
 use jeuvoice_core::transcript::Word;
-use rune::tok::{self, type_};
+use rune::tok::type_;
 use rune::{Color, Cursor, Drag, El, LineCap, Phase, Shape, canvas, col, el, oklcha, text};
 
 /// What part of the clip the wave shows, and what the user picked on it. Times are in seconds.
@@ -66,7 +66,7 @@ pub fn waveform<S: 'static>(
         .key(key)
         .w_full()
         .h(WAVE_H)
-        .fill(tok::theme(true).card)
+        .fill(crate::style::theme().card)
         .cursor(Cursor::Text)
         .on_drag({
             let lens = lens.clone();
@@ -211,7 +211,7 @@ fn word_row<S: 'static>(
     on_word: impl Fn(&mut S, usize) + Clone + 'static,
     on_word_double: impl Fn(&mut S, usize) + Clone + 'static,
 ) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let end = v.start + v.span;
     let mut row = el().w_full().h(WORDS_H).clip_rounded(0.0);
     let mut free_x = f32::NEG_INFINITY;
@@ -332,7 +332,7 @@ mod tests {
     }
 
     fn view(s: &Fixture, _: &mut Cx<Fixture>) -> El {
-        let t = rune::tok::theme(true);
+        let t = crate::style::theme();
         col().w_full().h_full().fill(t.bg).child(waveform(
             "wave",
             &s.view,
