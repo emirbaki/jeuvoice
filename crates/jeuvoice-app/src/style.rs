@@ -190,6 +190,7 @@ pub fn button(key: &str, label: &str, enabled: bool, on: impl Fn(&mut App, &mut 
 /// A small rounded label for totals and script differences.
 pub fn pill(label: &str, color: Color) -> El {
     el()
+        .label(label)
         .px(space::S2)
         .py(2.0)
         .radius(999.0)

@@ -411,3 +411,22 @@ fn snap_transcribe() {
     rune::App::new(spec).args(["--snap".to_string(), out.to_string()]).run();
     println!("wrote {out}");
 }
+
+#[test]
+fn script_check_shows_diffs_as_pills() {
+    let mut rt = Runtime::new(fixture(), view, (1100.0, 720.0), Env { system_dark: true, scale: 2.0 });
+    for _ in 0..3 {
+        rt.frame(1.0 / 60.0);
+    }
+    let text_of = |key: &str| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
+            .and_then(|e| e.text.or(e.label))
+            .unwrap_or_else(|| panic!("{key} is on screen"))
+    };
+    assert_eq!(text_of("diff-missing-0"), "ve");
+    assert_eq!(text_of("diff-changed-0"), "için → içinde");
+    assert_eq!(text_of("diff-added-0"), "işte");
+    assert!(rt.find("glass-script").is_some(), "the script check is a glass panel");
+}
