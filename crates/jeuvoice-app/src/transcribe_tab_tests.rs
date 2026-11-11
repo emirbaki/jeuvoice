@@ -369,6 +369,32 @@ fn clicking_the_wave_moves_the_word_row_without_editing() {
 }
 
 #[test]
+fn the_wave_pill_flies_after_a_click() {
+    let mut rig = Rig::new();
+    rig.transcribed("a.wav");
+    let wave = rig.rect("wave");
+    let click = |rig: &mut Rig, frac: f32| {
+        let (x, y) = (wave[0] + wave[2] * frac, wave[1] + wave[3] * 0.5);
+        rig.rt.pointer_move(x, y);
+        rig.rt.pointer_down(x, y);
+        rig.rt.pointer_up(x, y);
+        rig.rt.frame(1.0 / 120.0);
+    };
+    click(&mut rig, 0.95);
+    for _ in 0..40 {
+        rig.rt.frame(1.0 / 120.0);
+    }
+    click(&mut rig, 0.02);
+    rig.rt.frame(1.0 / 120.0);
+    let flying = rig.rt.presented("wave-active").expect("the pill is drawn").0;
+    let word0 = rig.rect("word-0");
+    assert!(
+        flying[0] > word0[0] + 0.5,
+        "the pill is still between the old word and word 0: {flying:?} vs {word0:?}"
+    );
+}
+
+#[test]
 fn clicking_a_word_opens_the_editor() {
     let mut rig = Rig::new();
     rig.transcribed("a.wav");

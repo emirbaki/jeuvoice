@@ -199,9 +199,10 @@ fn transcript_panel(tr: &Transcript, view: &crate::waveform::WaveView) -> El {
             .motion(rune::tok::motion::SNAPPY)
             .cursor(rune::Cursor::Pointer)
             .hover(crate::style::hover_fill())
-            .on_press(move |s: &mut App| {
+            .on_press_tx(move |s: &mut App, tx: &mut Tx| {
                 s.transcribe.seek_word(i);
                 s.transcribe.edit_word(i);
+                tx.wake_after(std::time::Duration::from_millis(16));
             });
         if active == Some(i) {
             word = word.child(
@@ -282,7 +283,10 @@ fn word_editor(s: &TranscribeTab) -> El {
                     .radius(4.0)
                     .cursor(rune::Cursor::Pointer)
                     .hover(crate::style::hover_fill())
-                    .on_press(move |s: &mut App| s.transcribe.edit_word(j))
+                    .on_press_tx(move |s: &mut App, tx: &mut Tx| {
+                        s.transcribe.edit_word(j);
+                        tx.wake_after(std::time::Duration::from_millis(16));
+                    })
                     .child(text(w.text.as_str()).font(type_::LABEL).color(t.text_secondary)),
             );
         }

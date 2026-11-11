@@ -132,6 +132,9 @@ pub struct TranscribeTab {
     was_playing: bool,
     /// The playhead that playback last agreed with: a different `view.playhead` is a seek.
     synced_playhead: f64,
+    /// Keep drawing until this moment after a seek, so the word pill's flight and
+    /// the scroll glide animate even when no sound plays.
+    anim_until: Option<std::time::Instant>,
 }
 
 impl TranscribeTab {
@@ -165,6 +168,7 @@ impl TranscribeTab {
             decode: Latest::default(),
             was_playing: false,
             synced_playhead: 0.0,
+            anim_until: None,
         }
     }
 
@@ -329,7 +333,13 @@ impl TranscribeTab {
     /// Move the playhead to `t` seconds and scroll the wave so it shows.
     pub fn seek(&mut self, t: f64) {
         self.view.playhead = t;
+        self.anim_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(350));
         self.keep_playhead_in_view();
+    }
+
+    /// Whether a seek's animation still needs frames.
+    pub(crate) fn keep_drawing(&self) -> bool {
+        self.anim_until.is_some_and(|until| std::time::Instant::now() < until)
     }
 
     fn keep_playhead_in_view(&mut self) {
@@ -450,6 +460,7 @@ impl TranscribeTab {
         };
     }
 
+    /// The shared sound player (the Voice tab plays through it too).
     /// The shared sound player (the Voice tab plays through it too).
     pub(crate) fn player(&self) -> &SharedPlayer {
         &self.player

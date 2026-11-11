@@ -340,6 +340,12 @@ impl App {
         }
         let voice_busy = s.voice.is_busy();
         changed |= s.transcribe.poll(tx, &s.settings, voice_busy);
+        // A seek starts a matched-pill flight and a scroll glide. Keep frames
+        // coming for a moment; otherwise a paused window draws only its end.
+        if s.transcribe.keep_drawing() {
+            tx.wake_after(std::time::Duration::from_millis(16));
+            changed = true;
+        }
         // The Train tab shares the Voice engine once it is ready.
         if s.train.engine_api.is_none() {
             s.train.engine_api = s.transcribe.engine_api();

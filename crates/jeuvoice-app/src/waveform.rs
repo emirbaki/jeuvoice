@@ -83,6 +83,7 @@ pub fn waveform<S: 'static>(
                     if let Some(i) = word_at(&spans, t) {
                         on_word(s, i);
                         tx.scroll_into_view(format!("transcript-word-{i}"));
+                        tx.wake_after(std::time::Duration::from_millis(16));
                     }
                 }
             }
@@ -255,6 +256,7 @@ fn word_row<S: 'static>(
             if let Some(i) = word_at(&spans, t) {
                 seek(s, i);
                 tx.scroll_into_view(format!("transcript-word-{i}"));
+                tx.wake_after(std::time::Duration::from_millis(16));
             }
         }
     };
@@ -311,11 +313,12 @@ fn word_row<S: 'static>(
             );
         }
         word = word
-            .on_press({
+            .on_press_tx({
                 let edit = on_word_double.clone();
-                move |s: &mut S| {
+                move |s: &mut S, tx: &mut rune::Tx| {
                     on_word(s, i);
                     edit(s, i);
+                    tx.wake_after(std::time::Duration::from_millis(16));
                 }
             })
             .on_double_press(move |s: &mut S| on_word_double(s, i))
