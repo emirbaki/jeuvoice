@@ -135,6 +135,9 @@ pub struct TranscribeTab {
     /// Keep drawing until this moment after a seek, so the word pill's flight and
     /// the scroll glide animate even when no sound plays.
     anim_until: Option<std::time::Instant>,
+    /// A horizontal pan of the wave (and its word row) after a click:
+    /// (from start, to start, start clock; negative until the first frame).
+    view_anim: Option<(f64, f64, f64)>,
 }
 
 impl TranscribeTab {
@@ -169,6 +172,7 @@ impl TranscribeTab {
             was_playing: false,
             synced_playhead: 0.0,
             anim_until: None,
+            view_anim: None,
         }
     }
 
@@ -330,24 +334,41 @@ impl TranscribeTab {
         }
     }
 
-    /// Move the playhead to `t` seconds and scroll the wave so it shows.
+    /// Move the playhead to `t` seconds. The wave and its word row then pan so `t`
+    /// sits in the middle; a far click therefore slides its word into view instead
+    /// of leaving it beyond the clipped edge.
     pub fn seek(&mut self, t: f64) {
         self.view.playhead = t;
         self.anim_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(350));
-        self.keep_playhead_in_view();
+        if let Some(l) = &self.loaded {
+            let span = self.view.span;
+            let from = self.view.start;
+            let to = (t - span / 2.0).clamp(0.0, (l.duration - span).max(0.0));
+            if (to - from).abs() > 0.01 {
+                self.view_anim = Some((from, to, -1.0));
+            }
+        }
+    }
+
+    /// Advance the click pan. `clock` is the app's frame clock.
+    pub(crate) fn animate(&mut self, clock: f64) -> bool {
+        let Some((from, to, start)) = self.view_anim else { return false };
+        let start = if start < 0.0 { clock } else { start };
+        let k = ((clock - start) / 0.25).clamp(0.0, 1.0);
+        let eased = k * k * (3.0 - 2.0 * k);
+        self.view.start = from + (to - from) * eased;
+        if k >= 1.0 {
+            self.view.start = to;
+            self.view_anim = None;
+        } else {
+            self.view_anim = Some((from, to, start));
+        }
+        true
     }
 
     /// Whether a seek's animation still needs frames.
     pub(crate) fn keep_drawing(&self) -> bool {
         self.anim_until.is_some_and(|until| std::time::Instant::now() < until)
-    }
-
-    fn keep_playhead_in_view(&mut self) {
-        let Some(l) = &self.loaded else { return };
-        let v = &mut self.view;
-        if v.playhead < v.start || v.playhead > v.start + v.span {
-            v.start = (v.playhead - v.span * 0.1).clamp(0.0, (l.duration - v.span).max(0.0));
-        }
     }
 
     /// Seek to the start of word `i` of the selected file.
@@ -620,7 +641,13 @@ impl TranscribeTab {
         let changed = playing || self.was_playing;
         if changed {
             self.view.playhead = pb.position();
-            self.keep_playhead_in_view();
+            // Playback follows the sound; a click centers instead (see `seek`).
+            if let Some(l) = &self.loaded {
+                let v = &mut self.view;
+                if v.playhead < v.start || v.playhead > v.start + v.span {
+                    v.start = (v.playhead - v.span * 0.1).clamp(0.0, (l.duration - v.span).max(0.0));
+                }
+            }
         }
         if playing {
             tx.wake_after(Duration::from_millis(33));

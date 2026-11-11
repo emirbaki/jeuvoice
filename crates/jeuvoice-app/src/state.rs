@@ -339,6 +339,7 @@ impl App {
             s.transcribe.refresh_engine_config();
         }
         let voice_busy = s.voice.is_busy();
+        changed |= s.transcribe.animate(_clock);
         changed |= s.transcribe.poll(tx, &s.settings, voice_busy);
         // A seek starts a matched-pill flight and a scroll glide. Keep frames
         // coming for a moment; otherwise a paused window draws only its end.
