@@ -62,6 +62,7 @@ pub fn waveform<S: 'static>(
     on_word_double: impl Fn(&mut S, usize) + Clone + 'static,
 ) -> El {
     let width = rune::memo::layout_size(key).map_or(DEFAULT_W, |s| s[0]).max(1.0);
+    let spans: Vec<(f64, f64)> = words.iter().map(|w| (w.start, w.end)).collect();
     let wave = canvas(wave_shape(v, peaks, words, width))
         .key(key)
         .w_full()
@@ -70,7 +71,18 @@ pub fn waveform<S: 'static>(
         .cursor(Cursor::Text)
         .on_drag({
             let lens = lens.clone();
-            move |s: &mut S, d: &mut Drag, _tx| drag(lens(s), d, duration)
+            let on_word = on_word.clone();
+            let spans = spans.clone();
+            move |s: &mut S, d: &mut Drag, tx: &mut rune::Tx| {
+                drag(lens(s), d, duration);
+                if d.phase == Phase::Up && !d.cancelled() && d.data == 0.0 {
+                    let t = time_at(lens(s), d.x, d.w, duration);
+                    if let Some(i) = word_at(&spans, t) {
+                        on_word(s, i);
+                        tx.scroll_into_view(format!("transcript-word-{i}"));
+                    }
+                }
+            }
         })
         .on_wheel(move |s: &mut S, e, _tx| {
             if e.dy == 0.0 {
@@ -202,7 +214,7 @@ fn wave_shape(v: &WaveView, peaks: &Peaks, words: &[Word], width: f32) -> Shape 
 }
 
 /// The word at `t`, or the next one, or the last one when `t` is past the end.
-fn word_at(spans: &[(f64, f64)], t: f64) -> Option<usize> {
+pub(crate) fn word_at(spans: &[(f64, f64)], t: f64) -> Option<usize> {
     if let Some(i) = spans.iter().position(|&(a, b)| t >= a && t <= b) {
         return Some(i);
     }
@@ -229,7 +241,7 @@ fn word_row<S: 'static>(
     let on_row_click = {
         let seek = on_word.clone();
         let edit = on_word_double.clone();
-        move |s: &mut S, d: &mut Drag, _tx: &mut rune::Tx| {
+        move |s: &mut S, d: &mut Drag, tx: &mut rune::Tx| {
             if d.phase != Phase::Up || d.cancelled() || d.data > 0.0 {
                 return;
             }
@@ -237,6 +249,7 @@ fn word_row<S: 'static>(
             if let Some(i) = word_at(&spans, t) {
                 seek(s, i);
                 edit(s, i);
+                tx.scroll_into_view(format!("transcript-word-{i}"));
             }
         }
     };

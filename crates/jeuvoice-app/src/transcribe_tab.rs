@@ -5,7 +5,7 @@ use jeuvoice_core::queue::ItemState;
 use jeuvoice_core::script_diff::DiffOp;
 use jeuvoice_core::transcript::Transcript;
 use rune::tok::{space, type_};
-use rune::{El, FileDialogOptions, ScrollSpec, Tx, col, el, row, text, text_input};
+use rune::{El, FileDialogOptions, ScrollSpec, Transition, Tx, col, el, row, text, text_input};
 
 use crate::i18n::{tr, trf};
 use crate::marks::{counts_text, marks};
@@ -173,36 +173,52 @@ fn main_column(s: &TranscribeTab) -> El {
     // The word row under the wave shows only the visible time span. The full
     // text needs its own wrapped, scrollable panel.
     if let Some((_, tr)) = done {
-        main = main.child(transcript_panel(tr));
+        main = main.child(transcript_panel(tr, &s.view));
     } else {
         main = main.child(el().grow(1.0));
     }
     main.child(play_bar(s))
 }
 
-/// The whole transcript as wrapped, clickable words. The wave row under the
-/// waveform shows only the visible time span, so this panel is where a long
-/// transcript can be read and a word double-clicked to fix it.
-fn transcript_panel(tr: &Transcript) -> El {
+/// The whole transcript as wrapped, clickable words. Words outside the wave's
+/// zoomed span are dimmed; the word under the playhead carries a sliding pill.
+fn transcript_panel(tr: &Transcript, view: &crate::waveform::WaveView) -> El {
     let t = crate::style::theme();
+    let spans: Vec<(f64, f64)> = tr.words.iter().map(|w| (w.start, w.end)).collect();
+    let active = crate::waveform::word_at(&spans, view.playhead);
+    let end = view.start + view.span;
     let mut words = row().w_full().gap(2.0).flex_wrap();
     for (i, w) in tr.words.iter().enumerate() {
-        words = words.child(
-            el()
-                .key(format!("transcript-word-{i}"))
-                .role("button")
-                .label(w.text.as_str())
-                .px(2.0)
-                .py(1.0)
-                .radius(4.0)
-                .cursor(rune::Cursor::Pointer)
-                .hover(crate::style::hover_fill())
-                .on_press(move |s: &mut App| {
-                    s.transcribe.seek_word(i);
-                    s.transcribe.edit_word(i);
-                })
-                .child(text(w.text.as_str()).font(type_::BODY).color(t.text)),
-        );
+        let in_view = w.end >= view.start && w.start <= end;
+        let mut word = el()
+            .key(format!("transcript-word-{i}"))
+            .role("button")
+            .label(w.text.as_str())
+            .px(2.0)
+            .py(1.0)
+            .radius(4.0)
+            .opacity(if in_view { 1.0 } else { 0.45 })
+            .transition(Transition::opacity())
+            .cursor(rune::Cursor::Pointer)
+            .hover(crate::style::hover_fill())
+            .on_press(move |s: &mut App| {
+                s.transcribe.seek_word(i);
+                s.transcribe.edit_word(i);
+            });
+        if active == Some(i) {
+            word = word.child(
+                el()
+                    .key("transcript-active")
+                    .matched("transcript-active")
+                    .absolute(0.0, 0.0)
+                    .w_full()
+                    .h_full()
+                    .radius(4.0)
+                    .motion(rune::tok::motion::SNAPPY)
+                    .fill(crate::style::palette().accent.alpha(0.22)),
+            );
+        }
+        words = words.child(word.child(text(w.text.as_str()).font(type_::BODY).color(t.text)));
     }
     col()
         .key("transcript-panel")

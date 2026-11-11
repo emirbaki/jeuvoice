@@ -346,6 +346,21 @@ fn a_transcript_word_can_be_edited_from_the_panel() {
 }
 
 #[test]
+fn the_transcript_pill_follows_the_playhead() {
+    let mut rig = Rig::new();
+    rig.transcribed("a.wav");
+    rig.rt.update(|s, _| s.transcribe.seek(0.8));
+    rig.rt.frame(1.0 / 60.0);
+    let pill = rig.rect("transcript-active");
+    let word = rig.rect("transcript-word-1");
+    assert!(
+        pill[0] >= word[0] - 0.5 && pill[1] >= word[1] - 0.5
+            && pill[0] + pill[2] <= word[0] + word[2] + 0.5,
+        "the active pill {pill:?} sits on word 1 {word:?}"
+    );
+}
+
+#[test]
 fn a_click_on_the_clipped_word_row_edits_the_nearest_word() {
     let mut rig = Rig::new();
     rig.transcribed("a.wav");
