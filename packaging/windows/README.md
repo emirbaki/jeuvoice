@@ -69,6 +69,74 @@ in this table.
 Setup writes only to the app data folder (`%APPDATA%\Jeu\JeuVoice\data` by
 default). It never deletes presets or projects in `Documents\JeuVoice`.
 
+## Make the installer
+
+1. Run `scripts\make-installer.cmd` from any folder.
+2. The script makes the bundle, then runs `cargo packager -p jeuvoice-app
+   --release` with `[package.metadata.packager]` from
+   `crates\jeuvoice-app\Cargo.toml`.
+3. Find `dist\windows\jeuvoice-app_<version>_x64-setup.exe`.
+
+The installer needs `cargo-packager` 0.11.8 or newer
+(`cargo install cargo-packager --locked`). It also needs NSIS; the packager
+downloads its own copy when NSIS is not installed.
+
+The installer is per user and needs no admin rights. It installs to
+`%LOCALAPPDATA%\Programs\JeuVoice` and makes a Start menu shortcut. The
+template `packaging\windows\installer.nsi` is the stock cargo-packager 0.11.8
+template with two changes: the install folder above, and the uninstall
+checkbox text.
+
+The uninstaller removes the program folder and shows one checkbox:
+"Also remove the voice engine and downloaded models (about 8 GB)?". It is
+unchecked by default, so the engine, models and app settings stay. It deletes
+`%APPDATA%\Jeu\JeuVoice` only when the user ticks the box. It never touches
+`Documents\JeuVoice`.
+
+## Sign the installer
+
+The user runs these commands with their own certificate. Sign the app before
+packaging and the setup exe after. Use the real installer name from
+`dist\windows`.
+
+```cmd
+signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a ^
+  dist\windows\JeuVoice\jeuvoice-app.exe
+
+scripts\make-installer.cmd
+
+signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a ^
+  dist\windows\jeuvoice-app_0.0.1_x64-setup.exe
+```
+
+`signtool` is in the Windows SDK. `/a` picks the best certificate in the
+store; replace it with `/sha1 <thumbprint>` to select one. Check the result
+with `signtool verify /pa /v <file>`.
+
+## Installer test record
+
+Run these on a fresh Windows user account. Write the result of each step here.
+
+| Step | Date | Result |
+|---|---|---|
+| Install with no admin prompt; Start menu shortcut works. | | |
+| First start shows the setup screen; setup reaches "Ready". | | |
+| Transcribe one file. | | |
+| Voice tab makes a render with the local adapter or the HF token. | | |
+| Uninstall keeps `%APPDATA%\Jeu\JeuVoice` with the box unticked. | | |
+| Uninstall removes it with the box ticked, and keeps `Documents\JeuVoice`. | | |
+
+### Smoke test on the dev account (2026-11-11)
+
+This test does not replace the fresh-account test above.
+
+| Step | Result |
+|---|---|
+| Silent install (`/S /D=%TEMP%\JV test Çağrı`), no admin prompt | PASS. Exit 0, 31 files, about 780 MB. |
+| Start menu shortcut `JeuVoice\JeuVoice.lnk` | PASS. Made. |
+| Uninstall registry key under HKCU | PASS. Made by install, removed by uninstall. |
+| Silent uninstall (box unticked) | PASS. Program files and shortcut removed. `%APPDATA%\Jeu\JeuVoice` stays. |
+
 ## Size
 
 The bundle is about 1 GB. Most of it is `cublasLt64_13.dll` (about 500 MB). The

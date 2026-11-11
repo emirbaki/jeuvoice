@@ -22,9 +22,33 @@ serde_json = "1"
 [dev-dependencies]
 tempfile.workspace = true
 
-# Read by cargo-packager (Plan 4 Task 5 builds the NSIS installer from this).
-# collect.ps1 makes dist\windows\JeuVoice; the installer packs that folder.
+# Read by cargo-packager: `cargo packager -p jeuvoice-app --release` from the
+# repo root (scripts\make-installer.cmd does this). The bundle comes first from
+# packaging\windows\collect.ps1. cargo-packager changes to this crate folder,
+# so every path below is relative to crates\jeuvoice-app.
 [package.metadata.packager]
 productName = "JeuVoice"
 identifier = "com.jeu.jeuvoice"
 description = "Speech, transcription and voice training in one window."
+outDir = "../../dist/windows"
+binariesDir = "../../dist/windows/JeuVoice"
+formats = ["nsis"]
+resources = [
+    "../../dist/windows/JeuVoice/*.dll",
+    "../../dist/windows/JeuVoice/python-3.12.16-20261110.tar.gz",
+    "../../dist/windows/JeuVoice/requirements-win-cu126.txt",
+    "../../dist/windows/JeuVoice/uv.exe",
+    "../../dist/windows/JeuVoice/engine",
+    "../../dist/windows/JeuVoice/assets",
+]
+
+[package.metadata.packager.nsis]
+# Per-user install, no admin: %LOCALAPPDATA%\Programs\JeuVoice (see the template).
+installMode = "currentUser"
+# The CUDA DLLs do not compress much; zlib keeps the build fast.
+compression = "zlib"
+# The uninstaller asks about this folder; the default is to keep it.
+appdataPaths = ['$APPDATA\Jeu\JeuVoice']
+# A copy of the stock template with the install folder and the uninstall
+# question changed. See the comments at its top.
+template = "../../packaging/windows/installer.nsi"

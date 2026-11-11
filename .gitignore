@@ -6,3 +6,4 @@
 engine/.venv/
 __pycache__/
 .engine-pytest/
+graphify-out/

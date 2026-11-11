@@ -1,0 +1,7 @@
+target/
+dist/
+engine/.venv/
+.superpowers/
+.engine-pytest/
+__pycache__/
+*.png
