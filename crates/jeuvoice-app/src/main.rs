@@ -9,6 +9,7 @@ mod services;
 mod settings;
 mod settings_tab;
 mod state;
+mod style;
 mod train;
 mod transcribe;
 mod transcribe_tab;

@@ -6,7 +6,7 @@
 use jeuvoice_core::peaks::Peaks;
 use jeuvoice_core::transcript::Word;
 use rune::tok::{self, type_};
-use rune::{Color, Cursor, Drag, El, LineCap, Phase, Shape, canvas, col, el, oklch, oklcha, text};
+use rune::{Color, Cursor, Drag, El, LineCap, Phase, Shape, canvas, col, el, oklcha, text};
 
 /// What part of the clip the wave shows, and what the user picked on it. Times are in seconds.
 #[derive(Clone, Debug, PartialEq)]
@@ -41,15 +41,7 @@ const WORD_GAP: f32 = 4.0;
 /// Width used for the wave before its first layout.
 const DEFAULT_W: f32 = 800.0;
 
-fn red() -> Color {
-    oklch(0.66, 0.2, 25.0)
-}
-fn green() -> Color {
-    oklch(0.74, 0.17, 150.0)
-}
-fn orange() -> Color {
-    oklch(0.78, 0.16, 65.0)
-}
+use crate::style::{green, orange, red};
 
 /// The wave and the row of words under it. `key` names the wave element and its layout
 /// read, so two waves (Transcribe, Voice) can live in one window. `duration` is the

@@ -4,7 +4,7 @@
 use jeuvoice_core::queue::ItemState;
 use jeuvoice_core::script_diff::DiffOp;
 use rune::tok::{self, radius, space, type_};
-use rune::{Color, El, ScrollSpec, Tx, col, el, oklch, row, text, text_input};
+use rune::{El, ScrollSpec, Tx, col, el, row, text, text_input};
 
 use crate::marks::{counts_text, marks};
 use crate::state::App;
@@ -17,12 +17,7 @@ pub const MEDIA: [&str; 11] = ["wav", "mp3", "m4a", "aac", "ogg", "opus", "flac"
 const LEFT_W: f32 = 240.0;
 const RIGHT_W: f32 = 290.0;
 
-pub(crate) fn red() -> Color {
-    oklch(0.66, 0.2, 25.0)
-}
-fn green() -> Color {
-    oklch(0.74, 0.17, 150.0)
-}
+pub(crate) use crate::style::{green, red};
 
 pub fn view(s: &TranscribeTab) -> El {
     row()
@@ -36,21 +31,9 @@ pub fn view(s: &TranscribeTab) -> El {
         .child(script_column(s))
 }
 
-/// A small button. `on` runs on press. A disabled button ignores presses.
+/// A gray glass button. `on` runs on press. A disabled button ignores presses.
 pub(crate) fn button(key: &str, label: &str, enabled: bool, on: impl Fn(&mut App, &mut Tx) + 'static) -> El {
-    let t = tok::theme(true);
-    let b = el()
-        .key(key)
-        .role("button")
-        .label(label)
-        .focusable(enabled)
-        .disabled(!enabled)
-        .padding(space::S2)
-        .radius(radius::SM)
-        .fill(t.control_track)
-        .opacity(if enabled { 1.0 } else { 0.45 })
-        .child(text(label).font(type_::LABEL).color(t.text));
-    if enabled { b.on_press_tx(on) } else { b }
+    crate::style::button(key, label, enabled, on)
 }
 
 pub(crate) fn section(title: &str) -> El {

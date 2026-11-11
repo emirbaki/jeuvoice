@@ -1,7 +1,7 @@
 //! The Voice tab: project bar, script or timeline, takes, play bar and status.
 
 use rune::tok::{self, radius, space, type_};
-use rune::{Color, El, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, el, oklch, row, text, text_input};
+use rune::{Color, El, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, el, row, text, text_input};
 
 use crate::marks::{counts_text, marks};
 use crate::state::App;
@@ -11,9 +11,7 @@ use crate::waveform::waveform;
 
 const LEFT_W: f32 = 200.0;
 
-fn green() -> Color {
-    oklch(0.74, 0.17, 150.0)
-}
+use crate::style::green;
 
 pub fn view(s: &App) -> El {
     if !VOICE_SUPPORTED {
