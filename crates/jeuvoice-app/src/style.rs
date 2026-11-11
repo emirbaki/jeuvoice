@@ -189,19 +189,29 @@ pub fn button(key: &str, label: &str, enabled: bool, on: impl Fn(&mut App, &mut 
 pub fn pill(label: &str, color: Color) -> El {
     el()
         .label(label)
+        .min_w(0.0)
+        .shrink()
         .px(space::S2)
         .py(2.0)
         .radius(999.0)
         .fill(color.alpha(0.14))
         .border(1.0, color.alpha(0.35))
-        .child(text(label).font(type_::LABEL).color(color))
+        .child(text(label).font(type_::LABEL).color(color).truncate().min_w(0.0))
 }
 
 /// How a new page enters: it fades in and moves up from 8 points lower.
 pub const PAGE_ENTER: (f32, f32) = (0.0, 8.0);
 
+/// How the content of a new page enters. Put it on the content, inside a page wrapper
+/// that has `page_exit()`.
 pub fn page_transition() -> Transition {
     Transition::offset(PAGE_ENTER.0, PAGE_ENTER.1).combined(Transition::opacity())
+}
+
+/// How a page wrapper leaves: at once. An exiting page would still draw its blurred
+/// panels, and rune blurs only 4 elements per frame.
+pub fn page_exit() -> Transition {
+    Transition::none()
 }
 
 #[cfg(test)]
@@ -241,5 +251,23 @@ mod tests {
         let _ = button_kind("k-main", "Go", ButtonKind::Main, true, |_, _| {});
         let _ = button_kind("k-normal", "Other", ButtonKind::Normal, true, |_, _| {});
         assert_eq!(take_main_keys(), vec!["k-main".to_string()]);
+    }
+
+    #[test]
+    fn a_long_pill_stays_in_a_narrow_row() {
+        let view = |_: &(), _: &mut rune::Cx<()>| {
+            // The root fills the window, so the narrow row sits inside it.
+            col().child(rune::row()
+                .key("narrow")
+                .w(190.0)
+                .gap(space::S2)
+                .child(text("Changed").font(type_::LABEL).w(64.0))
+                .child(pill("geliştirilebilecekmiş → geliştirilebilecek", palette().red).key("long-pill")))
+        };
+        let mut rt = rune::Runtime::new((), view, (400.0, 200.0), rune::Env { system_dark: true, scale: 2.0 });
+        rt.frame(0.0);
+        let rect = |k: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(k)).unwrap().target;
+        let (pill, row) = (rect("long-pill"), rect("narrow"));
+        assert!(pill[0] + pill[2] <= row[0] + row[2] + 0.5, "pill {pill:?} inside row {row:?}");
     }
 }

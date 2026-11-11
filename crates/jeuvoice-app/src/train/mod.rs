@@ -59,5 +59,15 @@ pub fn view(s: &App) -> El {
             Some(tile) => board::open_layout(s, tile, &adapters),
         }
     };
-    col().w_full().grow(1.0).min_h(0.0).gap(space::S3).padding(space::S3).child(header).child(content)
+    // A drop anywhere on the page adds clips and shows the Data tile.
+    col()
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .gap(space::S3)
+        .padding(space::S3)
+        .child(header)
+        .child(content)
+        .on_drop_files(|s: &mut App, files, _| s.train.add_files(files))
+        .accepts_extensions(&crate::transcribe_tab::MEDIA)
 }

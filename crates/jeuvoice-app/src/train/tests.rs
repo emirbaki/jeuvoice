@@ -968,3 +968,30 @@ fn the_recipe_page_keeps_the_blur_budget() {
     });
     assert!(glass_count(&rt) <= 4, "{} blurred panels", glass_count(&rt));
 }
+
+#[test]
+fn a_drop_with_another_tile_open_adds_to_data() {
+    let mut rig = Rig::new();
+    rig.open_tile("train-tile-run");
+    let dir = rig.tmp.path().join("clips");
+    std::fs::create_dir_all(&dir).unwrap();
+    let paths = vec![wav(&dir, "a.wav"), wav(&dir, "b.wav")];
+    let at = rig.rt.find("glass-train-open");
+    rig.rt.drop_files(paths, at);
+    rig.rt.frame(1.0 / 60.0);
+    assert_eq!(rig.rt.state.train.open_tile, Some(TrainTile::Data), "the drop shows the Data tile");
+    rig.until("the clips arrive", |s| s.train.clips().len() == 2);
+}
+
+#[test]
+fn a_short_run_does_not_say_zero_hours() {
+    let rt = fixture_at(1100.0, 720.0, |a| {
+        a.train.open_tile = None;
+        a.train.run = None;
+        a.train.checkpoints.clear();
+        a.train.project.settings.steps = 400;
+    });
+    let texts: Vec<String> = rt.elements().into_iter().filter_map(|e| e.text).collect();
+    assert!(!texts.iter().any(|t| t.contains("about 0 h")), "{texts:?}");
+    assert!(texts.iter().any(|t| t.contains("under an hour")), "{texts:?}");
+}

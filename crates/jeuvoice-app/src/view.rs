@@ -61,8 +61,8 @@ pub fn view(s: &App, _: &mut Cx<App>) -> El {
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .transition(style::page_transition())
-        .child(body);
+        .transition(style::page_exit())
+        .child(col().w_full().grow(1.0).min_h(0.0).transition(style::page_transition()).child(body));
     let top = row().w_full().padding(space::S2).child(tabs);
     style::background(col().w_full().h_full().child(top).child(page))
 }
@@ -116,5 +116,23 @@ mod tests {
         assert!(inside(rect(&rt, "tab-pill"), rect(&rt, "tab-train")), "the pill moved to Train");
         assert!(rt.find("page-train").is_some());
         assert!(rt.find("page-transcribe").is_none(), "the old page left");
+    }
+
+    #[test]
+    fn a_tab_change_keeps_the_blur_budget() {
+        let deps = Deps { transcriber: Arc::new(FakeTranscriber(Default::default())), ensure_model: None, cache_dir: None, sound: false, model: None, settings: Default::default(), settings_path: None, token_store: Arc::new(crate::settings::MemStore::default()), setup_paths: None };
+        let mut rt = Runtime::new(App::new(deps), view, (1100.0, 720.0), Env { system_dark: true, scale: 2.0 });
+        rt.frame(0.0);
+        let (x, y) = rt.find("tab-voice").unwrap();
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        // An invisible element draws no blur: rune fades the blur with the opacity.
+        let blurred = rt
+            .elements()
+            .iter()
+            .filter(|e| e.opacity > 0.01 && e.key.as_deref().is_some_and(|k| k.starts_with("glass-")))
+            .count();
+        assert!(blurred <= 4, "{blurred} blurred panels during the page change, exiting ones included");
     }
 }

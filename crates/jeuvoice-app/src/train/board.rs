@@ -69,10 +69,12 @@ pub fn run_summary(s: &TrainData) -> RunSummary {
     }
 }
 
-fn run_line(r: &RunSummary) -> String {
+fn run_line(s: &TrainData, r: &RunSummary) -> String {
     match r {
         RunSummary::NotReady => "Add clips first".into(),
-        RunSummary::Ready { hours } => format!("Ready to start · about {hours:.0} h on Kaggle"),
+        RunSummary::Ready { .. } => {
+            format!("Ready to start · {}", crate::train::target_step::kaggle_estimate(s.project.settings.steps))
+        }
         RunSummary::Running { step, total } => format!("Step {step} / {total}"),
         RunSummary::Done { checkpoints } => format!("Done · {checkpoints} checkpoints"),
         RunSummary::Failed => "The run stopped. Open it to see why.".into(),
@@ -192,7 +194,7 @@ fn run_board(s: &TrainData) -> El {
         .gap(space::S2)
         .padding(space::S3)
         .child(title("Run"))
-        .child(text(run_line(&r).as_str()).font(type_::BODY).color(p.text).wrap());
+        .child(text(run_line(s, &r).as_str()).font(type_::BODY).color(p.text).wrap());
     if let RunSummary::Running { step, total } = r {
         body = body.child(progress(step as f32 / total.max(1) as f32));
     }
@@ -239,7 +241,7 @@ fn column_tile(s: &TrainData, t: TrainTile) -> El {
             ("Data", format!("{} clips · {} min", d.clips, fmt_minutes(d.minutes)))
         }
         TrainTile::Setup => ("Model and where", model_line(s)),
-        TrainTile::Run => ("Run", run_line(&run_summary(s))),
+        TrainTile::Run => ("Run", run_line(s, &run_summary(s))),
     };
     let body = col()
         .gap(space::S1)
