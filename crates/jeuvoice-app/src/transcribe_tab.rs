@@ -256,7 +256,12 @@ fn word_editor(s: &TranscribeTab) -> El {
         .fill(t.control_track)
         .on_edit(|s: &mut App| &mut s.transcribe.word_field)
         .on_submit(|s: &mut App, _| s.transcribe.save_word());
+    // A new word slides the edit line in from the right; the field is in place
+    // and its text swaps to the clicked word.
+    let i = s.editing.unwrap_or(0);
     row()
+        .key(format!("word-editor-{i}"))
+        .transition(Transition::offset(8.0, 0.0).combined(Transition::opacity()))
         .gap(space::S2)
         .child(text(tr!("Fix the word:", "Sözcüğü düzeltin:")).font(type_::LABEL).color(t.text_secondary))
         .child(field)

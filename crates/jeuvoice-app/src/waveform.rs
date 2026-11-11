@@ -72,6 +72,7 @@ pub fn waveform<S: 'static>(
         .on_drag({
             let lens = lens.clone();
             let on_word = on_word.clone();
+            let on_edit = on_word_double.clone();
             let spans = spans.clone();
             move |s: &mut S, d: &mut Drag, tx: &mut rune::Tx| {
                 drag(lens(s), d, duration);
@@ -79,6 +80,7 @@ pub fn waveform<S: 'static>(
                     let t = time_at(lens(s), d.x, d.w, duration);
                     if let Some(i) = word_at(&spans, t) {
                         on_word(s, i);
+                        on_edit(s, i);
                         tx.scroll_into_view(format!("transcript-word-{i}"));
                     }
                 }

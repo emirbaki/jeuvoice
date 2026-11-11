@@ -346,6 +346,20 @@ fn a_transcript_word_can_be_edited_from_the_panel() {
 }
 
 #[test]
+fn clicking_the_wave_shows_the_word_editor() {
+    let mut rig = Rig::new();
+    rig.transcribed("a.wav");
+    let wave = rig.rect("wave");
+    let (x, y) = (wave[0] + wave[2] * 0.5, wave[1] + wave[3] * 0.5);
+    rig.rt.pointer_move(x, y);
+    rig.rt.pointer_down(x, y);
+    rig.rt.pointer_up(x, y);
+    rig.rt.frame(1.0 / 60.0);
+    assert_eq!(rig.rt.state.transcribe.editing, Some(1), "the clicked point picks the last word");
+    assert!(rig.rt.find("word-edit").is_some(), "the green edit line is on screen");
+}
+
+#[test]
 fn the_transcript_pill_follows_the_playhead() {
     let mut rig = Rig::new();
     rig.transcribed("a.wav");
