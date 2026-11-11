@@ -359,6 +359,8 @@ fn clicking_the_wave_shows_the_word_editor() {
     rig.rt.frame(1.0 / 60.0);
     assert_eq!(rig.rt.state.transcribe.editing, Some(1), "the clicked point picks the last word");
     assert!(rig.rt.find("word-edit").is_some(), "the green edit line is on screen");
+    let edit = rig.rect("word-edit");
+    assert!(edit[1] >= wave[1] + wave[3] - 0.5, "the edit line sits under the wave: {edit:?} vs {wave:?}");
 }
 
 #[test]

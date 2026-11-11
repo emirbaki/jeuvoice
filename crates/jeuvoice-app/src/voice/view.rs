@@ -368,6 +368,7 @@ fn wave_card(s: &App, tl: &VoiceTimeline) -> El {
         |s: &mut App| &mut s.voice.view,
         |s: &mut App, i| s.voice.select_word(i),
         |s: &mut App, i| s.voice.fix_word(i),
+        None,
     ))
 }
 

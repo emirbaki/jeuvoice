@@ -153,14 +153,11 @@ fn main_column(s: &TranscribeTab) -> El {
             |s: &mut App| &mut s.transcribe.view,
             |s: &mut App, i| s.transcribe.seek_word(i),
             |s: &mut App, i| s.transcribe.edit_word(i),
+            s.editing.map(|_| word_editor(s)),
         )),
         (Some(_), None) => wave_card.child(placeholder(tr!("Loading the waveform…", "Dalga biçimi yükleniyor…"))),
         (None, _) => wave_card.child(placeholder(tr!("Drop files on the left. Pick a finished file to see its words here.", "Dosyaları sola bırakın. Sözcüklerini burada görmek için biten bir dosya seçin."))),
     };
-    if s.editing.is_some() {
-        wave_card = wave_card.child(word_editor(s));
-    }
-
     let mut main = col().grow(1.0).min_w(0.0).h_full().gap(space::S2).child(header).child(wave_card);
     if s.loaded.is_some() {
         main = main.child(
@@ -290,6 +287,8 @@ fn word_editor(s: &TranscribeTab) -> El {
         }
     }
     row()
+        .w_full()
+        .min_h(26.0)
         .gap(space::S2)
         .center_y()
         .child(text(tr!("Fix:", "Düzelt:")).font(type_::LABEL).color(t.text_secondary))

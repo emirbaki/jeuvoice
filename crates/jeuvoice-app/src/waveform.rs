@@ -60,6 +60,9 @@ pub fn waveform<S: 'static>(
     lens: impl Fn(&mut S) -> &mut WaveView + Clone + 'static,
     on_word: impl Fn(&mut S, usize) + Clone + 'static,
     on_word_double: impl Fn(&mut S, usize) + Clone + 'static,
+    // Replaces the word row while a word is being edited. The edit line sits
+    // directly under the wave, in the same place as the words.
+    editor: Option<El>,
 ) -> El {
     let width = rune::memo::layout_size(key).map_or(DEFAULT_W, |s| s[0]).max(1.0);
     let spans: Vec<(f64, f64)> = words.iter().map(|w| (w.start, w.end)).collect();
@@ -93,7 +96,10 @@ pub fn waveform<S: 'static>(
             zoom(lens(s), f64::from(e.x / width), f64::from(e.dy), duration);
             true
         });
-    col().w_full().child(wave).child(word_row(v, words, marks, width, on_word, on_word_double))
+    col()
+        .w_full()
+        .child(wave)
+        .child(editor.unwrap_or_else(|| word_row(v, words, marks, width, on_word, on_word_double)))
 }
 
 /// Seconds at local point `x` of a wave `w` points wide, inside the clip.
@@ -393,6 +399,7 @@ mod tests {
             |s: &mut Fixture| &mut s.view,
             |s: &mut Fixture, i| s.picked = Some(i),
             |s: &mut Fixture, i| s.doubled = Some(i),
+            None,
         ))
     }
 
