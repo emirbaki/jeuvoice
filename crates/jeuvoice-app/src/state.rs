@@ -301,6 +301,22 @@ impl App {
         s.setup.start(waker);
     }
 
+    /// Generate from the Voice tab. The engine and Whisper share one card: on a
+    /// small card, drop the loaded Whisper model first and keep the voice
+    /// worker's ASR on the CPU, or the OmniVoice load runs out of memory.
+    pub(crate) fn generate_voice(&mut self) {
+        let small = matches!(
+            &self.gpu,
+            crate::services::gpu::GpuProbe::Nvidia { vram_gb, .. } if *vram_gb < 8.0
+        );
+        let cpu = small || crate::services::engine::whisper_must_use_cpu(&self.transcribe.engine_state());
+        self.transcribe.drop_loaded_model();
+        let store = self.token_store();
+        let settings = self.settings.clone();
+        let (transcribe, voice) = (&mut self.transcribe, &mut self.voice);
+        voice.generate(transcribe.engine_mut(), &settings, store, cpu);
+    }
+
     /// `AppSpec::poll`: takes in what the other threads finished.
     pub fn poll(s: &mut App, _clock: f64, tx: &mut Tx) -> bool {
         let mut changed = s.setup.poll();
@@ -343,11 +359,7 @@ impl App {
         // A Generate pressed while the engine started now continues.
         if s.voice.pending_generate && matches!(s.transcribe.engine_state(), crate::services::engine::EngineState::Ready(_)) {
             s.voice.pending_generate = false;
-            let cpu = crate::services::engine::whisper_must_use_cpu(&s.transcribe.engine_state());
-            let store = s.token_store();
-            let settings = s.settings.clone();
-            let (transcribe, voice) = (&mut s.transcribe, &mut s.voice);
-            voice.generate(transcribe.engine_mut(), &settings, store, cpu);
+            s.generate_voice();
             changed = true;
         }
         changed |= s.voice.follow_playback(s.transcribe.player_mut(), tx);

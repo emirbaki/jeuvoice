@@ -202,16 +202,21 @@ fn main_column(s: &App) -> El {
         .child(button("voice-open", tr!("Open…", "Aç…"), true, |s, tx| s.voice.open_dialog(tx)))
         .child(button("voice-new", tr!("New", "Yeni"), true, |s, _| s.voice.new_project()))
         .child(crate::style::button_kind("voice-generate", tr!("Generate", "Üret"), crate::style::ButtonKind::Main, v.project.is_some() || !v.script_field.text.trim().is_empty(), |s, _| {
-            let cpu = crate::services::engine::whisper_must_use_cpu(&s.transcribe.engine_state());
-            let store = s.token_store();
-            let settings = s.settings.clone();
-            let (transcribe, voice) = (&mut s.transcribe, &mut s.voice);
-            voice.generate(transcribe.engine_mut(), &settings, store, cpu)
+            s.generate_voice()
         }))
         .child(button("voice-export-wav", tr!("Export WAV", "WAV dışa aktar"), v.timeline.is_some(), |s, tx| s.voice.export_wav(tx)))
         .child(button("voice-export-srt", tr!("Export SRT", "SRT dışa aktar"), v.timeline.is_some(), |s, tx| s.voice.export_srt(tx)));
 
-    let mut main = col().grow(1.0).min_w(0.0).h_full().gap(space::S2).child(header).child(name_row(s));
+    let mut main = col()
+        .key("voice-main")
+        .grow(1.0)
+        .min_w(0.0)
+        .h_full()
+        .min_h(0.0)
+        .gap(space::S2)
+        .scroll(ScrollSpec { stick_bottom: false })
+        .child(header)
+        .child(name_row(s));
     match (v.timeline.as_ref(), v.project.as_ref()) {
         (Some(tl), Some(_)) => {
             main = main.child(wave_card(s, tl));

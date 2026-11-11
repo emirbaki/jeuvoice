@@ -1009,7 +1009,7 @@ fn run_generate(
         Ok(job) => job,
         Err(e) => return fail(e.to_string()),
     };
-    if !wait_job(&api, &load) {
+    if !wait_job(&api, &load, Duration::from_secs(600)) {
         return fail(crate::i18n::tr!("The voice model could not be loaded.", "Ses modeli yüklenemedi.").into());
     }
     let render = project.render.clone();
@@ -1037,7 +1037,7 @@ fn run_generate(
         Ok(job) => job,
         Err(e) => return fail(e.to_string()),
     };
-    if !wait_job(&api, &render_job) {
+    if !wait_job(&api, &render_job, Duration::from_secs(1800)) {
         return fail(crate::i18n::tr!("The render failed. Try again.", "Seslendirme başarısız oldu. Tekrar deneyin.").into());
     }
     let result = match api.job(&render_job).ok().and_then(|s| s.render_result()) {
@@ -1141,7 +1141,7 @@ fn run_retakes(
         Ok(job) => job,
         Err(e) => return fail(e.to_string()),
     };
-    if !wait_job(&api, &load) {
+    if !wait_job(&api, &load, Duration::from_secs(600)) {
         return fail(crate::i18n::tr!("The voice model could not be loaded.", "Ses modeli yüklenemedi.").into());
     }
     let audio_dir = projects_dir.join(&project.name).join(TAKE_PREFIX);
@@ -1181,7 +1181,7 @@ fn run_retakes(
                 Ok(job) => job,
                 Err(e) => return fail(e.to_string()),
             };
-            if !wait_job(&api, &job) {
+            if !wait_job(&api, &job, Duration::from_secs(1800)) {
                 return fail(crate::i18n::tr!("The render failed. Try again.", "Seslendirme başarısız oldu. Tekrar deneyin.").into());
             }
             let result = match api.job(&job).ok().and_then(|s| s.render_result()) {
@@ -1250,16 +1250,31 @@ fn run_retakes(
 }
 
 /// Wait for an engine job. `false` when it fails or is cancelled.
-fn wait_job(api: &Arc<dyn EngineApi>, job: &JobId) -> bool {
+fn wait_job(api: &Arc<dyn EngineApi>, job: &JobId, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    let mut read_errors = 0;
     loop {
         match api.job(job) {
-            Ok(s) => match s.state {
-                jeuvoice_engine_client::JobState::Done => return true,
-                jeuvoice_engine_client::JobState::Failed | jeuvoice_engine_client::JobState::Cancelled => return false,
-                _ => std::thread::sleep(Duration::from_millis(500)),
-            },
-            Err(_) => return false,
+            Ok(s) => {
+                read_errors = 0;
+                match s.state {
+                    jeuvoice_engine_client::JobState::Done => return true,
+                    jeuvoice_engine_client::JobState::Failed | jeuvoice_engine_client::JobState::Cancelled => return false,
+                    _ => {}
+                }
+            }
+            // A truncated read must not fail a minutes-long job.
+            Err(_) => {
+                read_errors += 1;
+                if read_errors >= 5 {
+                    return false;
+                }
+            }
         }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(500));
     }
 }
 
