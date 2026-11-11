@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use jeuvoice_core::audio::{Audio, resample};
 
-const NO_DEVICE: &str = "No sound output found. Connect speakers or headphones.";
+fn no_device() -> &'static str {
+    crate::i18n::tr!("No sound output found. Connect speakers or headphones.", "Ses çıkışı bulunamadı. Hoparlör veya kulaklık bağlayın.")
+}
 
 /// Pure position logic. `len` and `pos` count samples at the device rate `rate`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -73,10 +75,10 @@ pub struct Playback {
 
 impl Playback {
     pub fn new() -> Result<Self, String> {
-        let device = cpal::default_host().default_output_device().ok_or(NO_DEVICE)?;
+        let device = cpal::default_host().default_output_device().ok_or(no_device())?;
         let config = device
             .default_output_config()
-            .map_err(|e| format!("Could not read the sound output settings: {e}"))?;
+            .map_err(|e| crate::i18n::trf!("Could not read the sound output settings: {e}", "Ses çıkışı ayarları okunamadı: {e}"))?;
         let rate = config.sample_rate().0;
         let channels = config.channels() as usize;
         let format = config.sample_format();
@@ -116,12 +118,12 @@ impl Playback {
                     None,
                 )
             }
-            _ => return Err("This sound output is not supported.".to_string()),
+            _ => return Err(crate::i18n::tr!("This sound output is not supported.", "Bu ses çıkışı desteklenmiyor.").to_string()),
         }
-        .map_err(|e| format!("Could not open the sound output: {e}"))?;
+        .map_err(|e| crate::i18n::trf!("Could not open the sound output: {e}", "Ses çıkışı açılamadı: {e}"))?;
         stream
             .play()
-            .map_err(|e| format!("Could not start the sound output: {e}"))?;
+            .map_err(|e| crate::i18n::trf!("Could not start the sound output: {e}", "Ses çıkışı başlatılamadı: {e}"))?;
 
         Ok(Self { _stream: stream, rate, state, mirror })
     }

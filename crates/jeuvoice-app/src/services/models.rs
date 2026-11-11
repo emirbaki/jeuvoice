@@ -24,18 +24,22 @@ pub struct ResolveCtx<'a> {
 #[allow(dead_code)]
 pub fn resolve_adapter(adapter: &AdapterRef, settings: &Settings, ctx: &ResolveCtx) -> Result<PathBuf, String> {
     if let Some(dir) = &settings.local_adapter_dir {
-        return check_dir(dir, "The adapter folder is missing. Pick another folder in Settings.");
+        return check_dir(dir, crate::i18n::tr!("The adapter folder is missing. Pick another folder in Settings.", "Adaptör klasörü yok. Ayarlar'da başka bir klasör seçin."));
     }
     match adapter {
         AdapterRef::Local { dir } => {
             let dir = PathBuf::from(dir);
-            check_dir(&dir, "The adapter folder is missing. Pick another folder in Settings.")
+            check_dir(&dir, crate::i18n::tr!("The adapter folder is missing. Pick another folder in Settings.", "Adaptör klasörü yok. Ayarlar'da başka bir klasör seçin."))
         }
-        AdapterRef::None => Err("This preset needs no downloaded model.".into()),
+        AdapterRef::None => Err(crate::i18n::tr!("This preset needs no downloaded model.", "Bu hazır ayar indirilmiş bir model gerektirmez.").into()),
         AdapterRef::HfRepo { repo, subfolder } => {
             let token = ctx.store.get(HF_TOKEN_KEY).filter(|t| !t.trim().is_empty());
             let Some(api) = &ctx.engine else {
-                return Err("The voice engine is not ready. Restart the engine and try again.".into());
+                return Err(crate::i18n::tr!(
+                    "The voice engine is not ready. Restart the engine and try again.",
+                    "Ses motoru hazır değil. Motoru yeniden başlatıp tekrar deneyin."
+                )
+                .into());
             };
             api.fetch_adapter(repo, Some(subfolder), token.as_deref()).map_err(|e| e.to_string())
         }

@@ -4,12 +4,23 @@
 use rune::tok::{space, type_};
 use rune::{El, col, el, row, text, text_input};
 
+use crate::i18n::{Lang, tr, trf};
 use crate::services::engine::EngineState;
 use crate::state::App;
 use crate::transcribe::TranscribeTab;
 use crate::transcribe_tab::{button, red, section};
 
-const LANGUAGES: [(&str, &str, &str); 3] = [("lang-tr", "tr", "Turkish"), ("lang-en", "en", "English"), ("lang-auto", "auto", "Detect")];
+/// The Whisper languages: key, code and name.
+fn languages() -> [(&'static str, &'static str, &'static str); 3] {
+    [
+        ("lang-tr", "tr", tr!("Turkish", "Türkçe")),
+        ("lang-en", "en", tr!("English", "İngilizce")),
+        ("lang-auto", "auto", tr!("Detect", "Algıla")),
+    ]
+}
+
+/// The UI languages. Each name is in its own language.
+const UI_LANGUAGES: [(&str, Lang, &str); 2] = [("ui-lang-en", Lang::En, "English"), ("ui-lang-tr", Lang::Tr, "Türkçe")];
 const BAR_W: f32 = 320.0;
 
 /// A Settings tile: a glass card with a title and its blocks.
@@ -30,48 +41,52 @@ pub fn view(s: &App) -> El {
     let speech = col()
         .w_full()
         .gap(space::S2)
-        .child(section("Speech language"))
+        .child(section(tr!("Speech language", "Konuşma dili")))
         .child(language_picker(&s.settings.whisper_language))
         .child(
-            text("The language of the voice in your files. Detect finds the language of each file.")
+            text(tr!(
+                "The language of the voice in your files. Detect finds the language of each file.",
+                "Dosyalarınızdaki sesin dili. Algıla, her dosyanın dilini bulur."
+            ))
                 .font(type_::LABEL)
                 .color(t.text_secondary)
                 .wrap(),
         )
-        .child(section("Speech model"))
+        .child(section(tr!("Speech model", "Konuşma modeli")))
         .child(model_block(&s.transcribe));
     let gpu = col().w_full().gap(space::S2).child(gpu_switch(s.settings.use_gpu)).child(gpu_warning(&s.gpu));
     let engine = col()
         .w_full()
         .gap(space::S2)
         .child(engine_block(s))
-        .child(section("Voice model files"))
+        .child(section(tr!("Voice model files", "Ses modeli dosyaları")))
         .child(adapter_block(s));
     let accounts = col()
         .w_full()
         .gap(space::S2)
-        .child(section("Hugging Face token"))
+        .child(section(tr!("Hugging Face token", "Hugging Face tokeni")))
         .child(token_block(s))
-        .child(section("Kaggle profiles"))
+        .child(section(tr!("Kaggle profiles", "Kaggle profilleri")))
         .child(profiles_block(s));
     let left = col()
         .grow(1.0)
         .min_w(0.0)
         .gap(space::S3)
-        .child(tile("settings-tile-speech", "Speech", speech))
-        .child(tile("settings-tile-gpu", "Graphics card", gpu));
+        .child(tile("settings-tile-ui", tr!("Interface language", "Arayüz dili"), ui_language_picker(&s.settings.ui_language)))
+        .child(tile("settings-tile-speech", tr!("Speech", "Konuşma"), speech))
+        .child(tile("settings-tile-gpu", tr!("Graphics card", "Ekran kartı"), gpu));
     let right = col()
         .grow(1.0)
         .min_w(0.0)
         .gap(space::S3)
-        .child(tile("settings-tile-engine", "Voice engine", engine))
-        .child(tile("settings-tile-accounts", "Accounts", accounts));
+        .child(tile("settings-tile-engine", tr!("Voice engine", "Ses motoru"), engine))
+        .child(tile("settings-tile-accounts", tr!("Accounts", "Hesaplar"), accounts));
     let mut page = col()
         .w_full()
         .max_w(1040.0)
         .gap(space::S3)
         .padding(space::S3)
-        .child(text("Settings").font(type_::TITLE).color(t.text))
+        .child(text(tr!("Settings", "Ayarlar")).font(type_::TITLE).color(t.text))
         .child(row().w_full().gap(space::S3).child(left).child(right));
     if let Some(e) = &s.settings_error {
         page = page.child(text(e.as_str()).key("settings-error").font(type_::LABEL).color(red()).wrap());
@@ -84,11 +99,12 @@ pub fn view(s: &App) -> El {
         .child(row().w_full().min_h(0.0).justify_center().child(page))
 }
 
-fn language_picker(current: &str) -> El {
+/// A row of radio pills. `on_pick` runs with the index of the pressed pill.
+fn radio_row(pills: &[(&'static str, &'static str, bool)], on_pick: impl Fn(&mut App, usize) + Clone + 'static) -> El {
     let t = crate::style::theme();
     let mut r = row().gap(space::S1);
-    for (key, code, name) in LANGUAGES {
-        let on = current == code;
+    for (i, &(key, name, on)) in pills.iter().enumerate() {
+        let pick = on_pick.clone();
         r = r.child(
             el().key(key)
                 .role("radio")
@@ -98,12 +114,26 @@ fn language_picker(current: &str) -> El {
                 .padding(space::S2)
                 .radius(10.0)
                 .fill(if on { crate::style::palette().accent.alpha(0.22) } else { t.control_track })
-                .on_press(move |s: &mut App| s.set_language(code))
+                .on_press(move |s: &mut App| pick(s, i))
                 .child(text(name).font(type_::LABEL).color(t.text)),
         );
     }
     r
 }
+
+/// The UI language: English or Turkish. The next frame shows the new texts.
+fn ui_language_picker(current: &str) -> El {
+    let current = Lang::from_code(current);
+    let pills: Vec<_> = UI_LANGUAGES.iter().map(|&(key, lang, name)| (key, name, lang == current)).collect();
+    radio_row(&pills, |s, i| s.set_ui_language(UI_LANGUAGES[i].1.code()))
+}
+
+fn language_picker(current: &str) -> El {
+    let langs = languages();
+    let pills: Vec<_> = langs.iter().map(|&(key, code, name)| (key, name, current == code)).collect();
+    radio_row(&pills, move |s, i| s.set_language(langs[i].1))
+}
+
 
 fn gpu_switch(on: bool) -> El {
     let t = crate::style::theme();
@@ -112,7 +142,7 @@ fn gpu_switch(on: bool) -> El {
         .key("use-gpu")
         .role("switch")
         .checked(on)
-        .label("Use GPU")
+        .label(tr!("Use GPU", "GPU kullan"))
         .focusable(true)
         .w(44.0)
         .h(24.0)
@@ -124,7 +154,7 @@ fn gpu_switch(on: bool) -> El {
         .center_y()
         .gap(space::S2)
         .child(track.on_press(move |s: &mut App| s.set_use_gpu(!on)).child(knob))
-        .child(text("Use GPU").font(type_::BODY).color(t.text))
+        .child(text(tr!("Use GPU", "GPU kullan")).font(type_::BODY).color(t.text))
 }
 
 /// The CPU mode warning, or an empty element when a card was found.
@@ -132,16 +162,16 @@ fn gpu_warning(gpu: &crate::services::gpu::GpuProbe) -> El {
     if *gpu != crate::services::gpu::GpuProbe::Missing {
         return el();
     }
-    text(crate::services::gpu::NO_GPU_SETTINGS).key("gpu-warning").font(type_::BODY).color(red()).wrap()
+    text(crate::services::gpu::no_gpu_settings()).key("gpu-warning").font(type_::BODY).color(red()).wrap()
 }
 
 /// What the status line says about the model.
 pub fn model_status_text(s: &TranscribeTab) -> &'static str {
     match (s.model.ready, s.model.on_gpu) {
-        (false, _) => "Not downloaded",
-        (true, Some(true)) => "Ready (on GPU)",
-        (true, Some(false)) => "Ready (on CPU)",
-        (true, None) => "Ready",
+        (false, _) => tr!("Not downloaded", "İndirilmedi"),
+        (true, Some(true)) => tr!("Ready (on GPU)", "Hazır (GPU'da)"),
+        (true, Some(false)) => tr!("Ready (on CPU)", "Hazır (CPU'da)"),
+        (true, None) => tr!("Ready", "Hazır"),
     }
 }
 
@@ -149,11 +179,13 @@ fn model_block(s: &TranscribeTab) -> El {
     let t = crate::style::theme();
     let mut block = col().gap(space::S2).child(text(model_status_text(s)).key("model-status").font(type_::BODY).color(t.text));
     if !s.model.ready {
-        block = block.child(row().child(button("download-model", "Download", !s.busy(), |s, _| s.transcribe.start_model_download())));
+        block = block.child(row().child(button("download-model", tr!("Download", "İndir"), !s.busy(), |s, _| s.transcribe.start_model_download())));
     }
     if let Some(pct) = s.download {
         let done = pct.map_or(0.0, |p| BAR_W * f32::from(p) / 100.0);
-        let label = pct.map_or("Downloading the speech model…".to_string(), |p| format!("Downloading the speech model… {p}%"));
+        let label = pct.map_or(tr!("Downloading the speech model…", "Konuşma modeli indiriliyor…").to_string(), |p| {
+            trf!("Downloading the speech model… {p}%", "Konuşma modeli indiriliyor… %{p}")
+        });
         block = block
             .child(
                 el().key("model-progress")
@@ -183,15 +215,18 @@ fn token_block(s: &App) -> El {
         .padding(space::S2)
         .radius(10.0)
         .fill(t.card)
-        .placeholder("Paste the token, then Save", t.text_secondary)
+        .placeholder(tr!("Paste the token, then Save", "Tokeni yapıştırın, sonra kaydedin"), t.text_secondary)
         .on_edit(|s: &mut App| &mut s.token_field)
         .on_submit(|s: &mut App, _| s.save_hf_token());
     let mut block = col()
         .gap(space::S2)
         .child(field)
-        .child(button("save-token", "Save token", true, |s, _| s.save_hf_token()))
+        .child(button("save-token", tr!("Save token", "Tokeni kaydet"), true, |s, _| s.save_hf_token()))
         .child(
-            text("Opens private voice models. Find it in your Hugging Face account settings.")
+            text(tr!(
+                "Opens private voice models. Find it in your Hugging Face account settings.",
+                "Özel ses modellerini açar. Hugging Face hesap ayarlarınızda bulunur."
+            ))
                 .font(type_::LABEL)
                 .color(t.text_secondary)
                 .wrap(),
@@ -217,25 +252,35 @@ fn profiles_block(s: &App) -> El {
             .fill(if on { crate::style::palette().accent.alpha(0.18) } else { t.card })
             .child(text(name.as_str()).key(format!("profile-{name}")).font(type_::BODY).color(t.text).grow(1.0).min_w(0.0));
         if on {
-            card = card.child(text("Active").font(type_::LABEL).color(t.text));
+            card = card.child(text(tr!("Active", "Etkin")).font(type_::LABEL).color(t.text));
         } else {
             let select = name.clone();
-            card = card.child(button(&format!("profile-select-{name}"), "Use", true, move |s: &mut App, _| {
+            card = card.child(button(&format!("profile-select-{name}"), tr!("Use", "Kullan"), true, move |s: &mut App, _| {
                 s.select_kaggle_profile(&select)
             }));
         }
         let delete = name.clone();
-        card = card.child(button(&format!("profile-delete-{name}"), "Remove", true, move |s: &mut App, _| {
+        card = card.child(button(&format!("profile-delete-{name}"), tr!("Remove", "Kaldır"), true, move |s: &mut App, _| {
             s.delete_kaggle_profile(&delete)
         }));
         block = block.child(card);
     }
-    block = block.child(profile_field("profile-name", "Profile name (work, home…)", &s.profile_name_field, |s| &mut s.profile_name_field));
-    block = block.child(profile_field("profile-user", "Kaggle user name", &s.profile_user_field, |s| &mut s.profile_user_field));
-    block = block.child(profile_field("profile-key", "Kaggle key", &s.profile_key_field, |s| &mut s.profile_key_field));
-    block = block.child(button("profile-save", "Save profile", true, |s, _| s.add_kaggle_profile()));
+    block = block.child(profile_field(
+        "profile-name",
+        tr!("Profile name (work, home…)", "Profil adı (iş, ev…)"),
+        &s.profile_name_field,
+        |s| &mut s.profile_name_field,
+    ));
+    block = block.child(profile_field("profile-user", tr!("Kaggle user name", "Kaggle kullanıcı adı"), &s.profile_user_field, |s| {
+        &mut s.profile_user_field
+    }));
+    block = block.child(profile_field("profile-key", tr!("Kaggle key", "Kaggle anahtarı"), &s.profile_key_field, |s| &mut s.profile_key_field));
+    block = block.child(button("profile-save", tr!("Save profile", "Profili kaydet"), true, |s, _| s.add_kaggle_profile()));
     block = block.child(
-        text("One key per Kaggle account. The Train tab uses the active profile.")
+        text(tr!(
+            "One key per Kaggle account. The Train tab uses the active profile.",
+            "Her Kaggle hesabı için bir anahtar. Eğitim sekmesi etkin profili kullanır."
+        ))
             .font(type_::LABEL)
             .color(t.text_secondary)
             .wrap(),
@@ -269,10 +314,13 @@ fn adapter_block(s: &App) -> El {
         .padding(space::S2)
         .radius(10.0)
         .fill(t.card)
-        .placeholder("A checkpoint folder, empty for the preset's own model", t.text_secondary)
+        .placeholder(
+            tr!("A checkpoint folder, empty for the preset's own model", "Bir kontrol noktası klasörü, hazır ayarın kendi modeli için boş"),
+            t.text_secondary,
+        )
         .on_edit(|s: &mut App| &mut s.adapter_field)
         .on_submit(|s: &mut App, _| s.save_adapter_dir());
-    col().gap(space::S2).child(field).child(button("save-adapter", "Save folder", true, |s, _| s.save_adapter_dir()))
+    col().gap(space::S2).child(field).child(button("save-adapter", tr!("Save folder", "Klasörü kaydet"), true, |s, _| s.save_adapter_dir()))
 }
 
 /// The voice engine state with a restart button.
@@ -281,10 +329,10 @@ fn engine_block(app: &App) -> El {
     let state = app.transcribe.engine_state();
     let repair = matches!(&state, EngineState::Failed(e) if crate::version::is_version_mismatch(e));
     let (status, bad) = match state {
-        EngineState::Off => ("Voice engine: off".to_string(), false),
-        EngineState::Starting => ("Voice engine: starting…".to_string(), false),
-        EngineState::Ready(h) => (format!("Voice engine: ready ({})", h.device), false),
-        EngineState::Failed(e) => (format!("Voice engine: {e}"), true),
+        EngineState::Off => (tr!("Voice engine: off", "Ses motoru: kapalı").to_string(), false),
+        EngineState::Starting => (tr!("Voice engine: starting…", "Ses motoru: başlıyor…").to_string(), false),
+        EngineState::Ready(h) => (tr!("Voice engine: ready ({})", "Ses motoru: hazır ({})", h.device), false),
+        EngineState::Failed(e) => (trf!("Voice engine: {e}", "Ses motoru: {e}"), true),
     };
     col()
         .gap(space::S2)
@@ -296,12 +344,12 @@ fn engine_block(app: &App) -> El {
                 .wrap(),
         )
         .child(if repair {
-            button("repair-engine", "Repair", true, |s, _| {
+            button("repair-engine", tr!("Repair", "Onar"), true, |s, _| {
                 s.setup.repair();
                 s.tab = crate::state::Tab::Voice;
             })
         } else {
-            button("restart-engine", "Restart engine", true, |s, _| s.transcribe.restart_engine())
+            button("restart-engine", tr!("Restart engine", "Motoru yeniden başlat"), true, |s, _| s.transcribe.restart_engine())
         })
 }
 

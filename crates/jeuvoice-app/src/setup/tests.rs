@@ -316,6 +316,17 @@ fn the_setup_card_is_centered() {
 #[test]
 #[ignore]
 fn snap_setup() {
+    snap_setup_to("setup", crate::view::view);
+}
+
+/// The same in Turkish: `target/setup-tr.png`.
+#[test]
+#[ignore]
+fn snap_setup_tr() {
+    snap_setup_to("setup-tr", crate::i18n::turkish_view);
+}
+
+fn snap_setup_to(name: &str, view: fn(&crate::state::App, &mut rune::Cx<crate::state::App>) -> rune::El) {
     use std::sync::Arc;
 
     use jeuvoice_whisper::FakeTranscriber;
@@ -344,8 +355,8 @@ fn snap_setup() {
         });
         app
     }
-    let out = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/setup.png");
-    let spec = rune::AppSpec::new("Setup", (1100.0, 720.0), fixture, crate::view::view);
+    let out = format!("{}/../../target/{name}.png", env!("CARGO_MANIFEST_DIR"));
+    let spec = rune::AppSpec::new("Setup", (1100.0, 720.0), fixture, view);
     rune::App::new(spec).args(["--snap".to_string(), out.to_string()]).run();
     println!("wrote {out}");
 }

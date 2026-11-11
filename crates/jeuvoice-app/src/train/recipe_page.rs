@@ -8,6 +8,7 @@ use jeuvoice_core::train::Recipe;
 use rune::tok::{space, type_};
 use rune::{El, col, row, text};
 
+use crate::i18n::{tr, trf};
 use crate::transcribe_tab::{button, section};
 
 /// The shipped tr2 recipe. Panics only when the asset itself breaks.
@@ -20,7 +21,7 @@ pub fn copy_recipe() -> Result<(), String> {
     let text = include_str!("../../../../assets/recipes/tr2.json");
     arboard::Clipboard::new()
         .and_then(|mut cb| cb.set_text(text))
-        .map_err(|_| "The clipboard could not be written.".to_string())
+        .map_err(|_| tr!("The clipboard could not be written.", "Pano yazılamadı.").to_string())
 }
 
 pub fn view(recipe: &Recipe) -> El {
@@ -30,14 +31,14 @@ pub fn view(recipe: &Recipe) -> El {
         row()
             .w_full()
             .gap(space::S2)
-            .child(text(format!("How {} was made", recipe.name).as_str()).font(type_::TITLE).color(t.text).grow(1.0).min_w(0.0))
-            .child(button("train-recipe-close", "Close", true, |s, _| s.train.show_recipe = false)),
+            .child(text(tr!("How {} was made", "{} nasıl yapıldı", recipe.name).as_str()).font(type_::TITLE).color(t.text).grow(1.0).min_w(0.0))
+            .child(button("train-recipe-close", tr!("Close", "Kapat"), true, |s, _| s.train.show_recipe = false)),
     );
     page = page.child(
         text(recipe.notes.as_str()).key("train-recipe-notes").font(type_::BODY).color(t.text).wrap(),
     );
     page = page.child(
-        text(format!("Base model: {}", recipe.base_model).as_str())
+        text(tr!("Base model: {}", "Temel model: {}", recipe.base_model).as_str())
             .key("train-recipe-base")
             .font(type_::LABEL)
             .color(t.text_secondary)
@@ -46,8 +47,9 @@ pub fn view(recipe: &Recipe) -> El {
     let st = &recipe.settings;
     page = page.child(
         text(
-            format!(
+            tr!(
                 "Steps {} · LoRA r {} alpha {} · batch {} · save every {} · lr {}",
+                "Adım {} · LoRA r {} alpha {} · toplu {} · her {} adımda kayıt · lr {}",
                 st.steps, st.lora_r, st.lora_alpha, st.batch_tokens, st.save_steps, st.learning_rate
             )
             .as_str(),
@@ -68,7 +70,7 @@ pub fn view(recipe: &Recipe) -> El {
         );
         if let Some(license) = &src.license {
             card = card.child(
-                text(format!("License: {license}").as_str())
+                text(trf!("License: {license}", "Lisans: {license}").as_str())
                     .key(format!("train-recipe-license-{i}"))
                     .font(type_::LABEL)
                     .color(t.text_secondary),
@@ -79,17 +81,17 @@ pub fn view(recipe: &Recipe) -> El {
         }
         list = list.child(card);
     }
-    page = page.child(section("Sources")).child(list);
+    page = page.child(section(tr!("Sources", "Kaynaklar"))).child(list);
     page = page.child(
         row()
             .gap(space::S2)
-            .child(button("train-recipe-copy", "Copy recipe", true, |s, _| {
+            .child(button("train-recipe-copy", tr!("Copy recipe", "Tarifi kopyala"), true, |s, _| {
                 match copy_recipe() {
-                    Ok(()) => s.train.notice = Some("Copied the recipe.".into()),
+                    Ok(()) => s.train.notice = Some(tr!("Copied the recipe.", "Tarif kopyalandı.").into()),
                     Err(e) => s.train.notice = Some(e),
                 }
             }))
-            .child(button("train-like-tr2", "Train like tr2", true, |s, _| s.train.train_like_tr2())),
+            .child(button("train-like-tr2", tr!("Train like tr2", "tr2 gibi eğit"), true, |s, _| s.train.train_like_tr2())),
     );
     col()
         .w_full()
@@ -101,4 +103,6 @@ pub fn view(recipe: &Recipe) -> El {
 }
 
 /// The source rows of unpointed local recipe sources say this.
-pub const LOCAL_PROMPT: &str = "Add this folder from your own disk.";
+pub fn local_prompt() -> &'static str {
+    tr!("Add this folder from your own disk.", "Bu klasörü kendi diskinizden ekleyin.")
+}

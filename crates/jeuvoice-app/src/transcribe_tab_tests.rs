@@ -406,7 +406,18 @@ fn fixture() -> App {
 #[test]
 #[ignore]
 fn snap_transcribe() {
-    let out = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/transcribe.png");
+    snap_transcribe_to("transcribe", view);
+}
+
+/// The same in Turkish: `target/transcribe-tr.png`.
+#[test]
+#[ignore]
+fn snap_transcribe_tr() {
+    snap_transcribe_to("transcribe-tr", crate::i18n::turkish_view);
+}
+
+fn snap_transcribe_to(name: &str, view: fn(&App, &mut rune::Cx<App>) -> rune::El) {
+    let out = format!("{}/../../target/{name}.png", env!("CARGO_MANIFEST_DIR"));
     let spec = rune::AppSpec::new("Transcribe", (1100.0, 720.0), fixture, view);
     rune::App::new(spec).args(["--snap".to_string(), out.to_string()]).run();
     println!("wrote {out}");

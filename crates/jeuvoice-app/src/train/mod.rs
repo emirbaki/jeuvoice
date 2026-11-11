@@ -35,10 +35,10 @@ pub fn view(s: &App) -> El {
         .w_full()
         .center_y()
         .gap(space::S2)
-        .child(text("Training").font(type_::TITLE).color(p.text).grow(1.0).min_w(0.0))
+        .child(text(crate::i18n::tr!("Training", "Eğitim")).font(type_::TITLE).color(p.text).grow(1.0).min_w(0.0))
         .child(crate::style::button_kind(
             "train-recipe-open",
-            "How tr2 was made",
+            crate::i18n::tr!("How tr2 was made", "tr2 nasıl yapıldı"),
             crate::style::ButtonKind::Quiet,
             true,
             |s, _| s.train.show_recipe = true,

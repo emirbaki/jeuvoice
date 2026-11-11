@@ -7,6 +7,7 @@ use rune::tok::{space, type_};
 use rune::{El, col, row, text, text_input};
 
 use crate::services::engine::EngineState;
+use crate::i18n::{tr, trf};
 use crate::state::App;
 use crate::train::state::{TrainData, TrainTarget};
 use crate::transcribe_tab::{button, section};
@@ -33,9 +34,9 @@ pub fn this_pc(engine: &EngineState) -> PcOffer {
     if h.device == "cuda" && gb >= 12.0 {
         PcOffer::Ready { name }
     } else if h.device == "cuda" {
-        PcOffer::TooSmall { reason: format!("Your graphics card has {gb:.0} GB. Training needs at least 12 GB.") }
+        PcOffer::TooSmall { reason: trf!("Your graphics card has {gb:.0} GB. Training needs at least 12 GB.", "Ekran kartınızda {gb:.0} GB var. Eğitim en az 12 GB gerektirir.") }
     } else {
-        PcOffer::TooSmall { reason: "Training needs a CUDA card with at least 12 GB.".into() }
+        PcOffer::TooSmall { reason: tr!("Training needs a CUDA card with at least 12 GB.", "Eğitim en az 12 GB'lık bir CUDA kartı gerektirir.").into() }
     }
 }
 
@@ -43,15 +44,15 @@ pub fn this_pc(engine: &EngineState) -> PcOffer {
 pub fn kaggle_estimate(steps: u32) -> String {
     let hours = steps as f32 / 1000.0;
     let when = if hours < 1.0 {
-        "under an hour".into()
+        tr!("under an hour", "bir saatten az").into()
     } else if (hours - 1.0).abs() < f32::EPSILON {
-        "about 1 hour".into()
+        tr!("about 1 hour", "yaklaşık 1 saat").into()
     } else if hours.fract() == 0.0 {
-        format!("about {} hours", hours as u32)
+        tr!("about {} hours", "yaklaşık {} saat", hours as u32)
     } else {
-        format!("about {hours:.1} hours")
+        trf!("about {hours:.1} hours", "yaklaşık {hours:.1} saat")
     };
-    format!("{when} for {} steps", comma_steps(steps))
+    tr!("{when} for {} steps", "{} adım için {when}", comma_steps(steps))
 }
 
 fn comma_steps(steps: u32) -> String {
@@ -67,7 +68,7 @@ fn comma_steps(steps: u32) -> String {
 }
 
 pub fn view(s: &TrainData, engine: &EngineState) -> El {
-    col().w_full().gap(space::S2).child(section("Where to train")).child(pc_card(s, engine)).child(kaggle_card(s)).child(runpod_card())
+    col().w_full().gap(space::S2).child(section(tr!("Where to train", "Eğitim yeri"))).child(pc_card(s, engine)).child(kaggle_card(s)).child(runpod_card())
 }
 
 fn pc_card(s: &TrainData, engine: &EngineState) -> El {
@@ -75,10 +76,10 @@ fn pc_card(s: &TrainData, engine: &EngineState) -> El {
     let (sub, enabled) = match this_pc(engine) {
         PcOffer::Ready { name } => (name, true),
         PcOffer::TooSmall { reason } => (reason.clone(), false),
-        PcOffer::Unknown => ("The voice engine is off. Open the Voice tab once to start it.".into(), false),
+        PcOffer::Unknown => (tr!("The voice engine is off. Open the Voice tab once to start it.", "Ses motoru kapalı. Başlatmak için Ses sekmesini bir kez açın.").into(), false),
     };
     card(
-        "This PC",
+        tr!("This PC", "Bu bilgisayar"),
         &sub,
         "train-pc",
         "train-pc-status",
@@ -93,7 +94,7 @@ fn kaggle_card(s: &TrainData) -> El {
     let t = crate::style::theme();
     let on = s.project.target == TrainTarget::Kaggle;
     let est = kaggle_estimate(s.project.settings.steps);
-    let sub = format!("T4 ×2 · free · {est}");
+    let sub = trf!("T4 ×2 · free · {est}", "T4 ×2 · ücretsiz · {est}");
     let mut inner = col().w_full().gap(space::S1).child(text("Kaggle").font(type_::BODY).color(t.text));
     inner = inner.child(text(sub.as_str()).key("train-kaggle-est").font(type_::LABEL).color(t.text_secondary).wrap());
     match &s.kaggle_user {
@@ -103,18 +104,18 @@ fn kaggle_card(s: &TrainData) -> El {
             );
             inner = inner.child(
                 row().gap(space::S2)
-                    .child(button("train-kaggle-change", "Change", true, |s, _| s.train.show_kaggle_form = true))
-                    .child(button("train-kaggle-forget", "Forget", true, |s, _| s.train.forget_kaggle_key())),
+                    .child(button("train-kaggle-change", tr!("Change", "Değiştir"), true, |s, _| s.train.show_kaggle_form = true))
+                    .child(button("train-kaggle-forget", tr!("Forget", "Unut"), true, |s, _| s.train.forget_kaggle_key())),
             );
         }
         None => {
-            inner = inner.child(button("train-kaggle-add", "Add Kaggle key", true, |s, _| s.train.show_kaggle_form = true));
+            inner = inner.child(button("train-kaggle-add", tr!("Add Kaggle key", "Kaggle anahtarı ekle"), true, |s, _| s.train.show_kaggle_form = true));
         }
     }
     if s.show_kaggle_form {
         inner = inner.child(kaggle_form(s));
     }
-    inner = inner.child(button("train-target-kaggle", if on { "Selected" } else { "Use" }, !on, |s, _| {
+    inner = inner.child(button("train-target-kaggle", if on { tr!("Selected", "Seçili") } else { tr!("Use", "Kullan") }, !on, |s, _| {
         s.train.set_target(TrainTarget::Kaggle)
     }));
     card_wrap(inner, "train-kaggle", on, true)
@@ -124,7 +125,7 @@ fn kaggle_form(s: &TrainData) -> El {
     let t = crate::style::theme();
     let mut form = col().w_full().gap(space::S2).padding(space::S2).radius(10.0).fill(t.control_track);
     form = form.child(
-        text("Find the key under your Kaggle account avatar → Settings → API → Create New Token.")
+        text(tr!("Find the key under your Kaggle account avatar → Settings → API → Create New Token.", "Anahtar, Kaggle hesap simgeniz → Settings → API → Create New Token altında bulunur."))
             .font(type_::LABEL)
             .color(t.text_secondary)
             .wrap(),
@@ -137,7 +138,7 @@ fn kaggle_form(s: &TrainData) -> El {
             .padding(space::S2)
             .radius(10.0)
             .fill(t.card)
-            .placeholder("Kaggle user name", t.text_secondary)
+            .placeholder(tr!("Kaggle user name", "Kaggle kullanıcı adı"), t.text_secondary)
             .on_edit(|s: &mut App| &mut s.train.kaggle_user_field),
     );
     form = form.child(
@@ -148,15 +149,15 @@ fn kaggle_form(s: &TrainData) -> El {
             .padding(space::S2)
             .radius(10.0)
             .fill(t.card)
-            .placeholder("Kaggle key", t.text_secondary)
+            .placeholder(tr!("Kaggle key", "Kaggle anahtarı"), t.text_secondary)
             .on_edit(|s: &mut App| &mut s.train.kaggle_key_field),
     );
     form = form.child(
         row()
             .gap(space::S2)
-            .child(button("train-kaggle-save", "Save key", true, |s, _| s.train.save_kaggle_key()))
-            .child(button("train-kaggle-import", "Import kaggle.json", true, |s, tx| s.train.open_kaggle_import(tx)))
-            .child(button("train-kaggle-cancel", "Cancel", true, |s, _| s.train.show_kaggle_form = false)),
+            .child(button("train-kaggle-save", tr!("Save key", "Anahtarı kaydet"), true, |s, _| s.train.save_kaggle_key()))
+            .child(button("train-kaggle-import", tr!("Import kaggle.json", "kaggle.json içe aktar"), true, |s, tx| s.train.open_kaggle_import(tx)))
+            .child(button("train-kaggle-cancel", tr!("Cancel", "İptal"), true, |s, _| s.train.show_kaggle_form = false)),
     );
     form
 }
@@ -165,7 +166,7 @@ fn runpod_card() -> El {
     card_wrap(
         col().w_full().gap(space::S1)
             .child(text("RunPod").font(type_::BODY).color(crate::style::theme().text))
-            .child(text("Coming later").font(type_::LABEL).color(crate::style::theme().text_secondary)),
+            .child(text(tr!("Coming later", "Yakında")).font(type_::LABEL).color(crate::style::theme().text_secondary)),
         "train-runpod",
         false,
         false,
@@ -200,7 +201,7 @@ fn card(
                 .child(text(title).font(type_::BODY).color(t.text))
                 .child(text(sub).key(status_key).font(type_::LABEL).color(t.text_secondary).wrap()),
         )
-        .child(button(button_key, if on { "Selected" } else { "Use" }, enabled && !on, move |s: &mut App, _| {
+        .child(button(button_key, if on { tr!("Selected", "Seçili") } else { tr!("Use", "Kullan") }, enabled && !on, move |s: &mut App, _| {
             s.train.set_target(target)
         }))
 }

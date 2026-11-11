@@ -4,6 +4,7 @@ use jeuvoice_core::train::Source;
 use rune::tok::{space, type_};
 use rune::{El, col, el, row, text, text_input};
 
+use crate::i18n::{tr, trf};
 use crate::state::App;
 use crate::train::state::{SourceStatus, TrainData, fmt_minutes};
 use crate::transcribe_tab::{MEDIA, button, section};
@@ -31,7 +32,7 @@ pub fn view(s: &TrainData) -> El {
         .child(text(s.chips().as_str()).key("train-chips").font(type_::BODY).color(t.text_secondary).wrap())
         .child(drop_zone());
     if s.show_hf { page = page.child(hf_form(s)); } else {
-        page = page.child(button("train-hf-open", "Add Hugging Face dataset…", true, |s, _| s.train.show_hf = true));
+        page = page.child(button("train-hf-open", tr!("Add Hugging Face dataset…", "Hugging Face veri kümesi ekle…"), true, |s, _| s.train.show_hf = true));
     }
     page = page.child(sources_list(s));
     if let Some(name) = &s.review {
@@ -51,8 +52,8 @@ fn drop_zone() -> El {
         .padding(space::S3)
         .radius(10.0)
         .fill(t.card)
-        .child(text("Drop clips or a folder here").font(type_::TITLE).color(t.text))
-        .child(text("WAV, MP3 or video — many at once").font(type_::LABEL).color(t.text_secondary))
+        .child(text(tr!("Drop clips or a folder here", "Klipleri veya bir klasörü buraya bırakın")).font(type_::TITLE).color(t.text))
+        .child(text(tr!("WAV, MP3 or video — many at once", "WAV, MP3 veya video — birden çok dosya")).font(type_::LABEL).color(t.text_secondary))
         .on_drop_files(|s: &mut App, files, _| s.train.add_files(files))
         .accepts_extensions(&MEDIA)
 }
@@ -64,22 +65,22 @@ fn hf_form(s: &TrainData) -> El {
         .padding(space::S2)
         .radius(10.0)
         .fill(crate::style::theme().card)
-        .child(section("Hugging Face dataset"))
-        .child(field("train-hf-repo", "Dataset (link or user/name)", &s.repo_field, |s| &mut s.train.repo_field))
-        .child(field("train-hf-split", "Split", &s.split_field, |s| &mut s.train.split_field))
-        .child(field("train-hf-audio", "Audio column", &s.audio_field, |s| &mut s.train.audio_field))
+        .child(section(tr!("Hugging Face dataset", "Hugging Face veri kümesi")))
+        .child(field("train-hf-repo", tr!("Dataset (link or user/name)", "Veri kümesi (bağlantı veya kullanıcı/ad)"), &s.repo_field, |s| &mut s.train.repo_field))
+        .child(field("train-hf-split", tr!("Split", "Bölüm"), &s.split_field, |s| &mut s.train.split_field))
+        .child(field("train-hf-audio", tr!("Audio column", "Ses sütunu"), &s.audio_field, |s| &mut s.train.audio_field))
         .child(field(
             "train-hf-text",
-            "Text column (empty: Whisper makes the text)",
+            tr!("Text column (empty: Whisper makes the text)", "Metin sütunu (boş: metni Whisper yazar)"),
             &s.text_field,
             |s| &mut s.train.text_field,
         ))
-        .child(field("train-hf-limit", "Use at most N clips (empty: all)", &s.limit_field, |s| &mut s.train.limit_field));
+        .child(field("train-hf-limit", tr!("Use at most N clips (empty: all)", "En fazla N klip kullan (boş: hepsi)"), &s.limit_field, |s| &mut s.train.limit_field));
     form = form.child(
         row()
             .gap(space::S2)
-            .child(button("train-hf-add", "Add dataset", true, |s, _| s.train.add_hf()))
-            .child(button("train-hf-cancel", "Cancel", true, |s, _| s.train.show_hf = false)),
+            .child(button("train-hf-add", tr!("Add dataset", "Veri kümesini ekle"), true, |s, _| s.train.add_hf()))
+            .child(button("train-hf-cancel", tr!("Cancel", "İptal"), true, |s, _| s.train.show_hf = false)),
     );
     form
 }
@@ -102,11 +103,11 @@ fn source_row(s: &TrainData, i: usize, source: &Source) -> El {
     let w_text = fmt_minutes(weighted);
     let unpointed = matches!(&source.kind, jeuvoice_core::train::SourceKind::LocalFolder { dir } if dir.is_empty());
     let status = if unpointed {
-        crate::train::recipe_page::LOCAL_PROMPT.to_string()
+        crate::train::recipe_page::local_prompt().to_string()
     } else {
         match s.status_of(&source.name) {
             SourceStatus::Working(m) => m,
-            SourceStatus::Ready => format!("{} clips · {min_text} min · ×{} = {w_text} min", kept.len(), source.weight),
+            SourceStatus::Ready => tr!("{} clips · {min_text} min · ×{} = {w_text} min", "{} klip · {min_text} dk · ×{} = {w_text} dk", kept.len(), source.weight),
             SourceStatus::Failed(e) => e,
         }
     };
@@ -140,18 +141,18 @@ fn source_row(s: &TrainData, i: usize, source: &Source) -> El {
         }));
     if unpointed {
         let name = source.name.clone();
-        card = card.child(button(&format!("train-pick-{i}"), "Pick folder", true, move |s: &mut App, tx| {
+        card = card.child(button(&format!("train-pick-{i}"), tr!("Pick folder", "Klasör seç"), true, move |s: &mut App, tx| {
             s.train.pick_local_folder(&name, tx)
         }));
     }
-    card = card.child(button(&format!("train-review-{i}"), "Review", !clips.is_empty(), {
+    card = card.child(button(&format!("train-review-{i}"), tr!("Review", "İncele"), !clips.is_empty(), {
         let name = source.name.clone();
         move |s: &mut App, _| {
             s.train.review = Some(name.clone());
             s.train.editing = None;
         }
     }));
-    card.child(button(&format!("train-remove-{i}"), "Remove", true, {
+    card.child(button(&format!("train-remove-{i}"), tr!("Remove", "Kaldır"), true, {
         let name = source.name.clone();
         move |s: &mut App, _| s.train.remove_source(&name)
     }))
@@ -178,8 +179,8 @@ fn review_panel(s: &TrainData, name: &str) -> El {
         );
         head = head.child(text(format!("{:.0} kHz", c.band_khz).as_str()).font(type_::LABEL).color(t.text_secondary));
         let (label, exclude) = match &c.clip.excluded {
-            Some(_) => ("Include", false),
-            None => ("Exclude", true),
+            Some(_) => (tr!("Include", "Dahil et"), false),
+            None => (tr!("Exclude", "Dışarıda bırak"), true),
         };
         head = head.child(button(&format!("train-excl-{id}"), label, true, {
             let id = id.clone();
@@ -197,14 +198,14 @@ fn review_panel(s: &TrainData, name: &str) -> El {
                     .fill(crate::style::theme().control_track)
                     .on_edit(|s: &mut App| &mut s.train.edit_field),
             );
-            card = card.child(button("train-edit-done", "Done", true, |s, _| s.train.editing = None));
+            card = card.child(button("train-edit-done", tr!("Done", "Bitti"), true, |s, _| s.train.editing = None));
         } else {
-            let shown = if c.clip.text.is_empty() { "(no text yet — type it in)" } else { c.clip.text.as_str() };
+            let shown = if c.clip.text.is_empty() { tr!("(no text yet — type it in)", "(henüz metin yok — yazın)") } else { c.clip.text.as_str() };
             card = card.child(
                 el()
                     .key(format!("train-text-{id}"))
                     .role("button")
-                    .label("Edit the text")
+                    .label(tr!("Edit the text", "Metni düzenle"))
                     .focusable(true)
                     .child(text(shown).font(type_::BODY).color(t.text).wrap())
                     .on_press({
@@ -232,8 +233,8 @@ fn review_panel(s: &TrainData, name: &str) -> El {
             row()
                 .w_full()
                 .gap(space::S2)
-                .child(text(format!("Review: {name}").as_str()).font(type_::TITLE).color(t.text).grow(1.0).min_w(0.0))
-                .child(button("train-review-close", "Close", true, |s, _| {
+                .child(text(trf!("Review: {name}", "İnceleme: {name}").as_str()).font(type_::TITLE).color(t.text).grow(1.0).min_w(0.0))
+                .child(button("train-review-close", tr!("Close", "Kapat"), true, |s, _| {
                     s.train.review = None;
                     s.train.editing = None;
                 })),

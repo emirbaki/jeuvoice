@@ -12,6 +12,7 @@ use std::sync::Arc;
 use jeuvoice_core::preset::{AdapterRef, Preset, save_preset};
 use jeuvoice_engine_client::{EngineApi, JobId};
 
+use crate::i18n::{tr, trf};
 use crate::state::{App, Tab};
 use crate::train::run::RunEvent;
 use crate::voice::state::VoiceTab;
@@ -30,21 +31,21 @@ pub fn base_preset(voice: &VoiceTab) -> Preset {
 /// Render [`TEST_TEXT`] with the checkpoint and play it. Keeps the WAV for replay.
 pub fn test_checkpoint(s: &mut App, ck: &str) {
     if s.train.ck_working.is_some() {
-        s.train.notice = Some("A checkpoint test runs already.".into());
+        s.train.notice = Some(tr!("A checkpoint test runs already.", "Bir kontrol noktası denemesi zaten çalışıyor.").into());
         return;
     }
     let Some(run) = s.train.run.clone() else {
-        s.train.notice = Some("Start a run first.".into());
+        s.train.notice = Some(tr!("Start a run first.", "Önce bir çalıştırma başlatın.").into());
         return;
     };
     let Some(api) = s.train.engine_api.clone() else {
-        s.train.notice = Some("The voice engine is off. Open the Voice tab once to start it.".into());
+        s.train.notice = Some(tr!("The voice engine is off. Open the Voice tab once to start it.", "Ses motoru kapalı. Başlatmak için Ses sekmesini bir kez açın.").into());
         return;
     };
     let preset = base_preset(&s.voice);
     let run_dir = s.train.dir.join("runs").join(&run.name);
     let Some(ck_path) = crate::train::run::ck_dir(&run_dir, ck) else {
-        s.train.notice = Some(format!("The checkpoint {ck} is gone from the run folder."));
+        s.train.notice = Some(trf!("The checkpoint {ck} is gone from the run folder.", "{ck} kontrol noktası çalıştırma klasöründe yok."));
         return;
     };
     let ck_dir = ck_path.to_string_lossy().into_owned();
@@ -82,13 +83,13 @@ pub fn replay_checkpoint(s: &mut App, ck: &str) {
 /// Copy the base preset onto the checkpoint folder and open it on Voice.
 pub fn use_as_preset(s: &mut App, ck: &str) {
     let Some(run) = &s.train.run else {
-        s.train.notice = Some("Start a run first.".into());
+        s.train.notice = Some(tr!("Start a run first.", "Önce bir çalıştırma başlatın.").into());
         return;
     };
     let base = base_preset(&s.voice);
     let run_dir = s.train.dir.join("runs").join(&run.name);
     let Some(ck_path) = crate::train::run::ck_dir(&run_dir, ck) else {
-        s.train.notice = Some(format!("The checkpoint {ck} is gone from the run folder."));
+        s.train.notice = Some(trf!("The checkpoint {ck} is gone from the run folder.", "{ck} kontrol noktası çalıştırma klasöründe yok."));
         return;
     };
     let presets_dir = s.voice.deps.presets_dir.clone();
@@ -121,7 +122,7 @@ pub fn use_as_preset(s: &mut App, ck: &str) {
             s.voice.preset_name = name;
             s.tab = Tab::Voice;
         }
-        Err(e) => s.train.notice = Some(format!("The preset could not be saved: {e}")),
+        Err(e) => s.train.notice = Some(trf!("The preset could not be saved: {e}", "Hazır ayar kaydedilemedi: {e}")),
     }
 }
 
@@ -138,7 +139,7 @@ fn render_checkpoint(
     wait_job(api, &load)?;
     let mut wire: jeuvoice_engine_client::Preset =
         serde_json::from_value(jeuvoice_core::preset::to_engine_json(preset, None, None))
-            .map_err(|_| "The preset is broken.".to_string())?;
+            .map_err(|_| tr!("The preset is broken.", "Hazır ayar bozuk.").to_string())?;
     wire.ref_audio = ref_audio;
     wire.ref_text = preset.ref_text.clone();
     let req = jeuvoice_engine_client::RenderRequest {
@@ -157,7 +158,7 @@ fn render_checkpoint(
         .and_then(|s| s.render_result())
         .and_then(|r| r.parts.into_iter().next())
         .map(|p| PathBuf::from(p.file))
-        .ok_or_else(|| "The render failed. Try again.".to_string())
+        .ok_or_else(|| tr!("The render failed. Try again.", "Seslendirme başarısız oldu. Tekrar deneyin.").to_string())
 }
 
 fn wait_job(api: &Arc<dyn EngineApi>, job: &JobId) -> Result<(), String> {
@@ -166,9 +167,9 @@ fn wait_job(api: &Arc<dyn EngineApi>, job: &JobId) -> Result<(), String> {
             Ok(s) => match s.state {
                 jeuvoice_engine_client::JobState::Done => return Ok(()),
                 jeuvoice_engine_client::JobState::Failed => {
-                    return Err(s.error.unwrap_or_else(|| "The voice engine failed. Try again.".into()));
+                    return Err(s.error.unwrap_or_else(|| tr!("The voice engine failed. Try again.", "Ses motoru başarısız oldu. Tekrar deneyin.").into()));
                 }
-                jeuvoice_engine_client::JobState::Cancelled => return Err("The test stopped.".into()),
+                jeuvoice_engine_client::JobState::Cancelled => return Err(tr!("The test stopped.", "Deneme durdu.").into()),
                 _ => std::thread::sleep(std::time::Duration::from_millis(200)),
             },
             Err(e) => return Err(e.to_string()),

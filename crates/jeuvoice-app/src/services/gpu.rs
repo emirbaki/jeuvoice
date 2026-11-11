@@ -18,10 +18,20 @@ pub enum GpuProbe {
 }
 
 /// Settings shows this in CPU mode.
-pub const NO_GPU_SETTINGS: &str = "No supported graphics card found. Speech will be slow.";
+pub fn no_gpu_settings() -> &'static str {
+    crate::i18n::tr!(
+        "No supported graphics card found. Speech will be slow.",
+        "Desteklenen bir ekran kartı bulunamadı. Konuşma yavaş çalışır."
+    )
+}
 
 /// The voice engine state in CPU mode.
-pub const NO_GPU_ENGINE: &str = "No supported graphics card found. The voice engine needs an NVIDIA graphics card.";
+pub fn no_gpu_engine() -> &'static str {
+    crate::i18n::tr!(
+        "No supported graphics card found. The voice engine needs an NVIDIA graphics card.",
+        "Desteklenen bir ekran kartı bulunamadı. Ses motoru bir NVIDIA ekran kartı gerektirir."
+    )
+}
 
 /// Ask `nvidia-smi` for the card (Windows) or report Apple Silicon (macOS).
 pub fn probe(runner: &dyn CommandRunner) -> GpuProbe {

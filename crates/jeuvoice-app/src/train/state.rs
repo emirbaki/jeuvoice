@@ -351,15 +351,15 @@ impl TrainData {
     pub fn chips(&self) -> String {
         let included: Vec<&TrainClip> = self.project.clips.iter().filter(|c| c.clip.excluded.is_none()).collect();
         let min: f32 = included.iter().map(|c| c.clip.duration_s).sum::<f32>() / 60.0;
-        let mut chips = format!("{} clips · {} min", included.len(), fmt_minutes(min));
+        let mut chips = crate::i18n::tr!("{} clips · {} min", "{} klip · {} dk", included.len(), fmt_minutes(min));
         let left_out = self.excluded_count();
         if left_out > 0 {
-            chips += &format!(" · {left_out} left out");
+            chips += &crate::i18n::trf!(" · {left_out} left out", " · {left_out} dışarıda");
         }
         if !included.is_empty() {
             let mut bands: Vec<f32> = included.iter().map(|c| c.band_khz).collect();
             bands.sort_by(f32::total_cmp);
-            chips += &format!(" · Band: {:.0} kHz", bands[bands.len() / 2]);
+            chips += &crate::i18n::tr!(" · Band: {:.0} kHz", " · Bant: {:.0} kHz", bands[bands.len() / 2]);
         }
         chips
     }
@@ -399,7 +399,7 @@ impl TrainData {
             }
         }
         if files.is_empty() {
-            self.notice = Some("No audio files in the drop. Drop WAV, MP3 or video files.".into());
+            self.notice = Some(crate::i18n::tr!("No audio files in the drop. Drop WAV, MP3 or video files.", "Bırakılanlarda ses dosyası yok. WAV, MP3 veya video dosyaları bırakın.").into());
             return;
         }
         let base = if files.iter().all(|f| f.parent() == files[0].parent()) {
@@ -414,9 +414,9 @@ impl TrainData {
             kind: SourceKind::LocalFiles { paths: files.iter().map(|f| f.to_string_lossy().into_owned()).collect() },
             weight: 1,
             license: None,
-            note: dir.map(|d| format!("Added from this folder: {d}")),
+            note: dir.map(|d| crate::i18n::trf!("Added from this folder: {d}", "Bu klasörden eklendi: {d}")),
         });
-        self.statuses.insert(name.clone(), SourceStatus::Working("Reading the clips…".into()));
+        self.statuses.insert(name.clone(), SourceStatus::Working(crate::i18n::tr!("Reading the clips…", "Klipler okunuyor…").into()));
         self.ingest(&name, files);
         self.save();
     }
@@ -449,7 +449,7 @@ impl TrainData {
     pub fn add_hf(&mut self) {
         let repo = self.repo_field.text.trim().to_string();
         if repo.is_empty() {
-            self.notice = Some("Name the dataset first: a link or user/name.".into());
+            self.notice = Some(crate::i18n::tr!("Name the dataset first: a link or user/name.", "Önce veri kümesini girin: bir bağlantı veya kullanıcı/ad.").into());
             return;
         }
         let split = nonempty(&self.split_field.text, "train");
@@ -459,7 +459,7 @@ impl TrainData {
         let limit = self.limit_field.text.trim().to_string();
         let limit = if limit.is_empty() { None } else { limit.parse::<u32>().ok() };
         if !self.limit_field.text.trim().is_empty() && limit.is_none() {
-            self.notice = Some("“Use at most N clips” takes a whole number, or stays empty.".into());
+            self.notice = Some(crate::i18n::tr!("“Use at most N clips” takes a whole number, or stays empty.", "“En fazla N klip kullan” bir tam sayı alır ya da boş kalır.").into());
             return;
         }
         let short = repo.rsplit('/').next().unwrap_or(&repo).to_string();
@@ -485,7 +485,7 @@ impl TrainData {
     ) {
         let name = unique_name(&self.project.sources, &name);
         let Some(api) = self.engine_api.clone() else {
-            self.notice = Some("The voice engine is off. Open the Voice tab once to start it, then try again.".into());
+            self.notice = Some(crate::i18n::tr!("The voice engine is off. Open the Voice tab once to start it, then try again.", "Ses motoru kapalı. Başlatmak için Ses sekmesini bir kez açın, sonra tekrar deneyin.").into());
             return;
         };
         self.project.sources.push(Source {
@@ -499,9 +499,9 @@ impl TrainData {
             },
             weight,
             license,
-            note: note.or_else(|| Some(format!("Hugging Face dataset {repo}."))),
+            note: note.or_else(|| Some(crate::i18n::trf!("Hugging Face dataset {repo}.", "Hugging Face veri kümesi {repo}."))),
         });
-        self.statuses.insert(name.clone(), SourceStatus::Working("Fetching the dataset…".into()));
+        self.statuses.insert(name.clone(), SourceStatus::Working(crate::i18n::tr!("Fetching the dataset…", "Veri kümesi alınıyor…").into()));
         self.notice = None;
         let (events, wake) = (self.events_tx.clone(), self.waker.clone());
         let out_dir = self.dir.join("hf").join(&name);
@@ -520,7 +520,7 @@ impl TrainData {
                 Ok(job) => match wait_job(&api, &job) {
                     Ok(status) => match parse_prep_clips(&status) {
                         Some(clips) => TrainEvent::HfDone { source: name, clips },
-                        None => TrainEvent::HfFailed { source: name, reason: "The dataset gave no clips.".into() },
+                        None => TrainEvent::HfFailed { source: name, reason: crate::i18n::tr!("The dataset gave no clips.", "Veri kümesinden klip çıkmadı.").into() },
                     },
                     Err(e) => TrainEvent::HfFailed { source: name, reason: e },
                 },
@@ -573,12 +573,12 @@ impl TrainData {
 
     /// Ask for the folder behind an unpointed local source.
     pub fn pick_local_folder(&mut self, source: &str, tx: &mut rune::Tx) {
-        let options = rune::FileDialogOptions { title: "Pick the clip folder".into(), ..Default::default() };
+        let options = rune::FileDialogOptions { title: crate::i18n::tr!("Pick the clip folder", "Klip klasörünü seçin").into(), ..Default::default() };
         let source = source.to_string();
         tx.open_folder(options, move |s: &mut crate::state::App, result, _tx| match result {
             Ok(Some(dir)) => s.train.point_local_source(&source, &dir),
             Ok(None) => {}
-            Err(e) => s.train.notice = Some(format!("The Open window could not open: {e}")),
+            Err(e) => s.train.notice = Some(crate::i18n::trf!("The Open window could not open: {e}", "Aç penceresi açılamadı: {e}")),
         });
     }
 
@@ -586,7 +586,7 @@ impl TrainData {
     pub fn point_local_source(&mut self, source: &str, dir: &std::path::Path) {
         let Some(s) = self.project.sources.iter_mut().find(|x| x.name == source) else { return };
         s.kind = SourceKind::LocalFolder { dir: dir.to_string_lossy().into_owned() };
-        s.note = Some(format!("Added from this folder: {}", dir.display()));
+        s.note = Some(crate::i18n::tr!("Added from this folder: {}", "Bu klasörden eklendi: {}", dir.display()));
         let mut files: Vec<PathBuf> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(dir) {
             for e in entries.flatten() {
@@ -598,10 +598,10 @@ impl TrainData {
         }
         files.sort();
         if files.is_empty() {
-            self.notice = Some(format!("No audio files in {}.", dir.display()));
+            self.notice = Some(crate::i18n::tr!("No audio files in {}.", "{} içinde ses dosyası yok.", dir.display()));
             return;
         }
-        self.statuses.insert(source.into(), SourceStatus::Working("Reading the clips…".into()));
+        self.statuses.insert(source.into(), SourceStatus::Working(crate::i18n::tr!("Reading the clips…", "Klipler okunuyor…").into()));
         self.ingest(source, files);
         self.save();
     }
@@ -653,7 +653,7 @@ impl TrainData {
         let username = self.kaggle_user_field.text.trim().to_string();
         let key = self.kaggle_key_field.text.trim().to_string();
         if username.is_empty() || key.is_empty() {
-            self.notice = Some("Name the Kaggle user and paste the key.".into());
+            self.notice = Some(crate::i18n::tr!("Name the Kaggle user and paste the key.", "Kaggle kullanıcısını girin ve anahtarı yapıştırın.").into());
             return;
         }
         let auth = KaggleAuth { username, key };
@@ -663,7 +663,7 @@ impl TrainData {
         };
         match done {
             Ok(()) => {
-                self.notice = Some("Saved the Kaggle key.".into());
+                self.notice = Some(crate::i18n::tr!("Saved the Kaggle key.", "Kaggle anahtarı kaydedildi.").into());
                 self.show_kaggle_form = false;
                 self.kaggle_user_field = TextEdit::new("");
                 self.kaggle_key_field = TextEdit::new("");
@@ -678,7 +678,7 @@ impl TrainData {
         match jeuvoice_kaggle::import_kaggle_json(path) {
             Ok(auth) => match self.kaggle_store.save(&auth) {
                 Ok(()) => {
-                    self.notice = Some("Saved the Kaggle key.".into());
+                    self.notice = Some(crate::i18n::tr!("Saved the Kaggle key.", "Kaggle anahtarı kaydedildi.").into());
                     self.show_kaggle_form = false;
                     self.refresh_kaggle_user();
                 }
@@ -691,15 +691,15 @@ impl TrainData {
     /// Ask for a `kaggle.json` file and read it into the keychain.
     pub fn open_kaggle_import(&mut self, tx: &mut rune::Tx) {
         let options = rune::FileDialogOptions {
-            title: "Import kaggle.json".into(),
+            title: crate::i18n::tr!("Import kaggle.json", "kaggle.json içe aktar").into(),
             file_name: Some("kaggle.json".into()),
             ..Default::default()
         }
-        .filter("Kaggle key", &["json"]);
+        .filter(crate::i18n::tr!("Kaggle key", "Kaggle anahtarı"), &["json"]);
         tx.open_file(options, |s: &mut crate::state::App, result, _tx| match result {
             Ok(Some(path)) => s.train.import_kaggle_key(&path),
             Ok(None) => {}
-            Err(e) => s.train.notice = Some(format!("The Open window could not open: {e}")),
+            Err(e) => s.train.notice = Some(crate::i18n::trf!("The Open window could not open: {e}", "Aç penceresi açılamadı: {e}")),
         });
     }
 
@@ -707,7 +707,7 @@ impl TrainData {
     pub fn forget_kaggle_key(&mut self) {
         match self.kaggle_store.delete() {
             Ok(()) => {
-                self.notice = Some("Removed the Kaggle key.".into());
+                self.notice = Some(crate::i18n::tr!("Removed the Kaggle key.", "Kaggle anahtarı kaldırıldı.").into());
                 self.refresh_kaggle_user();
             }
             Err(e) => self.notice = Some(e.to_string()),
@@ -727,14 +727,14 @@ impl TrainData {
     /// Parse the edit fields back into the settings.
     pub fn apply_settings(&mut self) {
         let parse = |t: &TextEdit, name: &str| {
-            t.text.trim().parse::<u32>().ok().filter(|&v| v > 0).ok_or_else(|| format!("{name} takes a whole number above 0."))
+            t.text.trim().parse::<u32>().ok().filter(|&v| v > 0).ok_or_else(|| crate::i18n::trf!("{name} takes a whole number above 0.", "{name} 0'dan büyük bir tam sayı alır."))
         };
         let settings = (|| {
-            let steps = parse(&self.steps_field, "Steps")?;
+            let steps = parse(&self.steps_field, crate::i18n::tr!("Steps", "Adım"))?;
             let lora_r = parse(&self.lora_r_field, "LoRA r")?;
             let lora_alpha = parse(&self.lora_alpha_field, "LoRA alpha")?;
-            let batch_tokens = parse(&self.batch_field, "Batch tokens")?;
-            let save_steps = parse(&self.save_steps_field, "Save steps")?;
+            let batch_tokens = parse(&self.batch_field, crate::i18n::tr!("Batch tokens", "Toplu token"))?;
+            let save_steps = parse(&self.save_steps_field, crate::i18n::tr!("Save steps", "Kayıt adımı"))?;
             Ok::<_, String>((steps, lora_r, lora_alpha, batch_tokens, save_steps))
         })();
         match settings {
@@ -795,21 +795,21 @@ impl TrainData {
             return;
         }
         if self.project.target != TrainTarget::Kaggle {
-            self.notice = Some("Pick Kaggle under “Where to train” first.".into());
+            self.notice = Some(crate::i18n::tr!("Pick Kaggle under “Where to train” first.", "Önce “Eğitim yeri” altında Kaggle'ı seçin.").into());
             return;
         }
         let Some(kaggle) = self.kaggle_client() else {
-            self.notice = Some("Add your Kaggle key first.".into());
+            self.notice = Some(crate::i18n::tr!("Add your Kaggle key first.", "Önce Kaggle anahtarınızı ekleyin.").into());
             self.show_kaggle_form = true;
             return;
         };
         let Some(engine) = self.engine_api.clone() else {
-            self.notice = Some("The voice engine is off. Open the Voice tab once to start it.".into());
+            self.notice = Some(crate::i18n::tr!("The voice engine is off. Open the Voice tab once to start it.", "Ses motoru kapalı. Başlatmak için Ses sekmesini bir kez açın.").into());
             return;
         };
         let clips = self.included_clips();
         if clips.is_empty() {
-            self.notice = Some("Add clips first: there is nothing to train on.".into());
+            self.notice = Some(crate::i18n::tr!("Add clips first: there is nothing to train on.", "Önce klip ekleyin: eğitilecek bir şey yok.").into());
             return;
         }
         let run_name = self.next_run_name();
@@ -877,15 +877,15 @@ impl TrainData {
             return;
         }
         if self.run_active() || self.included_clips().is_empty() {
-            self.notice = Some("There is no bundle yet. Start the run first.".into());
+            self.notice = Some(crate::i18n::tr!("There is no bundle yet. Start the run first.", "Henüz paket yok. Önce çalıştırmayı başlatın.").into());
             return;
         }
         let Some(engine) = self.engine_api.clone() else {
-            self.notice = Some("The voice engine is off. Open the Voice tab once to start it.".into());
+            self.notice = Some(crate::i18n::tr!("The voice engine is off. Open the Voice tab once to start it.", "Ses motoru kapalı. Başlatmak için Ses sekmesini bir kez açın.").into());
             return;
         };
         self.export_pending = true;
-        self.notice = Some("Building the bundle…".into());
+        self.notice = Some(crate::i18n::tr!("Building the bundle…", "Paket hazırlanıyor…").into());
         // A fixed scratch folder: never confused with a real run.
         let run_name = "bundle-only".to_string();
         let (events, waker) = (self.run_events_tx.clone(), self.waker.clone());
@@ -920,7 +920,7 @@ impl TrainData {
     fn save_bundle_dialog(&mut self, tx: &mut rune::Tx, path: PathBuf) {
         let stem = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "bundle".into());
         let options = rune::FileDialogOptions {
-            title: "Save the Kaggle bundle".into(),
+            title: crate::i18n::tr!("Save the Kaggle bundle", "Kaggle paketini kaydet").into(),
             directory: path.parent().map(Path::to_path_buf),
             file_name: Some(format!("{stem}.zip")),
             ..Default::default()
@@ -929,7 +929,7 @@ impl TrainData {
         tx.save_file(options, move |s: &mut crate::state::App, result, _tx| match result {
             Ok(Some(to)) => s.train.finish_bundle_export(to),
             Ok(None) => s.train.export_pending = false,
-            Err(e) => s.train.notice = Some(format!("The Save window could not open: {e}")),
+            Err(e) => s.train.notice = Some(crate::i18n::trf!("The Save window could not open: {e}", "Kaydet penceresi açılamadı: {e}")),
         });
     }
 
@@ -937,18 +937,19 @@ impl TrainData {
         self.export_pending = false;
         let Some(from) = self.bundle_path.clone() else { return };
         let out = (|| {
-            std::fs::copy(&from, &to).map_err(|e| format!("The bundle could not be saved: {e}"))?;
+            std::fs::copy(&from, &to).map_err(|e| crate::i18n::trf!("The bundle could not be saved: {e}", "Paket kaydedilemedi: {e}"))?;
             let nb_to = to.with_extension("ipynb");
             let nb_from = from.parent().map(|d| d.join("notebook.ipynb"));
             if let Some(nb_from) = nb_from.filter(|p| p.is_file()) {
-                std::fs::copy(&nb_from, &nb_to).map_err(|e| format!("The notebook could not be saved: {e}"))?;
+                std::fs::copy(&nb_from, &nb_to).map_err(|e| crate::i18n::trf!("The notebook could not be saved: {e}", "Not defteri kaydedilemedi: {e}"))?;
             }
             Ok::<_, String>(nb_to)
         })();
         match out {
             Ok(nb_to) => {
-                self.notice = Some(format!(
+                self.notice = Some(crate::i18n::tr!(
                     "Saved {} and {}.",
+                    "{} ve {} kaydedildi.",
                     to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                     nb_to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
                 ));
@@ -1024,7 +1025,7 @@ impl TrainData {
                     self.polling = false;
                     if let Some(r) = self.run.as_mut() {
                         r.state = RunState::Cancelled;
-                        r.message = Some("The run was cancelled.".into());
+                        r.message = Some(crate::i18n::tr!("The run was cancelled.", "Çalıştırma iptal edildi.").into());
                         let record = r.clone();
                         self.save_record(&record);
                     }
@@ -1157,7 +1158,7 @@ impl TrainData {
                 }
                 Update::Failed(e) => {
                     self.pending.remove(&id);
-                    self.notice = Some(format!("Whisper could not hear a clip: {e}"));
+                    self.notice = Some(crate::i18n::trf!("Whisper could not hear a clip: {e}", "Whisper bir klibi duyamadı: {e}"));
                     self.maybe_start_clean(&source);
                     self.save();
                 }
@@ -1215,7 +1216,7 @@ impl TrainData {
                     let paths: Vec<PathBuf> = silent.into_iter().map(|(_, p)| p).collect();
                     self.decode_ids_on_worker(source.clone(), names, paths);
                     if let Some(s) = self.statuses.get_mut(&source) {
-                        *s = SourceStatus::Working("Hearing the clips…".into());
+                        *s = SourceStatus::Working(crate::i18n::tr!("Hearing the clips…", "Klipler dinleniyor…").into());
                     }
                 }
                 self.maybe_start_clean(&source);
@@ -1265,7 +1266,7 @@ impl TrainData {
             return;
         }
         let Some(api) = self.engine_api.clone() else {
-            self.statuses.insert(source.into(), SourceStatus::Failed("The voice engine is off.".into()));
+            self.statuses.insert(source.into(), SourceStatus::Failed(crate::i18n::tr!("The voice engine is off.", "Ses motoru kapalı.").into()));
             return;
         };
         let pairs: Vec<(String, String)> = self
@@ -1276,7 +1277,7 @@ impl TrainData {
             .map(|c| (c.clip.id.clone(), c.clip.audio.clone()))
             .collect();
         self.cleaning.insert(source.into());
-        self.statuses.insert(source.into(), SourceStatus::Working("Cleaning the clips…".into()));
+        self.statuses.insert(source.into(), SourceStatus::Working(crate::i18n::tr!("Cleaning the clips…", "Klipler temizleniyor…").into()));
         let (events, wake) = (self.events_tx.clone(), self.waker.clone());
         let source = source.to_string();
         let out_dir = self.dir.join("clean").join(&source);
@@ -1285,7 +1286,7 @@ impl TrainData {
                 Ok(job) => match wait_job(&api, &job) {
                     Ok(status) => match parse_prep_clips(&status) {
                         Some(clips) => TrainEvent::Cleaned { source, clips },
-                        None => TrainEvent::CleanFailed { source, reason: "The cleaning gave no clips.".into() },
+                        None => TrainEvent::CleanFailed { source, reason: crate::i18n::tr!("The cleaning gave no clips.", "Temizlikten klip çıkmadı.").into() },
                     },
                     Err(e) => TrainEvent::CleanFailed { source, reason: e },
                 },
@@ -1309,7 +1310,7 @@ impl TrainData {
                         let _ = events.send(TrainEvent::DecodeFailed {
                             source: source.clone(),
                             id,
-                            reason: format!("JeuVoice cannot read this file: {name}."),
+                            reason: crate::i18n::trf!("JeuVoice cannot read this file: {name}.", "JeuVoice bu dosyayı okuyamıyor: {name}."),
                         });
                     }
                 }
@@ -1324,7 +1325,7 @@ impl TrainData {
                 && let Some(s) = self.statuses.get_mut(source)
                 && matches!(s, SourceStatus::Working(_))
             {
-                *s = SourceStatus::Working("Hearing the clips…".into());
+                *s = SourceStatus::Working(crate::i18n::tr!("Hearing the clips…", "Klipler dinleniyor…").into());
             }
         }
     }
@@ -1372,9 +1373,9 @@ fn wait_job(api: &Arc<dyn EngineApi>, job: &jeuvoice_engine_client::JobId) -> Re
             Ok(s) => match s.state {
                 jeuvoice_engine_client::JobState::Done => return Ok(s),
                 jeuvoice_engine_client::JobState::Failed => {
-                    return Err(s.error.unwrap_or_else(|| "Preparing the data failed. Try again.".into()));
+                    return Err(s.error.unwrap_or_else(|| crate::i18n::tr!("Preparing the data failed. Try again.", "Veri hazırlanamadı. Tekrar deneyin.").into()));
                 }
-                jeuvoice_engine_client::JobState::Cancelled => return Err("Preparing the data stopped.".into()),
+                jeuvoice_engine_client::JobState::Cancelled => return Err(crate::i18n::tr!("Preparing the data stopped.", "Veri hazırlama durdu.").into()),
                 _ => std::thread::sleep(std::time::Duration::from_millis(200)),
             },
             Err(e) => return Err(e.to_string()),

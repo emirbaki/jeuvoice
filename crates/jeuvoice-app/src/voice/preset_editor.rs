@@ -83,7 +83,7 @@ impl PresetEditor {
         };
         let secs = audio.samples.len() as f64 / f64::from(audio.rate.max(1));
         if !(3.0..=10.0).contains(&secs) {
-            self.clip_error = Some("Use a clip between 3 and 10 seconds.".into());
+            self.clip_error = Some(crate::i18n::tr!("Use a clip between 3 and 10 seconds.", "3 ile 10 saniye arasında bir klip kullanın.").into());
             return;
         }
         let opts = TranscribeOptions { language: language.into(), use_gpu: false };
@@ -99,7 +99,7 @@ impl PresetEditor {
     /// Render the fixed test sentence with the checked clip. Blocks: call on a worker.
     pub fn try_clone(&mut self, out_dir: &Path) {
         let Some(clip) = self.clip.clone() else {
-            self.status = Some("Drop a voice clip first.".into());
+            self.status = Some(crate::i18n::tr!("Drop a voice clip first.", "Önce bir ses klibi bırakın.").into());
             return;
         };
         let mut preset = WirePreset::default();
@@ -155,7 +155,7 @@ impl PresetEditor {
                 }
                 JobState::Failed => {
                     t.done = true;
-                    self.status = Some(status.error.unwrap_or_else(|| "The try failed. Try again.".into()));
+                    self.status = Some(status.error.unwrap_or_else(|| crate::i18n::tr!("The try failed. Try again.", "Deneme başarısız oldu. Tekrar deneyin.").into()));
                 }
                 _ => {}
             }
@@ -166,14 +166,14 @@ impl PresetEditor {
     pub fn save(&mut self, presets_dir: &Path) -> Result<Preset, String> {
         let name = self.name.trim().to_string();
         if name.is_empty() {
-            return Err("Give the preset a name first.".into());
+            return Err(crate::i18n::tr!("Give the preset a name first.", "Önce hazır ayara bir ad verin.").into());
         }
         let seed = self.picked.and_then(|i| self.tries.get(i)).map(|t| t.seed).unwrap_or(self.base_seed);
         let (ref_audio, ref_wav) = match self.kind {
             PresetKind::Clone => {
-                let Some(clip) = self.clip.clone() else { return Err("Drop a voice clip first.".into()) };
+                let Some(clip) = self.clip.clone() else { return Err(crate::i18n::tr!("Drop a voice clip first.", "Önce bir ses klibi bırakın.").into()) };
                 if self.clip_text.trim().is_empty() {
-                    return Err("Check the clip text first.".into());
+                    return Err(crate::i18n::tr!("Check the clip text first.", "Önce klip metnini denetleyin.").into());
                 }
                 (Some("ref.wav".to_string()), Some(clip))
             }
@@ -203,8 +203,8 @@ impl PresetEditor {
             num_step: 32,
             speed: 1.0,
         };
-        save_preset(presets_dir, &preset, ref_wav.as_deref()).map_err(|e| format!("The preset could not be saved: {e}"))?;
-        self.status = Some(format!("Saved preset {name}."));
+        save_preset(presets_dir, &preset, ref_wav.as_deref()).map_err(|e| crate::i18n::trf!("The preset could not be saved: {e}", "Hazır ayar kaydedilemedi: {e}"))?;
+        self.status = Some(crate::i18n::trf!("Saved preset {name}.", "{name} hazır ayarı kaydedildi."));
         Ok(preset)
     }
 }

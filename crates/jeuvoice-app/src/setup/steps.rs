@@ -30,31 +30,31 @@ where
 {
     let _ = std::fs::create_dir_all(&paths.data);
 
-    on_progress(SetupState::Running { step: SetupStep::CheckDisk, progress: 0.0, detail: "Checking free space…".into() });
+    on_progress(SetupState::Running { step: SetupStep::CheckDisk, progress: 0.0, detail: crate::i18n::tr!("Checking free space…", "Boş alan denetleniyor…").into() });
     check_disk(paths)?;
 
-    on_progress(SetupState::Running { step: SetupStep::CheckGpu, progress: 0.15, detail: "Checking the graphics card…".into() });
+    on_progress(SetupState::Running { step: SetupStep::CheckGpu, progress: 0.15, detail: crate::i18n::tr!("Checking the graphics card…", "Ekran kartı denetleniyor…").into() });
     check_gpu(runner)?;
 
     if let Some(tar) = archive {
-        on_progress(SetupState::Running { step: SetupStep::UnpackPython, progress: 0.3, detail: "Unpacking Python…".into() });
+        on_progress(SetupState::Running { step: SetupStep::UnpackPython, progress: 0.3, detail: crate::i18n::tr!("Unpacking Python…", "Python açılıyor…").into() });
         unpack_python(paths, tar, runner)?;
     }
 
-    on_progress(SetupState::Running { step: SetupStep::MakeEnvironment, progress: 0.4, detail: "Making the engine environment…".into() });
+    on_progress(SetupState::Running { step: SetupStep::MakeEnvironment, progress: 0.4, detail: crate::i18n::tr!("Making the engine environment…", "Motor ortamı hazırlanıyor…").into() });
     make_env(paths, runner)?;
 
-    on_progress(SetupState::Running { step: SetupStep::InstallPackages, progress: 0.5, detail: "Installing the engine…".into() });
+    on_progress(SetupState::Running { step: SetupStep::InstallPackages, progress: 0.5, detail: crate::i18n::tr!("Installing the engine…", "Motor kuruluyor…").into() });
     install(paths, runner, on_progress)?;
 
-    on_progress(SetupState::Running { step: SetupStep::Verify, progress: 0.95, detail: "Checking the engine…".into() });
+    on_progress(SetupState::Running { step: SetupStep::Verify, progress: 0.95, detail: crate::i18n::tr!("Checking the engine…", "Motor denetleniyor…").into() });
     verify(paths, runner)?;
 
     // uv makes the env in real runs; ensure the dir so the marker always lands.
     std::fs::create_dir_all(&paths.engine_env)
-        .map_err(|e| format!("The engine setup could not be finished: {e}. Close other programs and click Try again."))?;
+        .map_err(|e| crate::i18n::trf!("The engine setup could not be finished: {e}. Close other programs and click Try again.", "Motor kurulumu tamamlanamadı: {e}. Diğer programları kapatıp Tekrar dene'ye tıklayın."))?;
     std::fs::write(paths.engine_env.join(".jeuvoice-ok"), paths.lock_hash())
-        .map_err(|e| format!("The engine setup could not be finished: {e}. Close other programs and click Try again."))?;
+        .map_err(|e| crate::i18n::trf!("The engine setup could not be finished: {e}. Close other programs and click Try again.", "Motor kurulumu tamamlanamadı: {e}. Diğer programları kapatıp Tekrar dene'ye tıklayın."))?;
     Ok(())
 }
 
@@ -77,8 +77,8 @@ fn disk_message(data: &Path) -> String {
         .ancestors()
         .find(|p| p.exists())
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "this drive".into());
-    format!("JeuVoice needs 8 GB of free space on {drive}. Free some space and click Try again.")
+        .unwrap_or_else(|| crate::i18n::tr!("this drive", "bu sürücü").into());
+    crate::i18n::trf!("JeuVoice needs 8 GB of free space on {drive}. Free some space and click Try again.", "JeuVoice için {drive} üzerinde 8 GB boş alan gerekli. Yer açıp Tekrar dene'ye tıklayın.")
 }
 
 /// No NVIDIA card is not a failure: the engine runs on the CPU. Settings shows
@@ -96,7 +96,7 @@ fn check_gpu(runner: &dyn CommandRunner) -> Result<(), String> {
 
 fn unpack_python(paths: &RuntimePaths, tar: &Path, runner: &dyn CommandRunner) -> Result<(), String> {
     let dest = paths.data.join("python");
-    std::fs::create_dir_all(&dest).map_err(|e| format!("The Python folder could not be made: {e}"))?;
+    std::fs::create_dir_all(&dest).map_err(|e| crate::i18n::trf!("The Python folder could not be made: {e}", "Python klasörü oluşturulamadı: {e}"))?;
     let args = vec![
         "-xzf".into(),
         tar.display().to_string(),
@@ -108,7 +108,7 @@ fn unpack_python(paths: &RuntimePaths, tar: &Path, runner: &dyn CommandRunner) -
     // Windows 10+ and macOS both ship tar.
     runner
         .run("tar", &args, &[])
-        .map_err(|e| format!("Python could not be unpacked: {e}. Close other programs and click Try again."))?;
+        .map_err(|e| crate::i18n::trf!("Python could not be unpacked: {e}. Close other programs and click Try again.", "Python açılamadı: {e}. Diğer programları kapatıp Tekrar dene'ye tıklayın."))?;
     Ok(())
 }
 
@@ -131,10 +131,10 @@ fn make_env(paths: &RuntimePaths, runner: &dyn CommandRunner) -> Result<(), Stri
     ];
     let out = runner
         .run(paths.uv.display().to_string().as_str(), &args, &[])
-        .map_err(|e| format!("The engine environment could not be made: {e}. Close other programs and click Try again."))?;
+        .map_err(|e| crate::i18n::trf!("The engine environment could not be made: {e}. Close other programs and click Try again.", "Motor ortamı hazırlanamadı: {e}. Diğer programları kapatıp Tekrar dene'ye tıklayın."))?;
     if !out.status {
         return Err(
-            "The engine environment could not be made. Close other programs and click Try again.".into(),
+            crate::i18n::tr!("The engine environment could not be made. Close other programs and click Try again.", "Motor ortamı hazırlanamadı. Diğer programları kapatıp Tekrar dene'ye tıklayın.").into(),
         );
     }
     Ok(())
@@ -173,7 +173,7 @@ where
                 });
             }
         })
-        .map_err(|e| format!("The engine could not be installed: {e}. Close other programs and click Try again."))?;
+        .map_err(|e| crate::i18n::trf!("The engine could not be installed: {e}. Close other programs and click Try again.", "Motor kurulamadı: {e}. Diğer programları kapatıp Tekrar dene'ye tıklayın."))?;
     if !out.status {
         return Err(install_error(&out));
     }
@@ -195,9 +195,9 @@ fn install_error(out: &RunResult) -> String {
         .map(short);
     match detail {
         Some(d) if !d.is_empty() => {
-            format!("The engine could not be installed: {d}. Close other programs and click Try again.")
+            crate::i18n::trf!("The engine could not be installed: {d}. Close other programs and click Try again.", "Motor kurulamadı: {d}. Diğer programları kapatıp Tekrar dene'ye tıklayın.")
         }
-        _ => "The engine could not be installed. Close other programs and click Try again.".into(),
+        _ => crate::i18n::tr!("The engine could not be installed. Close other programs and click Try again.", "Motor kurulamadı. Diğer programları kapatıp Tekrar dene'ye tıklayın.").into(),
     }
 }
 
@@ -220,9 +220,9 @@ fn verify(paths: &RuntimePaths, runner: &dyn CommandRunner) -> Result<(), String
     let envs = vec![("PYTHONPATH".into(), paths.engine_src.display().to_string())];
     let out = runner
         .run(paths.python.display().to_string().as_str(), &args, &envs)
-        .map_err(|e| format!("The engine check failed: {e}. Close other programs and click Try again."))?;
+        .map_err(|e| crate::i18n::trf!("The engine check failed: {e}. Close other programs and click Try again.", "Motor denetimi başarısız oldu: {e}. Diğer programları kapatıp Tekrar dene'ye tıklayın."))?;
     if !out.status || !String::from_utf8_lossy(&out.stdout).contains("ok") {
-        return Err("The engine could not start. Close other programs and click Try again.".into());
+        return Err(crate::i18n::tr!("The engine could not start. Close other programs and click Try again.", "Motor başlatılamadı. Diğer programları kapatıp Tekrar dene'ye tıklayın.").into());
     }
     Ok(())
 }

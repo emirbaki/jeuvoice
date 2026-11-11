@@ -34,15 +34,17 @@ impl TokenStore for KeyringStore {
     }
 
     fn set(&self, key: &str, value: &str) -> Result<(), String> {
-        let entry = keyring::Entry::new("JeuVoice", key).map_err(|_| "The token could not be saved.".to_string())?;
-        entry.set_password(value).map_err(|_| "The token could not be saved.".to_string())
+        let failed = || crate::i18n::tr!("The token could not be saved.", "Token kaydedilemedi.").to_string();
+        let entry = keyring::Entry::new("JeuVoice", key).map_err(|_| failed())?;
+        entry.set_password(value).map_err(|_| failed())
     }
 
     fn delete(&self, key: &str) -> Result<(), String> {
-        let entry = keyring::Entry::new("JeuVoice", key).map_err(|_| "The token could not be removed.".to_string())?;
+        let failed = || crate::i18n::tr!("The token could not be removed.", "Token kaldırılamadı.").to_string();
+        let entry = keyring::Entry::new("JeuVoice", key).map_err(|_| failed())?;
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err("The token could not be removed.".to_string()),
+            Err(_) => Err(failed()),
         }
     }
 }
@@ -85,6 +87,13 @@ pub struct Settings {
     /// The profile the Train tab runs with.
     #[serde(default)]
     pub active_kaggle_profile: Option<String>,
+    /// The UI language: "en" or "tr". Every other value shows English.
+    #[serde(default = "default_ui_language")]
+    pub ui_language: String,
+}
+
+fn default_ui_language() -> String {
+    "en".into()
 }
 
 /// The seeded script terms: the quote term every preset starts with.
@@ -101,6 +110,7 @@ impl Default for Settings {
             terms: default_terms(),
             kaggle_profiles: Vec::new(),
             active_kaggle_profile: None,
+            ui_language: default_ui_language(),
         }
     }
 }
@@ -152,6 +162,7 @@ mod tests {
             terms: Terms { en: vec!["tunnel".into()], quote: vec![], respell: vec![("a".into(), "b".into())] },
             kaggle_profiles: vec!["work".into()],
             active_kaggle_profile: Some("work".into()),
+            ui_language: "tr".into(),
         };
         s.save_to(&path).unwrap();
         assert_eq!(Settings::load_from(&path), s);
@@ -176,6 +187,7 @@ mod tests {
                 terms: Terms { en: vec![], quote: vec!["The Last of Us".into()], respell: vec![] },
                 kaggle_profiles: Vec::new(),
                 active_kaggle_profile: None,
+                ui_language: "en".into(),
             }
         );
     }
@@ -194,8 +206,17 @@ mod tests {
                 terms: Terms { en: vec![], quote: vec!["The Last of Us".into()], respell: vec![] },
                 kaggle_profiles: Vec::new(),
                 active_kaggle_profile: None,
+                ui_language: "en".into(),
             }
         );
+    }
+
+    #[test]
+    fn old_settings_load_in_english() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("s.json");
+        std::fs::write(&path, br#"{"whisper_language":"tr","use_gpu":true}"#).unwrap();
+        assert_eq!(Settings::load_from(&path).ui_language, "en");
     }
 
     #[test]

@@ -7,21 +7,30 @@
 /// The engine version this app ships with (`engine/jeuvoice_engine/__init__.py`).
 pub const ENGINE_VERSION: &str = "0.1.0";
 
+const MISMATCH_EN: &str = "The voice engine is from another JeuVoice version. Click Repair.";
+const MISMATCH_TR: &str = "Ses motoru başka bir JeuVoice sürümüne ait. Onar'a tıklayın.";
+
 /// The plain text for an engine from another version.
-pub const ENGINE_VERSION_MISMATCH: &str = "The voice engine is from another JeuVoice version. Click Repair.";
+pub fn engine_version_mismatch() -> &'static str {
+    match crate::i18n::lang() {
+        crate::i18n::Lang::En => MISMATCH_EN,
+        crate::i18n::Lang::Tr => MISMATCH_TR,
+    }
+}
 
 /// `Ok` when the engine reports the version this app expects.
 pub fn check_engine_version(reported: &str) -> Result<(), String> {
     if reported == ENGINE_VERSION {
         Ok(())
     } else {
-        Err(ENGINE_VERSION_MISMATCH.into())
+        Err(engine_version_mismatch().into())
     }
 }
 
 /// True when `message` is the version mismatch text (Settings shows Repair).
+/// The text can be in either language: the language can change after the error.
 pub fn is_version_mismatch(message: &str) -> bool {
-    message == ENGINE_VERSION_MISMATCH
+    message == MISMATCH_EN || message == MISMATCH_TR
 }
 
 #[cfg(test)]
@@ -39,6 +48,15 @@ mod tests {
         assert_eq!(err, "The voice engine is from another JeuVoice version. Click Repair.");
         assert!(is_version_mismatch(&err));
         assert!(!is_version_mismatch("The voice engine is not installed yet."));
+    }
+
+    #[test]
+    fn the_turkish_mismatch_still_asks_for_repair() {
+        crate::i18n::set_lang(crate::i18n::Lang::Tr);
+        let err = check_engine_version("0.0.9").unwrap_err();
+        assert!(err.starts_with("Ses motoru"), "{err}");
+        crate::i18n::set_lang(crate::i18n::Lang::En);
+        assert!(is_version_mismatch(&err), "a Turkish error still shows Repair in English");
     }
 
     #[test]

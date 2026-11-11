@@ -66,7 +66,7 @@ pub fn counts_text(diff: &[DiffOp]) -> String {
             DiffOp::Changed { .. } => changed += 1,
         }
     }
-    format!("{missing} missing, {added} added, {changed} changed")
+    crate::i18n::trf!("{missing} missing, {added} added, {changed} changed", "{missing} eksik, {added} fazla, {changed} farklı")
 }
 
 #[cfg(test)]

@@ -47,9 +47,9 @@ impl Format {
 
     fn name(self) -> &'static str {
         match self {
-            Format::Srt => "SRT subtitles",
-            Format::Vtt => "VTT subtitles",
-            Format::Txt => "Plain text",
+            Format::Srt => crate::i18n::tr!("SRT subtitles", "SRT altyazı"),
+            Format::Vtt => crate::i18n::tr!("VTT subtitles", "VTT altyazı"),
+            Format::Txt => crate::i18n::tr!("Plain text", "Düz metin"),
         }
     }
 
@@ -383,7 +383,7 @@ impl TranscribeTab {
         let Some((path, _)) = self.selected_done() else { return };
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "transcript".into());
         let options = FileDialogOptions {
-            title: format!("Export {}", format.name()),
+            title: crate::i18n::tr!("Export {}", "{} olarak dışa aktar", format.name()),
             directory: path.parent().map(Path::to_path_buf),
             file_name: Some(format!("{stem}.{}", format.ext())),
             ..Default::default()
@@ -392,7 +392,7 @@ impl TranscribeTab {
         tx.save_file(options, move |s: &mut crate::state::App, result, _tx| match result {
             Ok(Some(to)) => s.transcribe.write_export(to, format),
             Ok(None) => {}
-            Err(e) => s.transcribe.notice = Some(format!("The Save window could not open: {e}")),
+            Err(e) => s.transcribe.notice = Some(crate::i18n::trf!("The Save window could not open: {e}", "Kaydet penceresi açılamadı: {e}")),
         });
     }
 
@@ -402,24 +402,24 @@ impl TranscribeTab {
         let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         self.in_background(move || {
             Some(Event::Notice(match std::fs::write(&to, text) {
-                Ok(()) => format!("Saved {name}."),
-                Err(e) => format!("{name} could not be saved: {e}"),
+                Ok(()) => crate::i18n::trf!("Saved {name}.", "{name} kaydedildi."),
+                Err(e) => crate::i18n::trf!("{name} could not be saved: {e}", "{name} kaydedilemedi: {e}"),
             }))
         });
     }
 
     /// Ask for a `.txt` or `.md` script and read it off the UI thread.
     pub fn open_script(&mut self, tx: &mut Tx) {
-        let options = FileDialogOptions { title: "Open script".into(), ..Default::default() }.filter("Script", &["txt", "md"]);
+        let options = FileDialogOptions { title: crate::i18n::tr!("Open script", "Metni aç").into(), ..Default::default() }.filter(crate::i18n::tr!("Script", "Metin"), &["txt", "md"]);
         tx.open_file(options, |s: &mut crate::state::App, result, _tx| match result {
             Ok(Some(path)) => s.transcribe.in_background(move || {
                 Some(match std::fs::read_to_string(&path) {
                     Ok(text) => Event::Script(text),
-                    Err(e) => Event::Notice(format!("The script {} could not be read: {e}", path.display())),
+                    Err(e) => Event::Notice(crate::i18n::tr!("The script {} could not be read: {e}", "{} metni okunamadı: {e}", path.display())),
                 })
             }),
             Ok(None) => {}
-            Err(e) => s.transcribe.notice = Some(format!("The Open window could not open: {e}")),
+            Err(e) => s.transcribe.notice = Some(crate::i18n::trf!("The Open window could not open: {e}", "Aç penceresi açılamadı: {e}")),
         });
     }
 

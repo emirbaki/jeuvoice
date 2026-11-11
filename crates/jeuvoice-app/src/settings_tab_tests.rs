@@ -190,7 +190,7 @@ fn an_engine_from_another_version_shows_repair() {
     rig.rt.update(|s, _| {
         s.transcribe
             .engine_mut()
-            .set_state_for_tests(EngineState::Failed(crate::version::ENGINE_VERSION_MISMATCH.into()))
+            .set_state_for_tests(EngineState::Failed(crate::version::engine_version_mismatch().into()))
     });
     rig.rt.frame(1.0 / 60.0);
     assert!(rig.text("engine-status").contains("Click Repair"));
@@ -339,6 +339,17 @@ fn a_job_uses_the_saved_language_and_gpu_choice() {
 #[test]
 #[ignore]
 fn snap_settings() {
+    snap_settings_to("settings", view);
+}
+
+/// The same in Turkish: `target/settings-tr.png`.
+#[test]
+#[ignore]
+fn snap_settings_tr() {
+    snap_settings_to("settings-tr", crate::i18n::turkish_view);
+}
+
+fn snap_settings_to(name: &str, view: fn(&App, &mut rune::Cx<App>) -> rune::El) {
     fn fixture() -> App {
         let deps = Deps {
             transcriber: Arc::new(FakeTranscriber(Transcript::default())),
@@ -357,7 +368,7 @@ fn snap_settings() {
         app.transcribe.download = Some(Some(40));
         app
     }
-    let out = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/settings.png");
+    let out = format!("{}/../../target/{name}.png", env!("CARGO_MANIFEST_DIR"));
     let spec = rune::AppSpec::new("Settings", (1100.0, 720.0), fixture, view);
     rune::App::new(spec).args(["--snap".to_string(), out.to_string()]).run();
     println!("wrote {out}");
@@ -415,4 +426,27 @@ fn settings_tiles_sit_in_two_columns() {
     lefts.sort();
     lefts.dedup();
     assert_eq!(lefts.len(), 2, "two columns: {lefts:?}");
+}
+
+#[test]
+fn the_interface_switch_saves_turkish() {
+    let mut rig = Rig::new(true);
+    assert_eq!(rig.text("tab-settings"), "Settings");
+    rig.tap("ui-lang-tr");
+    assert_eq!(rig.text("tab-settings"), "Ayarlar");
+    assert_eq!(rig.text("tab-train"), "Eğitim");
+    let saved = std::fs::read_to_string(rig.settings_path()).unwrap();
+    assert!(saved.contains("\"ui_language\": \"tr\""), "{saved}");
+    assert_eq!(Settings::load_from(&rig.settings_path()).whisper_language, "tr", "the Whisper language stays the same");
+    rig.tap("ui-lang-en");
+    assert_eq!(rig.text("tab-settings"), "Settings");
+    assert_eq!(Settings::load_from(&rig.settings_path()).ui_language, "en");
+}
+
+#[test]
+fn saved_turkish_shows_on_first_frame() {
+    let settings = Settings { ui_language: "tr".into(), ..Settings::default() };
+    let rig = Rig::with(true, Arc::new(FakeTranscriber(Transcript::default())), None, settings);
+    assert_eq!(rig.text("tab-voice"), "Ses");
+    assert_eq!(rig.text("model-status"), "Hazır");
 }

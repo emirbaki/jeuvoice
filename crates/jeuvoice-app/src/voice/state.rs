@@ -154,7 +154,7 @@ impl VoiceTab {
         Self {
             project: None,
             script_field: TextEdit::new(""),
-            name_field: TextEdit::new("Untitled"),
+            name_field: TextEdit::new(crate::i18n::tr!("Untitled", "Adsız")),
             presets,
             preset_name,
             status: VoiceStatus::Idle,
@@ -233,12 +233,12 @@ impl VoiceTab {
             return;
         };
         let Some(preset) = self.presets.iter().find(|p| p.name == self.preset_name).cloned() else {
-            self.status = VoiceStatus::Failed("Choose a preset first.".into());
+            self.status = VoiceStatus::Failed(crate::i18n::tr!("Choose a preset first.", "Önce bir hazır ayar seçin.").into());
             return;
         };
         let script = self.script_field.text.clone();
         if script.trim().is_empty() {
-            self.status = VoiceStatus::Failed("Paste a script first.".into());
+            self.status = VoiceStatus::Failed(crate::i18n::tr!("Paste a script first.", "Önce bir metin yapıştırın.").into());
             return;
         }
         let adapter_dir = match &preset.model.adapter {
@@ -261,7 +261,7 @@ impl VoiceTab {
         if project_fresh(&self.project, &script) {
             self.project = Some(Project {
                 version: 1,
-                name: nonempty(&self.name_field.text, "Untitled"),
+                name: nonempty(&self.name_field.text, crate::i18n::tr!("Untitled", "Adsız")),
                 script: script.clone(),
                 preset: preset.name.clone(),
                 terms: settings.terms.clone(),
@@ -283,7 +283,7 @@ impl VoiceTab {
             let _ = events_tx.send(e);
             wake();
         };
-        self.status = VoiceStatus::Working("Starting…".into());
+        self.status = VoiceStatus::Working(crate::i18n::tr!("Starting…", "Başlıyor…").into());
         std::thread::spawn(move || {
             run_generate(api, transcriber, preset, adapter_dir, ref_audio, project, projects_dir, language, use_gpu, say);
         });
@@ -293,7 +293,7 @@ impl VoiceTab {
     pub fn new_project(&mut self) {
         let name = self.name_field.text.trim().to_string();
         if name.is_empty() {
-            self.notice = Some("Name the project first.".into());
+            self.notice = Some(crate::i18n::tr!("Name the project first.", "Önce projeye bir ad verin.").into());
             return;
         }
         let script = self.script_field.text.clone();
@@ -318,7 +318,7 @@ impl VoiceTab {
         self.history = History::default();
         self.sync_advanced_fields();
         self.save_project_async();
-        self.notice = Some(format!("New project {name}."));
+        self.notice = Some(crate::i18n::trf!("New project {name}.", "Yeni proje: {name}."));
     }
 
     /// Open `dir` (a folder with a `project.json`) and rebuild its timeline.
@@ -343,8 +343,8 @@ impl VoiceTab {
     /// Ask for a project folder and open the `project.json` inside.
     pub fn open_dialog(&mut self, tx: &mut Tx) {
         let options =
-            FileDialogOptions { title: "Open project".into(), directory: Some(self.deps.projects_dir.clone()), ..Default::default() }
-                .filter("Project", &["json"]);
+            FileDialogOptions { title: crate::i18n::tr!("Open project", "Proje aç").into(), directory: Some(self.deps.projects_dir.clone()), ..Default::default() }
+                .filter(crate::i18n::tr!("Project", "Proje"), &["json"]);
         tx.open_file(options, |s: &mut crate::state::App, result, _tx| match result {
             Ok(Some(file)) => {
                 if let Some(dir) = file.parent().map(Path::to_path_buf) {
@@ -352,7 +352,7 @@ impl VoiceTab {
                 }
             }
             Ok(None) => {}
-            Err(e) => s.voice.notice = Some(format!("The Open window could not open: {e}")),
+            Err(e) => s.voice.notice = Some(crate::i18n::trf!("The Open window could not open: {e}", "Aç penceresi açılamadı: {e}")),
         });
     }
 
@@ -363,8 +363,8 @@ impl VoiceTab {
             let (events_tx, wake) = (self.events_tx.clone(), self.waker.clone());
             std::thread::spawn(move || {
                 let _ = events_tx.send(match save_project(&project, &dir) {
-                    Ok(()) => VoiceEvent::Notice(format!("Saved {}.", project.name)),
-                    Err(e) => VoiceEvent::Notice(format!("The project could not be saved: {e}")),
+                    Ok(()) => VoiceEvent::Notice(crate::i18n::tr!("Saved {}.", "{} kaydedildi.", project.name)),
+                    Err(e) => VoiceEvent::Notice(crate::i18n::trf!("The project could not be saved: {e}", "Proje kaydedilemedi: {e}")),
                 });
                 wake();
             });
@@ -411,19 +411,19 @@ impl VoiceTab {
     /// Retake the dragged region (or the stored one for "try 3 more").
     pub fn retake(&mut self, engine: &mut EngineService, settings: &Settings, store: Arc<dyn TokenStore>, force_cpu: bool) {
         if self.timeline.is_none() {
-            self.notice = Some("Generate first.".into());
+            self.notice = Some(crate::i18n::tr!("Generate first.", "Önce üretin.").into());
             return;
         }
         let Some(region) = self.view.selection else {
             if self.retake_regions.is_empty() {
-                self.notice = Some("Drag a region on the wave first.".into());
+                self.notice = Some(crate::i18n::tr!("Drag a region on the wave first.", "Önce dalga üzerinde bir bölge sürükleyin.").into());
             } else {
                 self.start_retakes(engine, settings, store, force_cpu, self.retake_regions.clone());
             }
             return;
         };
         let Some(project) = self.project.clone() else {
-            self.notice = Some("Generate first.".into());
+            self.notice = Some(crate::i18n::tr!("Generate first.", "Önce üretin.").into());
             return;
         };
         let mut regions = Vec::new();
@@ -434,7 +434,7 @@ impl VoiceTab {
             }
         }
         if regions.is_empty() {
-            self.notice = Some("Drag a region over spoken words.".into());
+            self.notice = Some(crate::i18n::tr!("Drag a region over spoken words.", "Konuşulan sözcüklerin üzerinde bir bölge sürükleyin.").into());
             return;
         }
         self.retake_regions = regions.clone();
@@ -444,7 +444,7 @@ impl VoiceTab {
     /// Three more takes for the last retake region.
     pub fn try_more(&mut self, engine: &mut EngineService, settings: &Settings, store: Arc<dyn TokenStore>, force_cpu: bool) {
         if self.retake_regions.is_empty() {
-            self.notice = Some("Drag a region on the wave first.".into());
+            self.notice = Some(crate::i18n::tr!("Drag a region on the wave first.", "Önce dalga üzerinde bir bölge sürükleyin.").into());
             return;
         }
         self.start_retakes(engine, settings, store, force_cpu, self.retake_regions.clone());
@@ -466,13 +466,13 @@ impl VoiceTab {
             return;
         };
         let Some(project) = self.project.clone() else {
-            self.notice = Some("Generate first.".into());
+            self.notice = Some(crate::i18n::tr!("Generate first.", "Önce üretin.").into());
             return;
         };
         let Some(preset) = self.presets.iter().find(|p| p.name == project.preset).cloned().or_else(|| {
             self.presets.iter().find(|p| p.name == self.preset_name).cloned()
         }) else {
-            self.status = VoiceStatus::Failed("Choose a preset first.".into());
+            self.status = VoiceStatus::Failed(crate::i18n::tr!("Choose a preset first.", "Önce bir hazır ayar seçin.").into());
             return;
         };
         let adapter_dir = match &preset.model.adapter {
@@ -508,7 +508,7 @@ impl VoiceTab {
             let _ = events_tx.send(e);
             wake();
         };
-        self.status = VoiceStatus::Working("Retaking…".into());
+        self.status = VoiceStatus::Working(crate::i18n::tr!("Retaking…", "Yeniden çekiliyor…").into());
         self.active_para = regions.first().map(|&(p, _)| p);
         std::thread::spawn(move || {
             run_retakes(api, transcriber, preset, adapter_dir, ref_audio, project, projects_dir, regions, language, use_gpu, say);
@@ -522,7 +522,7 @@ impl VoiceTab {
         let Some(take) = p.takes.iter().find(|t| t.id == take_id) else { return };
         let path = self.deps.projects_dir.join(&project.name).join(TAKE_PREFIX).join(&take.file);
         let Ok(a) = audio::decode(&path) else {
-            self.notice = Some(format!("The take {} could not be played.", take.id));
+            self.notice = Some(crate::i18n::tr!("The take {} could not be played.", "{} numaralı çekim çalınamadı.", take.id));
             return;
         };
         let start = self.para_starts.iter().find(|&&(i, _)| i == para).map(|&(_, s)| s).unwrap_or(0.0);
@@ -540,19 +540,19 @@ impl VoiceTab {
     /// Use the picked take: splice it over its region and remember undo.
     pub fn use_take(&mut self) {
         let (Some(para_idx), Some(take_id)) = (self.active_para.or(self.retake_regions.first().map(|&(p, _)| p)), self.picked_take) else {
-            self.notice = Some("Pick a take first.".into());
+            self.notice = Some(crate::i18n::tr!("Pick a take first.", "Önce bir çekim seçin.").into());
             return;
         };
         let Some(mut project) = self.project.clone() else { return };
         let Some(region) = self.retake_regions.iter().find(|&&(p, _)| p == para_idx).map(|&(_, r)| r) else {
-            self.notice = Some("Retake first.".into());
+            self.notice = Some(crate::i18n::tr!("Retake first.", "Önce yeniden çekin.").into());
             return;
         };
         let Some(para_no) = project.paragraphs.iter().position(|p| p.index == para_idx) else { return };
         let (old_audio, new_audio, take, new_words) = {
             let para = &project.paragraphs[para_no];
             let Some(take) = para.takes.iter().find(|t| t.id == take_id).cloned() else {
-                self.notice = Some("Pick a take first.".into());
+                self.notice = Some(crate::i18n::tr!("Pick a take first.", "Önce bir çekim seçin.").into());
                 return;
             };
             let dir = self.deps.projects_dir.join(&project.name).join(TAKE_PREFIX);
@@ -647,7 +647,7 @@ impl VoiceTab {
         self.adv_en = TextEdit::new(project.terms.en.join(", "));
         self.project = Some(project);
         self.save_project_async();
-        self.notice = Some(format!("Added {word} to English terms."));
+        self.notice = Some(crate::i18n::trf!("Added {word} to English terms.", "{word} İngilizce terimlere eklendi."));
     }
 
     pub fn undo(&mut self) {
@@ -699,7 +699,7 @@ impl VoiceTab {
     /// Read the Advanced panel into the project. Plain errors, nothing applied on error.
     pub fn apply_advanced(&mut self) {
         let Some(mut project) = self.project.clone() else {
-            self.notice = Some("Open a project first.".into());
+            self.notice = Some(crate::i18n::tr!("Open a project first.", "Önce bir proje açın.").into());
             return;
         };
         if let Err(e) = self.read_advanced(&mut project) {
@@ -708,18 +708,18 @@ impl VoiceTab {
         }
         self.project = Some(project);
         self.save_project_async();
-        self.notice = Some("Advanced settings saved.".into());
+        self.notice = Some(crate::i18n::tr!("Advanced settings saved.", "Gelişmiş ayarlar kaydedildi.").into());
     }
 
     /// Read the Advanced panel into `project` (retakes and Generate share this).
     fn read_advanced(&self, project: &mut Project) -> Result<(), String> {
         let guidance: f32 =
-            self.adv_guidance.text.trim().parse().map_err(|_| "Guidance must be a number.".to_string())?;
+            self.adv_guidance.text.trim().parse().map_err(|_| crate::i18n::tr!("Guidance must be a number.", "Yönlendirme bir sayı olmalı.").to_string())?;
         let base_seed: u64 =
-            self.adv_seed.text.trim().parse().map_err(|_| "The base seed must be a whole number.".to_string())?;
-        let pause: f64 = self.adv_pause.text.trim().parse().map_err(|_| "Pause must be a number.".to_string())?;
+            self.adv_seed.text.trim().parse().map_err(|_| crate::i18n::tr!("The base seed must be a whole number.", "Temel tohum bir tam sayı olmalı.").to_string())?;
+        let pause: f64 = self.adv_pause.text.trim().parse().map_err(|_| crate::i18n::tr!("Pause must be a number.", "Duraklama bir sayı olmalı.").to_string())?;
         let para_pause: f64 =
-            self.adv_para_pause.text.trim().parse().map_err(|_| "Paragraph pause must be a number.".to_string())?;
+            self.adv_para_pause.text.trim().parse().map_err(|_| crate::i18n::tr!("Paragraph pause must be a number.", "Paragraf duraklaması bir sayı olmalı.").to_string())?;
         project.render.guidance = guidance;
         project.render.base_seed = base_seed;
         project.render.pause = pause.max(0.0);
@@ -729,9 +729,9 @@ impl VoiceTab {
         project.terms.respell = split_respell(&self.adv_respell.text);
         if let Some(para) = self.panel_para() {
             let guidance = parse_opt::<f32>(&self.adv_para_guidance.text)
-                .map_err(|_| "Paragraph guidance must be a number or empty.".to_string())?;
+                .map_err(|_| crate::i18n::tr!("Paragraph guidance must be a number or empty.", "Paragraf yönlendirmesi bir sayı ya da boş olmalı.").to_string())?;
             let seed = parse_opt::<u64>(&self.adv_para_seed.text)
-                .map_err(|_| "Paragraph seed must be a whole number or empty.".to_string())?;
+                .map_err(|_| crate::i18n::tr!("Paragraph seed must be a whole number or empty.", "Paragraf tohumu bir tam sayı ya da boş olmalı.").to_string())?;
             if guidance.is_none() && seed.is_none() {
                 project.render.overrides.remove(&para);
             } else {
@@ -746,16 +746,16 @@ impl VoiceTab {
         let Some(project) = self.project.clone() else { return };
         let dir = self.deps.projects_dir.join(&project.name);
         let options = FileDialogOptions {
-            title: "Export WAV".into(),
+            title: crate::i18n::tr!("Export WAV", "WAV dışa aktar").into(),
             directory: Some(dir),
             file_name: Some(format!("{}.wav", project.name)),
             ..Default::default()
         }
-        .filter("WAV audio", &["wav"]);
+        .filter(crate::i18n::tr!("WAV audio", "WAV ses"), &["wav"]);
         tx.save_file(options, move |s: &mut crate::state::App, result, _tx| match result {
             Ok(Some(to)) => s.voice.write_wav(to),
             Ok(None) => {}
-            Err(e) => s.voice.notice = Some(format!("The Save window could not open: {e}")),
+            Err(e) => s.voice.notice = Some(crate::i18n::trf!("The Save window could not open: {e}", "Kaydet penceresi açılamadı: {e}")),
         });
     }
 
@@ -765,8 +765,8 @@ impl VoiceTab {
         let (events_tx, wake) = (self.events_tx.clone(), self.waker.clone());
         std::thread::spawn(move || {
             let _ = events_tx.send(VoiceEvent::Notice(match write_wav_16(&to, &audio) {
-                Ok(()) => format!("Saved {name}."),
-                Err(e) => format!("{name} could not be saved: {e}"),
+                Ok(()) => crate::i18n::trf!("Saved {name}.", "{name} kaydedildi."),
+                Err(e) => crate::i18n::trf!("{name} could not be saved: {e}", "{name} kaydedilemedi: {e}"),
             }));
             wake();
         });
@@ -777,16 +777,16 @@ impl VoiceTab {
         let Some(project) = self.project.clone() else { return };
         let dir = self.deps.projects_dir.join(&project.name);
         let options = FileDialogOptions {
-            title: "Export SRT".into(),
+            title: crate::i18n::tr!("Export SRT", "SRT dışa aktar").into(),
             directory: Some(dir),
             file_name: Some(format!("{}.srt", project.name)),
             ..Default::default()
         }
-        .filter("SRT subtitles", &["srt"]);
+        .filter(crate::i18n::tr!("SRT subtitles", "SRT altyazı"), &["srt"]);
         tx.save_file(options, move |s: &mut crate::state::App, result, _tx| match result {
             Ok(Some(to)) => s.voice.write_srt(to),
             Ok(None) => {}
-            Err(e) => s.voice.notice = Some(format!("The Save window could not open: {e}")),
+            Err(e) => s.voice.notice = Some(crate::i18n::trf!("The Save window could not open: {e}", "Kaydet penceresi açılamadı: {e}")),
         });
     }
 
@@ -797,8 +797,8 @@ impl VoiceTab {
         let (events_tx, wake) = (self.events_tx.clone(), self.waker.clone());
         std::thread::spawn(move || {
             let _ = events_tx.send(VoiceEvent::Notice(match std::fs::write(&to, text) {
-                Ok(()) => format!("Saved {name}."),
-                Err(e) => format!("{name} could not be saved: {e}"),
+                Ok(()) => crate::i18n::trf!("Saved {name}.", "{name} kaydedildi."),
+                Err(e) => crate::i18n::trf!("{name} could not be saved: {e}", "{name} kaydedilemedi: {e}"),
             }));
             wake();
         });
@@ -990,13 +990,13 @@ fn run_generate(
     say: impl Fn(VoiceEvent) + Send + 'static,
 ) {
     let fail = |e: String| say(VoiceEvent::Failed(e));
-    say(VoiceEvent::Progress("Loading the voice model…".into()));
+    say(VoiceEvent::Progress(crate::i18n::tr!("Loading the voice model…", "Ses modeli yükleniyor…").into()));
     let load = match api.load(&preset.model.base, adapter_dir.as_deref(), "auto") {
         Ok(job) => job,
         Err(e) => return fail(e.to_string()),
     };
     if !wait_job(&api, &load) {
-        return fail("The voice model could not be loaded.".into());
+        return fail(crate::i18n::tr!("The voice model could not be loaded.", "Ses modeli yüklenemedi.").into());
     }
     let render = project.render.clone();
     let mut wire = match serde_json::from_value::<jeuvoice_engine_client::Preset>(jeuvoice_core::preset::to_engine_json(
@@ -1005,7 +1005,7 @@ fn run_generate(
         None,
     )) {
         Ok(w) => w,
-        Err(_) => return fail("The preset is broken. Make it again in the preset editor.".into()),
+        Err(_) => return fail(crate::i18n::tr!("The preset is broken. Make it again in the preset editor.", "Hazır ayar bozuk. Hazır ayar düzenleyicide yeniden oluşturun.").into()),
     };
     wire.guidance = render.guidance;
     wire.ref_audio = ref_audio;
@@ -1024,16 +1024,16 @@ fn run_generate(
         Err(e) => return fail(e.to_string()),
     };
     if !wait_job(&api, &render_job) {
-        return fail("The render failed. Try again.".into());
+        return fail(crate::i18n::tr!("The render failed. Try again.", "Seslendirme başarısız oldu. Tekrar deneyin.").into());
     }
     let result = match api.job(&render_job).ok().and_then(|s| s.render_result()) {
         Some(r) => r,
-        None => return fail("The render failed. Try again.".into()),
+        None => return fail(crate::i18n::tr!("The render failed. Try again.", "Seslendirme başarısız oldu. Tekrar deneyin.").into()),
     };
-    say(VoiceEvent::Progress("Joining the takes…".into()));
+    say(VoiceEvent::Progress(crate::i18n::tr!("Joining the takes…", "Çekimler birleştiriliyor…").into()));
     let audio_dir = projects_dir.join(&project.name).join(TAKE_PREFIX);
     if std::fs::create_dir_all(&audio_dir).is_err() {
-        return fail("The project folder could not be saved.".into());
+        return fail(crate::i18n::tr!("The project folder could not be saved.", "Proje klasörü kaydedilemedi.").into());
     }
     let take_id = project.paragraphs.iter().flat_map(|p| p.takes.iter().map(|t| t.id)).max().unwrap_or(0) + 1;
     for (para_no, para) in project.paragraphs.iter_mut().enumerate() {
@@ -1049,12 +1049,12 @@ fn run_generate(
             }
             match hound::WavReader::open(&pt.file) {
                 Ok(mut reader) => samples.extend(reader.samples::<i16>().filter_map(|s| s.ok()).map(|s| s as f32 / i16::MAX as f32)),
-                Err(_) => return fail("The render failed. Try again.".into()),
+                Err(_) => return fail(crate::i18n::tr!("The render failed. Try again.", "Seslendirme başarısız oldu. Tekrar deneyin.").into()),
             }
         }
         let file = format!("p{para_no:02}_t{take_id}.wav");
         if write_wav_16(&audio_dir.join(&file), &Audio { samples, rate: 24_000 }).is_err() {
-            return fail("The project folder could not be saved.".into());
+            return fail(crate::i18n::tr!("The project folder could not be saved.", "Proje klasörü kaydedilemedi.").into());
         }
         let path = audio_dir.join(&file);
         let data = match audio::decode(&path) {
@@ -1090,7 +1090,7 @@ fn run_generate(
     }
     let dir = projects_dir.join(&project.name);
     if jeuvoice_core::project::save(&project, &dir).is_err() {
-        return fail("The project folder could not be saved.".into());
+        return fail(crate::i18n::tr!("The project folder could not be saved.", "Proje klasörü kaydedilemedi.").into());
     }
     let _ = std::fs::remove_dir_all(dir.join(TAKE_PREFIX).join(".parts"));
     // Joined timeline audio and words for the reply.
@@ -1116,17 +1116,17 @@ fn run_retakes(
     say: impl Fn(VoiceEvent) + Send + 'static,
 ) {
     let fail = |e: String| say(VoiceEvent::Failed(e));
-    say(VoiceEvent::Progress("Loading the voice model…".into()));
+    say(VoiceEvent::Progress(crate::i18n::tr!("Loading the voice model…", "Ses modeli yükleniyor…").into()));
     let load = match api.load(&preset.model.base, adapter_dir.as_deref(), "auto") {
         Ok(job) => job,
         Err(e) => return fail(e.to_string()),
     };
     if !wait_job(&api, &load) {
-        return fail("The voice model could not be loaded.".into());
+        return fail(crate::i18n::tr!("The voice model could not be loaded.", "Ses modeli yüklenemedi.").into());
     }
     let audio_dir = projects_dir.join(&project.name).join(TAKE_PREFIX);
     if std::fs::create_dir_all(&audio_dir).is_err() {
-        return fail("The project folder could not be saved.".into());
+        return fail(crate::i18n::tr!("The project folder could not be saved.", "Proje klasörü kaydedilemedi.").into());
     }
     let mut next_id = project.paragraphs.iter().flat_map(|p| p.takes.iter().map(|t| t.id)).max().unwrap_or(0) + 1;
     let mut done: Vec<(usize, Take)> = Vec::new();
@@ -1140,7 +1140,7 @@ fn run_retakes(
                 jeuvoice_core::preset::to_engine_json(&preset, None, None),
             ) {
                 Ok(w) => w,
-                Err(_) => return fail("The preset is broken. Make it again in the preset editor.".into()),
+                Err(_) => return fail(crate::i18n::tr!("The preset is broken. Make it again in the preset editor.", "Hazır ayar bozuk. Hazır ayar düzenleyicide yeniden oluşturun.").into()),
             };
             wire.guidance = ov.guidance.unwrap_or(project.render.guidance);
             wire.ref_audio = ref_audio.clone();
@@ -1156,22 +1156,22 @@ fn run_retakes(
                     projects_dir.join(&project.name).join(TAKE_PREFIX).join(".parts").to_string_lossy().into_owned(),
                 ),
             };
-            say(VoiceEvent::Progress(format!("Take {take_id}…")));
+            say(VoiceEvent::Progress(crate::i18n::trf!("Take {take_id}…", "Çekim {take_id}…")));
             let job = match api.render(&req) {
                 Ok(job) => job,
                 Err(e) => return fail(e.to_string()),
             };
             if !wait_job(&api, &job) {
-                return fail("The render failed. Try again.".into());
+                return fail(crate::i18n::tr!("The render failed. Try again.", "Seslendirme başarısız oldu. Tekrar deneyin.").into());
             }
             let result = match api.job(&job).ok().and_then(|s| s.render_result()) {
                 Some(r) => r,
-                None => return fail("The render failed. Try again.".into()),
+                None => return fail(crate::i18n::tr!("The render failed. Try again.", "Seslendirme başarısız oldu. Tekrar deneyin.").into()),
             };
             let mut parts: Vec<_> = result.parts.iter().filter(|pt| pt.paragraph == para_no).collect();
             parts.sort_by_key(|pt| pt.index);
             if parts.is_empty() {
-                return fail("The render failed. Try again.".into());
+                return fail(crate::i18n::tr!("The render failed. Try again.", "Seslendirme başarısız oldu. Tekrar deneyin.").into());
             }
             let mut samples = Vec::new();
             for (k, pt) in parts.iter().enumerate() {
@@ -1180,12 +1180,12 @@ fn run_retakes(
                 }
                 match hound::WavReader::open(&pt.file) {
                     Ok(mut reader) => samples.extend(reader.samples::<i16>().filter_map(|s| s.ok()).map(|s| s as f32 / i16::MAX as f32)),
-                    Err(_) => return fail("The render failed. Try again.".into()),
+                    Err(_) => return fail(crate::i18n::tr!("The render failed. Try again.", "Seslendirme başarısız oldu. Tekrar deneyin.").into()),
                 }
             }
             let file = format!("p{para_no:02}_t{take_id}.wav");
             if write_wav_16(&audio_dir.join(&file), &Audio { samples, rate: 24_000 }).is_err() {
-                return fail("The project folder could not be saved.".into());
+                return fail(crate::i18n::tr!("The project folder could not be saved.", "Proje klasörü kaydedilemedi.").into());
             }
             let path = audio_dir.join(&file);
             let data = match audio::decode(&path) {
@@ -1223,7 +1223,7 @@ fn run_retakes(
     }
     let dir = projects_dir.join(&project.name);
     if jeuvoice_core::project::save(&project, &dir).is_err() {
-        return fail("The project folder could not be saved.".into());
+        return fail(crate::i18n::tr!("The project folder could not be saved.", "Proje klasörü kaydedilemedi.").into());
     }
     let _ = std::fs::remove_dir_all(dir.join(TAKE_PREFIX).join(".parts"));
     say(VoiceEvent::TakesDone(done));

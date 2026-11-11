@@ -3,6 +3,7 @@
 use rune::tok::{space, type_};
 use rune::{Color, El, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, el, row, text, text_input};
 
+use crate::i18n::{tr, trf};
 use crate::marks::{counts_text, marks};
 use crate::state::App;
 use crate::transcribe_tab::{button, red, section};
@@ -19,7 +20,7 @@ pub fn view(s: &App) -> El {
             .w_full()
             .grow(1.0)
             .center()
-            .child(text("The voice engine does not run on this Mac yet.").font(type_::BODY).color(crate::style::theme().text));
+            .child(text(tr!("The voice engine does not run on this Mac yet.", "Ses motoru bu Mac'te henüz çalışmıyor.")).font(type_::BODY).color(crate::style::theme().text));
     }
     row()
         .w_full()
@@ -97,8 +98,8 @@ fn side_column(s: &App) -> El {
                 .child(text(label).font(type_::LABEL).color(t.text)),
         );
     }
-    let mut side = col().w(LEFT_W).h_full().min_h(0.0).gap(space::S2).child(section("Voice")).child(list);
-    side = side.child(section("Takes")).child(takes_panel(s));
+    let mut side = col().w(LEFT_W).h_full().min_h(0.0).gap(space::S2).child(section(tr!("Voice", "Ses"))).child(list);
+    side = side.child(section(tr!("Takes", "Çekimler"))).child(takes_panel(s));
     side.child(
         col()
             .w_full()
@@ -120,14 +121,14 @@ fn takes_panel(s: &App) -> El {
                 .center_y()
                 .gap(space::S2)
                 .flex_wrap()
-                .child(button("voice-retake", "Retake region", true, |s, _| {
+                .child(button("voice-retake", tr!("Retake region", "Bölgeyi yeniden çek"), true, |s, _| {
                     let store = s.token_store();
                     let settings = s.settings.clone();
                     let cpu = crate::services::engine::whisper_must_use_cpu(&s.transcribe.engine_state());
                     let (engine, voice) = (&mut s.transcribe, &mut s.voice);
                     voice.retake(engine.engine_mut(), &settings, store, cpu)
                 }))
-                .child(button("voice-try-more", "+ Try 3 more", true, |s, _| {
+                .child(button("voice-try-more", tr!("+ Try 3 more", "+ 3 tane daha dene"), true, |s, _| {
                     let store = s.token_store();
                     let settings = s.settings.clone();
                     let cpu = crate::services::engine::whisper_must_use_cpu(&s.transcribe.engine_state());
@@ -135,17 +136,17 @@ fn takes_panel(s: &App) -> El {
                     voice.try_more(engine.engine_mut(), &settings, store, cpu)
                 })),
         )
-        .child(button("voice-use-take", "Use this take", true, |s, _| {
+        .child(button("voice-use-take", tr!("Use this take", "Bu çekimi kullan"), true, |s, _| {
             s.voice.use_take()
         }))
         .child(
             row().w_full().center_y().gap(space::S2).child(button(
                 "voice-undo",
-                "Undo",
+                tr!("Undo", "Geri al"),
                 s.voice.history.can_undo(),
                 |s, _| s.voice.undo(),
             ))
-            .child(button("voice-redo", "Redo", s.voice.history.can_redo(), |s, _| s.voice.redo())),
+            .child(button("voice-redo", tr!("Redo", "Yinele"), s.voice.history.can_redo(), |s, _| s.voice.redo())),
         )
 }
 
@@ -162,14 +163,14 @@ fn takes_list(s: &App) -> El {
         .map(|(p, ids)| ids.into_iter().map(|id| (p, id)).collect())
         .unwrap_or_default();
     if takes.is_empty() {
-        return list.child(text("No takes yet.").font(type_::LABEL).color(t.text_secondary));
+        return list.child(text(tr!("No takes yet.", "Henüz çekim yok.")).font(type_::LABEL).color(t.text_secondary));
     }
     for (para, id) in takes {
         let on = s.voice.picked_take == Some(id);
         list = list.child(
             el().key(format!("take-{id}"))
                 .role("button")
-                .label(format!("Take {id}").as_str())
+                .label(trf!("Take {id}", "Çekim {id}").as_str())
                 .w_full()
                 .px(space::S2)
                 .py(space::S1)
@@ -179,7 +180,7 @@ fn takes_list(s: &App) -> El {
                     let (transcribe, voice) = (&mut s.transcribe, &mut s.voice);
                     voice.play_take(transcribe.player_mut(), para, id)
                 })
-                .child(text(format!("▶ Take {id}")).font(type_::BODY).color(t.text)),
+                .child(text(trf!("▶ Take {id}", "▶ Çekim {id}")).font(type_::BODY).color(t.text)),
         );
     }
     list
@@ -188,23 +189,23 @@ fn takes_list(s: &App) -> El {
 fn main_column(s: &App) -> El {
     let t = crate::style::theme();
     let v = &s.voice;
-    let title = v.project.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "No project".into());
+    let title = v.project.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| tr!("No project", "Proje yok").into());
     let header = row()
         .w_full()
         .center_y()
         .gap(space::S1)
         .child(text(title).key("voice-project").font(type_::TITLE).color(t.text).grow(1.0).truncate())
-        .child(button("voice-open", "Open…", true, |s, tx| s.voice.open_dialog(tx)))
-        .child(button("voice-new", "New", true, |s, _| s.voice.new_project()))
-        .child(crate::style::button_kind("voice-generate", "Generate", crate::style::ButtonKind::Main, v.project.is_some() || !v.script_field.text.trim().is_empty(), |s, _| {
+        .child(button("voice-open", tr!("Open…", "Aç…"), true, |s, tx| s.voice.open_dialog(tx)))
+        .child(button("voice-new", tr!("New", "Yeni"), true, |s, _| s.voice.new_project()))
+        .child(crate::style::button_kind("voice-generate", tr!("Generate", "Üret"), crate::style::ButtonKind::Main, v.project.is_some() || !v.script_field.text.trim().is_empty(), |s, _| {
             let cpu = crate::services::engine::whisper_must_use_cpu(&s.transcribe.engine_state());
             let store = s.token_store();
             let settings = s.settings.clone();
             let (transcribe, voice) = (&mut s.transcribe, &mut s.voice);
             voice.generate(transcribe.engine_mut(), &settings, store, cpu)
         }))
-        .child(button("voice-export-wav", "Export WAV", v.timeline.is_some(), |s, tx| s.voice.export_wav(tx)))
-        .child(button("voice-export-srt", "Export SRT", v.timeline.is_some(), |s, tx| s.voice.export_srt(tx)));
+        .child(button("voice-export-wav", tr!("Export WAV", "WAV dışa aktar"), v.timeline.is_some(), |s, tx| s.voice.export_wav(tx)))
+        .child(button("voice-export-srt", tr!("Export SRT", "SRT dışa aktar"), v.timeline.is_some(), |s, tx| s.voice.export_srt(tx)));
 
     let mut main = col().grow(1.0).min_w(0.0).h_full().gap(space::S2).child(header).child(name_row(s));
     match (v.timeline.as_ref(), v.project.as_ref()) {
@@ -220,7 +221,7 @@ fn main_column(s: &App) -> El {
         main = main.child(text(counts_text(&v.diff)).key("voice-counts").font(type_::BODY).color(t.text).wrap());
     }
     if v.term_suggest.is_some() {
-        main = main.child(button("voice-add-en-term", "Add to English terms?", true, |s, _| s.voice.add_en_term()));
+        main = main.child(button("voice-add-en-term", tr!("Add to English terms?", "İngilizce terimlere eklensin mi?"), true, |s, _| s.voice.add_en_term()));
     }
     if v.fix_word.is_some() {
         main = main.child(fix_panel(s));
@@ -248,54 +249,54 @@ fn fix_panel(s: &App) -> El {
         .on_edit(|s: &mut App| &mut s.voice.fix_word.as_mut().expect("fix panel shows").field);
     col()
         .gap(space::S1)
-        .child(text(format!("Say it as (heard “{heard}”):")).font(type_::LABEL).color(t.text_secondary).wrap())
+        .child(text(trf!("Say it as (heard “{heard}”):", "Şöyle söylensin (duyulan: “{heard}”):")).font(type_::LABEL).color(t.text_secondary).wrap())
         .child(
             row()
                 .gap(space::S2)
                 .child(field)
-                .child(button("voice-retake-word", "Retake word", true, |s, _| {
+                .child(button("voice-retake-word", tr!("Retake word", "Sözcüğü yeniden çek"), true, |s, _| {
                     let store = s.token_store();
                     let settings = s.settings.clone();
                     let cpu = crate::services::engine::whisper_must_use_cpu(&s.transcribe.engine_state());
                     let (engine, voice) = (&mut s.transcribe, &mut s.voice);
                     voice.retake_word(engine.engine_mut(), &settings, store, cpu)
                 }))
-                .child(button("voice-fix-cancel", "Cancel", true, |s, _| s.voice.cancel_fix())),
+                .child(button("voice-fix-cancel", tr!("Cancel", "İptal"), true, |s, _| s.voice.cancel_fix())),
         )
 }
 
 /// Advanced render settings, closed by default.
 fn advanced_block(s: &App) -> El {
     let mut block = col().gap(space::S2);
-    block = block.child(button("voice-advanced", "Advanced", true, |s, _| s.voice.advanced_open = !s.voice.advanced_open));
+    block = block.child(button("voice-advanced", tr!("Advanced", "Gelişmiş"), true, |s, _| s.voice.advanced_open = !s.voice.advanced_open));
     if !s.voice.advanced_open {
         return block;
     }
-    let para = s.voice.panel_para().map(|p| format!("Paragraph {p}")).unwrap_or_else(|| "Paragraph –".into());
+    let para = s.voice.panel_para().map(|p| trf!("Paragraph {p}", "Paragraf {p}")).unwrap_or_else(|| tr!("Paragraph –", "Paragraf –").into());
     block
-        .child(adv_text(s, "voice-guidance", "Guidance", |s| &s.voice.adv_guidance, |s| &mut s.voice.adv_guidance))
-        .child(adv_text(s, "voice-seed", "Base seed", |s| &s.voice.adv_seed, |s| &mut s.voice.adv_seed))
-        .child(adv_text(s, "voice-pause", "Pause", |s| &s.voice.adv_pause, |s| &mut s.voice.adv_pause))
+        .child(adv_text(s, "voice-guidance", tr!("Guidance", "Yönlendirme"), |s| &s.voice.adv_guidance, |s| &mut s.voice.adv_guidance))
+        .child(adv_text(s, "voice-seed", tr!("Base seed", "Temel tohum"), |s| &s.voice.adv_seed, |s| &mut s.voice.adv_seed))
+        .child(adv_text(s, "voice-pause", tr!("Pause", "Duraklama"), |s| &s.voice.adv_pause, |s| &mut s.voice.adv_pause))
         .child(adv_text(
             s,
             "voice-para-pause",
-            "Paragraph pause",
+            tr!("Paragraph pause", "Paragraf duraklaması"),
             |s| &s.voice.adv_para_pause,
             |s| &mut s.voice.adv_para_pause,
         ))
-        .child(adv_text(s, "voice-en", "English terms (,)", |s| &s.voice.adv_en, |s| &mut s.voice.adv_en))
-        .child(adv_text(s, "voice-quote", "Quote terms (,)", |s| &s.voice.adv_quote, |s| &mut s.voice.adv_quote))
-        .child(adv_text(s, "voice-respell", "Respell OLD=NEW (,)", |s| &s.voice.adv_respell, |s| &mut s.voice.adv_respell))
-        .child(text(format!("{para} guidance/seed (empty = default)")).font(type_::LABEL).color(crate::style::theme().text_secondary))
+        .child(adv_text(s, "voice-en", tr!("English terms (,)", "İngilizce terimler (,)"), |s| &s.voice.adv_en, |s| &mut s.voice.adv_en))
+        .child(adv_text(s, "voice-quote", tr!("Quote terms (,)", "Tırnaklı terimler (,)"), |s| &s.voice.adv_quote, |s| &mut s.voice.adv_quote))
+        .child(adv_text(s, "voice-respell", tr!("Respell OLD=NEW (,)", "Okunuş ESKİ=YENİ (,)"), |s| &s.voice.adv_respell, |s| &mut s.voice.adv_respell))
+        .child(text(trf!("{para} guidance/seed (empty = default)", "{para} yönlendirme/tohum (boş = varsayılan)")).font(type_::LABEL).color(crate::style::theme().text_secondary))
         .child(adv_text(
             s,
             "voice-para-guidance",
-            "Guidance",
+            tr!("Guidance", "Yönlendirme"),
             |s| &s.voice.adv_para_guidance,
             |s| &mut s.voice.adv_para_guidance,
         ))
-        .child(adv_text(s, "voice-para-seed", "Seed", |s| &s.voice.adv_para_seed, |s| &mut s.voice.adv_para_seed))
-        .child(button("voice-adv-apply", "Apply", true, |s, _| s.voice.apply_advanced()))
+        .child(adv_text(s, "voice-para-seed", tr!("Seed", "Tohum"), |s| &s.voice.adv_para_seed, |s| &mut s.voice.adv_para_seed))
+        .child(button("voice-adv-apply", tr!("Apply", "Uygula"), true, |s, _| s.voice.apply_advanced()))
 }
 
 fn adv_text(
@@ -328,7 +329,7 @@ fn name_row(s: &App) -> El {
         .radius(10.0)
         .fill(t.card)
         .on_edit(|s: &mut App| &mut s.voice.name_field);
-    row().gap(space::S2).child(text("Project:").font(type_::LABEL).color(t.text_secondary)).child(field)
+    row().gap(space::S2).child(text(tr!("Project:", "Proje:")).font(type_::LABEL).color(t.text_secondary)).child(field)
 }
 
 fn script_field(s: &App) -> El {
@@ -341,7 +342,7 @@ fn script_field(s: &App) -> El {
         .radius(10.0)
         .fill(t.card)
         .border(1.0, t.card_border)
-        .placeholder("Paste the script here, one paragraph per block", t.text_secondary)
+        .placeholder(tr!("Paste the script here, one paragraph per block", "Metni buraya yapıştırın, her blokta bir paragraf"), t.text_secondary)
         .on_edit(|s: &mut App| &mut s.voice.script_field)
 }
 
@@ -363,10 +364,10 @@ fn wave_card(s: &App, tl: &VoiceTimeline) -> El {
 
 fn status_text(status: &VoiceStatus) -> String {
     match status {
-        VoiceStatus::Idle => "Pick a preset, paste a script and press Generate.".into(),
-        VoiceStatus::StartingEngine => "Starting the voice engine… This takes about a minute the first time.".into(),
+        VoiceStatus::Idle => tr!("Pick a preset, paste a script and press Generate.", "Bir hazır ayar seçin, metni yapıştırın ve Üret'e basın.").into(),
+        VoiceStatus::StartingEngine => tr!("Starting the voice engine… This takes about a minute the first time.", "Ses motoru başlıyor… İlk seferde yaklaşık bir dakika sürer.").into(),
         VoiceStatus::Working(m) => m.clone(),
-        VoiceStatus::Ready => "Done.".into(),
+        VoiceStatus::Ready => tr!("Done.", "Bitti.").into(),
         VoiceStatus::Failed(e) => e.clone(),
     }
 }
@@ -382,7 +383,7 @@ fn status_color(status: &VoiceStatus) -> Color {
 fn play_bar(s: &App) -> El {
     let t = crate::style::theme();
     let duration = s.voice.timeline.as_ref().map_or(0.0, |l| l.duration);
-    let label = if s.voice.is_playing(s.transcribe.player()) { "Pause" } else { "Play" };
+    let label = if s.voice.is_playing(s.transcribe.player()) { tr!("Pause", "Duraklat") } else { tr!("Play", "Çal") };
     row()
         .w_full()
         .center_y()

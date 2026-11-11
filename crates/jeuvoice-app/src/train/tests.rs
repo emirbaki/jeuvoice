@@ -326,6 +326,15 @@ fn fixture() -> App {
 }
 
 fn snap(name: &str, make: fn() -> App) {
+    snap_in(name, make, view);
+}
+
+/// The Turkish copy of a snapshot: `target/<name>-tr.png`.
+fn snap_tr(name: &str, make: fn() -> App) {
+    snap_in(&format!("{name}-tr"), make, crate::i18n::turkish_view);
+}
+
+fn snap_in(name: &str, make: fn() -> App, view: fn(&App, &mut rune::Cx<App>) -> rune::El) {
     let out = format!("{}/../../target/{name}.png", env!("CARGO_MANIFEST_DIR"));
     let spec = rune::AppSpec::new("Train", (1100.0, 720.0), make, view);
     rune::App::new(spec).args(["--snap".to_string(), out.clone()]).run();
@@ -340,29 +349,52 @@ fn snap_train() {
     snap("train", fixture);
 }
 
+/// The board, the Data tile and the Run tile in Turkish: `target/train*-tr.png`.
+#[test]
+#[ignore]
+fn snap_train_tr() {
+    snap_tr("train", fixture);
+}
+
+#[test]
+#[ignore]
+fn snap_train_data_tr() {
+    snap_tr("train-data", train_data_fixture);
+}
+
+#[test]
+#[ignore]
+fn snap_train_run_tr() {
+    snap_tr("train-run", train_run_fixture);
+}
+
 /// The Data tile open with the clip review: `target/train-data.png`.
 #[test]
 #[ignore]
 fn snap_train_data() {
-    snap("train-data", || {
-        let mut app = fixture();
-        app.train.open_tile = Some(TrainTile::Data);
-        app
-    });
+    snap("train-data", train_data_fixture);
+}
+
+fn train_data_fixture() -> App {
+    let mut app = fixture();
+    app.train.open_tile = Some(TrainTile::Data);
+    app
 }
 
 /// The Run tile open before a run: `target/train-run.png`.
 #[test]
 #[ignore]
 fn snap_train_run() {
-    snap("train-run", || {
-        let mut app = fixture();
-        app.train.open_tile = Some(TrainTile::Run);
-        app.train.run = None;
-        app.train.checkpoints.clear();
-        app.train.ck_replays.clear();
-        app
-    });
+    snap("train-run", train_run_fixture);
+}
+
+fn train_run_fixture() -> App {
+    let mut app = fixture();
+    app.train.open_tile = Some(TrainTile::Run);
+    app.train.run = None;
+    app.train.checkpoints.clear();
+    app.train.ck_replays.clear();
+    app
 }
 
 fn small_cuda_engine() -> crate::services::engine::EngineState {
@@ -776,8 +808,8 @@ fn train_like_tr2_fills_sources_settings_and_starts_hf() {
         s.train.clips().len() == 6 && s.train.clips().iter().all(|c| !c.clip.text.is_empty())
     });
     // The local sources wait for a folder.
-    assert_eq!(rig.text("train-status-3"), crate::train::recipe_page::LOCAL_PROMPT);
-    assert_eq!(rig.text("train-status-4"), crate::train::recipe_page::LOCAL_PROMPT);
+    assert_eq!(rig.text("train-status-3"), crate::train::recipe_page::local_prompt());
+    assert_eq!(rig.text("train-status-4"), crate::train::recipe_page::local_prompt());
 }
 
 #[test]

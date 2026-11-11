@@ -162,9 +162,9 @@ fn generic_point(line: &str) -> Option<(u32, f32)> {
 pub fn elapsed_text(started_at: u64, now: u64) -> String {
     let secs = now.saturating_sub(started_at);
     if secs < 3600 {
-        format!("{} min", (secs / 60).max(1))
+        crate::i18n::tr!("{} min", "{} dk", (secs / 60).max(1))
     } else {
-        format!("{} h {:02} min", secs / 3600, (secs % 3600) / 60)
+        crate::i18n::tr!("{} h {:02} min", "{} sa {:02} dk", secs / 3600, (secs % 3600) / 60)
     }
 }
 
@@ -237,7 +237,7 @@ pub fn build_bundle_flow(
     let bundle = jeuvoice_core::kaggle_bundle::build_bundle(&run_dir, &run_id, &audio_src, &out_dir, &cfg, &data)?;
     let notebook_text = jeuvoice_core::kaggle_bundle::notebook(&run_id, &bundle_marker);
     std::fs::write(run_dir.join("notebook.ipynb"), &notebook_text)
-        .map_err(|e| format!("The notebook could not be saved: {e}"))?;
+        .map_err(|e| crate::i18n::trf!("The notebook could not be saved: {e}", "Not defteri kaydedilemedi: {e}"))?;
     Ok(BuiltBundle { bundle, notebook_text, run_id })
 }
 
@@ -310,7 +310,7 @@ pub fn start_run(req: StartRequest, events: std::sync::mpsc::Sender<RunEvent>, w
         message: None,
     };
     if let Err(e) = save_record(&run_dir, &record) {
-        say(RunEvent::RunFailed(format!("The run could not be saved: {e}")));
+        say(RunEvent::RunFailed(crate::i18n::trf!("The run could not be saved: {e}", "Çalıştırma kaydedilemedi: {e}")));
         return;
     }
     say(RunEvent::Started(record));
@@ -354,7 +354,7 @@ pub fn poll_loop(
                 return;
             }
             jeuvoice_kaggle::KernelState::Error => {
-                let _ = events.send(RunEvent::RunFailed(status.message.unwrap_or_else(|| "The run failed.".into())));
+                let _ = events.send(RunEvent::RunFailed(status.message.unwrap_or_else(|| crate::i18n::tr!("The run failed.", "Çalıştırma başarısız oldu.").into())));
                 waker();
                 return;
             }
@@ -446,11 +446,11 @@ pub fn ck_dir(run_dir: &Path, ck: &str) -> Option<PathBuf> {
 
 /// Copy each included clip to `<audio_src>/<id>.<ext>`.
 fn stage_clips(clips: &[ClipRef], audio_src: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(audio_src).map_err(|e| format!("The bundle folder could not be made: {e}"))?;
+    std::fs::create_dir_all(audio_src).map_err(|e| crate::i18n::trf!("The bundle folder could not be made: {e}", "Paket klasörü oluşturulamadı: {e}"))?;
     for c in clips {
         let ext = Path::new(&c.audio).extension().and_then(|e| e.to_str()).unwrap_or("wav");
         let to = audio_src.join(format!("{}.{ext}", c.id));
-        std::fs::copy(&c.audio, &to).map_err(|e| format!("The clip {} could not be packed: {e}", c.id))?;
+        std::fs::copy(&c.audio, &to).map_err(|e| crate::i18n::tr!("The clip {} could not be packed: {e}", "{} klibi paketlenemedi: {e}", c.id))?;
     }
     Ok(())
 }
@@ -461,9 +461,9 @@ fn wait_engine_job(engine: &Arc<dyn jeuvoice_engine_client::EngineApi>, job: &je
             Ok(s) => match s.state {
                 jeuvoice_engine_client::JobState::Done => return Ok(()),
                 jeuvoice_engine_client::JobState::Failed => {
-                    return Err(s.error.unwrap_or_else(|| "Preparing the data failed. Try again.".into()));
+                    return Err(s.error.unwrap_or_else(|| crate::i18n::tr!("Preparing the data failed. Try again.", "Veri hazırlanamadı. Tekrar deneyin.").into()));
                 }
-                jeuvoice_engine_client::JobState::Cancelled => return Err("Preparing the data stopped.".into()),
+                jeuvoice_engine_client::JobState::Cancelled => return Err(crate::i18n::tr!("Preparing the data stopped.", "Veri hazırlama durdu.").into()),
                 _ => std::thread::sleep(Duration::from_millis(500)),
             },
             Err(e) => return Err(e.to_string()),
@@ -477,9 +477,9 @@ pub fn record_path(project_dir: &Path, run_name: &str) -> PathBuf {
 }
 
 pub fn save_record(run_dir: &Path, record: &RunRecord) -> Result<(), String> {
-    std::fs::create_dir_all(run_dir).map_err(|e| format!("The run folder could not be made: {e}"))?;
-    let text = serde_json::to_string_pretty(record).map_err(|e| format!("The run could not be saved: {e}"))?;
-    std::fs::write(run_dir.join("run.json"), text).map_err(|e| format!("The run could not be saved: {e}"))
+    std::fs::create_dir_all(run_dir).map_err(|e| crate::i18n::trf!("The run folder could not be made: {e}", "Çalıştırma klasörü oluşturulamadı: {e}"))?;
+    let text = serde_json::to_string_pretty(record).map_err(|e| crate::i18n::trf!("The run could not be saved: {e}", "Çalıştırma kaydedilemedi: {e}"))?;
+    std::fs::write(run_dir.join("run.json"), text).map_err(|e| crate::i18n::trf!("The run could not be saved: {e}", "Çalıştırma kaydedilemedi: {e}"))
 }
 
 pub fn load_record(project_dir: &Path, run_name: &str) -> Option<RunRecord> {

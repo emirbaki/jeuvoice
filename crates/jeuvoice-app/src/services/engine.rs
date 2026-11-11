@@ -116,7 +116,7 @@ impl EngineService {
             return false;
         }
         *self.state.lock().unwrap_or_else(|e| e.into_inner()) =
-            EngineState::Failed(crate::services::gpu::NO_GPU_ENGINE.into());
+            EngineState::Failed(crate::services::gpu::no_gpu_engine().into());
         (self.waker)();
         true
     }
@@ -194,7 +194,7 @@ impl EngineService {
     ) {
         let Some(cfg) = config else {
             *state.lock().unwrap_or_else(|e| e.into_inner()) =
-                EngineState::Failed("The voice engine is not installed yet.".into());
+                EngineState::Failed(crate::i18n::tr!("The voice engine is not installed yet.", "Ses motoru henüz kurulmadı.").into());
             waker();
             return;
         };
@@ -243,9 +243,9 @@ mod tests {
         let mut svc = EngineService::from_paths(crate::runtime_paths::detect(), None, std::sync::Arc::new(|| {}));
         svc.set_gpu_missing(true);
         svc.ensure_started();
-        assert_eq!(svc.state(), EngineState::Failed(crate::services::gpu::NO_GPU_ENGINE.into()));
+        assert_eq!(svc.state(), EngineState::Failed(crate::services::gpu::no_gpu_engine().into()));
         svc.restart();
-        assert_eq!(svc.state(), EngineState::Failed(crate::services::gpu::NO_GPU_ENGINE.into()));
+        assert_eq!(svc.state(), EngineState::Failed(crate::services::gpu::no_gpu_engine().into()));
     }
 
     #[test]

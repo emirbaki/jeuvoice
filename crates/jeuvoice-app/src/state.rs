@@ -86,6 +86,8 @@ pub struct App {
 impl App {
     pub fn new(deps: Deps) -> Self {
         let (settings, settings_path) = (deps.settings.clone(), deps.settings_path.clone());
+        // The saved UI language applies before the first frame.
+        crate::i18n::set_lang(crate::i18n::Lang::from_code(&settings.ui_language));
         let token_store = deps.token_store.clone();
         let adapter = settings.local_adapter_dir.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         let voice = crate::voice::state::VoiceTab::new(VoiceDeps {
@@ -157,8 +159,8 @@ impl App {
             self.token_store.set(crate::settings::HF_TOKEN_KEY, &token)
         };
         self.files_status = Some(match done {
-            Ok(()) if token.is_empty() => "Removed the Hugging Face token.".into(),
-            Ok(()) => "Saved the Hugging Face token.".into(),
+            Ok(()) if token.is_empty() => crate::i18n::tr!("Removed the Hugging Face token.", "Hugging Face tokeni kaldırıldı.").into(),
+            Ok(()) => crate::i18n::tr!("Saved the Hugging Face token.", "Hugging Face tokeni kaydedildi.").into(),
             Err(e) => e,
         });
         self.token_field.replace_text(String::new());
@@ -170,7 +172,7 @@ impl App {
         self.settings.local_adapter_dir = (!dir.is_empty()).then(|| PathBuf::from(dir));
         self.save_settings();
         if self.settings_error.is_none() {
-            self.files_status = Some("Saved the adapter folder.".into());
+            self.files_status = Some(crate::i18n::tr!("Saved the adapter folder.", "Adaptör klasörü kaydedildi.").into());
         }
     }
 
@@ -180,7 +182,7 @@ impl App {
         let username = self.profile_user_field.text.trim().to_string();
         let key = self.profile_key_field.text.trim().to_string();
         if name.is_empty() || username.is_empty() || key.is_empty() {
-            self.files_status = Some("Name the profile, the user and the key.".into());
+            self.files_status = Some(crate::i18n::tr!("Name the profile, the user and the key.", "Profil adını, kullanıcıyı ve anahtarı girin.").into());
             return;
         }
         if let Err(e) = self.kaggle_store.save_profile(&name, &jeuvoice_kaggle::KaggleAuth { username, key }) {
@@ -199,7 +201,7 @@ impl App {
         self.profile_user_field = TextEdit::new("");
         self.profile_key_field = TextEdit::new("");
         if self.settings_error.is_none() {
-            self.files_status = Some("Saved the Kaggle profile.".into());
+            self.files_status = Some(crate::i18n::tr!("Saved the Kaggle profile.", "Kaggle profili kaydedildi.").into());
         }
         self.train.refresh_kaggle_user();
     }
@@ -227,7 +229,7 @@ impl App {
             self.train.active_profile = self.settings.active_kaggle_profile.clone();
         }
         self.save_settings();
-        self.files_status = Some("Removed the Kaggle profile.".into());
+        self.files_status = Some(crate::i18n::tr!("Removed the Kaggle profile.", "Kaggle profili kaldırıldı.").into());
         self.train.refresh_kaggle_user();
     }
 
@@ -242,6 +244,16 @@ impl App {
         if self.settings.whisper_language != code {
             self.settings.whisper_language = code.to_string();
             self.transcribe.deps.settings.whisper_language = code.to_string();
+            self.save_settings();
+        }
+    }
+
+    /// Show the UI in this language ("en" or "tr") and save the choice.
+    pub fn set_ui_language(&mut self, code: &str) {
+        let code = crate::i18n::Lang::from_code(code).code();
+        crate::i18n::set_lang(crate::i18n::Lang::from_code(code));
+        if self.settings.ui_language != code {
+            self.settings.ui_language = code.to_string();
             self.save_settings();
         }
     }
@@ -263,7 +275,11 @@ impl App {
     fn save_settings(&mut self) {
         let Some(path) = &self.settings_path else { return };
         self.settings_error = self.settings.save_to(path).err().map(|e| {
-            format!("The settings could not be saved in {}: {e}. Your choice works until you close JeuVoice.", path.display())
+            let path = path.display();
+            crate::i18n::trf!(
+                "The settings could not be saved in {path}: {e}. Your choice works until you close JeuVoice.",
+                "Ayarlar {path} konumuna kaydedilemedi: {e}. Seçiminiz JeuVoice kapanana kadar geçerli."
+            )
         });
     }
 

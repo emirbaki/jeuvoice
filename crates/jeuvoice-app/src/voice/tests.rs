@@ -320,6 +320,17 @@ fn projects_root_defaults_under_documents() {
 #[test]
 #[ignore]
 fn snap_voice() {
+    snap_voice_to("voice", view);
+}
+
+/// The same in Turkish: `target/voice-tr.png`.
+#[test]
+#[ignore]
+fn snap_voice_tr() {
+    snap_voice_to("voice-tr", crate::i18n::turkish_view);
+}
+
+fn snap_voice_to(name: &str, view: fn(&App, &mut rune::Cx<App>) -> rune::El) {
     use jeuvoice_core::audio::Audio;
     use jeuvoice_core::peaks::{PEAKS_PER_SECOND, Peaks};
     use jeuvoice_core::project::Project;
@@ -328,7 +339,6 @@ fn snap_voice() {
 
     use crate::settings::MemStore;
     use crate::state::{App, Deps};
-    use crate::view::view;
     use crate::voice::state::{VoiceStatus, VoiceTimeline};
 
     fn fixture() -> App {
@@ -372,7 +382,7 @@ fn snap_voice() {
         app.voice.status = VoiceStatus::Ready;
         app
     }
-    let out = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/voice.png");
+    let out = format!("{}/../../target/{name}.png", env!("CARGO_MANIFEST_DIR"));
     let spec = rune::AppSpec::new("Voice", (1100.0, 720.0), fixture, view);
     rune::App::new(spec).args(["--snap".to_string(), out.to_string()]).run();
     println!("wrote {out}");

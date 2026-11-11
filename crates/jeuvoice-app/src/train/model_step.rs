@@ -10,6 +10,7 @@ use jeuvoice_core::train::StartFrom;
 use rune::tok::{space, type_};
 use rune::{El, col, row, text};
 
+use crate::i18n::{tr, trf};
 use crate::state::App;
 use crate::train::state::TrainData;
 use crate::transcribe_tab::{button, section};
@@ -36,14 +37,14 @@ pub fn known_adapters(presets: &[Preset], local_dir: Option<&Path>, training: &P
         match &p.model.adapter {
             AdapterRef::None => {}
             AdapterRef::Local { dir } => {
-                out.push(AdapterChoice { label: format!("{} — this disk", p.name), start: StartFrom::Adapter { repo_or_dir: dir.clone() } })
+                out.push(AdapterChoice { label: tr!("{} — this disk", "{} — bu disk", p.name), start: StartFrom::Adapter { repo_or_dir: dir.clone() } })
             }
             AdapterRef::HfRepo { repo, subfolder } => out.push(hf_choice(p, repo, subfolder)),
         }
     }
     if let Some(dir) = local_dir.and_then(|d| d.to_str()) {
         out.push(AdapterChoice {
-            label: "The local adapter folder from Settings".into(),
+            label: tr!("The local adapter folder from Settings", "Ayarlar'daki yerel adaptör klasörü").into(),
             start: StartFrom::Adapter { repo_or_dir: dir.into() },
         });
     }
@@ -68,7 +69,7 @@ fn scan_run_adapters(training: &Path) -> Vec<AdapterChoice> {
                     let run_name = run.file_name().to_string_lossy().into_owned();
                     let ck_name = ck.file_name().to_string_lossy().into_owned();
                     out.push(AdapterChoice {
-                        label: format!("Run {name}/{run_name}/{ck_name}"),
+                        label: trf!("Run {name}/{run_name}/{ck_name}", "Çalıştırma {name}/{run_name}/{ck_name}"),
                         start: StartFrom::Adapter { repo_or_dir: ck.path().to_string_lossy().into_owned() },
                     });
                 }
@@ -82,11 +83,11 @@ fn scan_run_adapters(training: &Path) -> Vec<AdapterChoice> {
 pub fn view(s: &TrainData, choices: &[AdapterChoice]) -> El {
     let current = &s.project.settings.start_from;
     let mut list = col().w_full().gap(space::S1);
-    list = list.child(choice_row("train-model-base", "Base OmniVoice", "The voice model as it shipped.", &StartFrom::Base, current));
+    list = list.child(choice_row("train-model-base", tr!("Base OmniVoice", "Temel OmniVoice"), tr!("The voice model as it shipped.", "Ses modelinin ilk hâli."), &StartFrom::Base, current));
     for (i, c) in choices.iter().enumerate() {
-        list = list.child(choice_row(&format!("train-model-adapter-{i}"), &c.label, "A tr2 checkpoint.", &c.start, current));
+        list = list.child(choice_row(&format!("train-model-adapter-{i}"), &c.label, tr!("A tr2 checkpoint.", "Bir tr2 kontrol noktası."), &c.start, current));
     }
-    col().w_full().gap(space::S2).child(section("Start from")).child(list)
+    col().w_full().gap(space::S2).child(section(tr!("Start from", "Başlangıç"))).child(list)
 }
 
 fn choice_row(key: &str, label: &str, sub: &str, start: &StartFrom, current: &StartFrom) -> El {
@@ -106,7 +107,7 @@ fn choice_row(key: &str, label: &str, sub: &str, start: &StartFrom, current: &St
                 .child(text(label).font(type_::BODY).color(t.text))
                 .child(text(sub).font(type_::LABEL).color(t.text_secondary).wrap()),
         )
-        .child(button(key, if on { "Selected" } else { "Use" }, !on, {
+        .child(button(key, if on { tr!("Selected", "Seçili") } else { tr!("Use", "Kullan") }, !on, {
             let start = start.clone();
             move |s: &mut App, _| s.train.set_start(start.clone())
         }))

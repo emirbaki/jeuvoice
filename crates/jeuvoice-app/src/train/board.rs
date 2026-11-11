@@ -7,6 +7,7 @@ use jeuvoice_core::train::StartFrom;
 use rune::tok::{space, type_};
 use rune::{El, ScrollSpec, col, el, row, text};
 
+use crate::i18n::{tr, trf};
 use crate::state::App;
 use crate::style::{self, ButtonKind};
 use crate::train::model_step::AdapterChoice;
@@ -71,19 +72,19 @@ pub fn run_summary(s: &TrainData) -> RunSummary {
 
 fn run_line(s: &TrainData, r: &RunSummary) -> String {
     match r {
-        RunSummary::NotReady => "Add clips first".into(),
+        RunSummary::NotReady => tr!("Add clips first", "Önce klip ekleyin").into(),
         RunSummary::Ready { .. } => {
-            format!("Ready to start · {}", crate::train::target_step::kaggle_estimate(s.project.settings.steps))
+            tr!("Ready to start · {}", "Başlamaya hazır · {}", crate::train::target_step::kaggle_estimate(s.project.settings.steps))
         }
-        RunSummary::Running { step, total } => format!("Step {step} / {total}"),
-        RunSummary::Done { checkpoints } => format!("Done · {checkpoints} checkpoints"),
-        RunSummary::Failed => "The run stopped. Open it to see why.".into(),
+        RunSummary::Running { step, total } => trf!("Step {step} / {total}", "Adım {step} / {total}"),
+        RunSummary::Done { checkpoints } => trf!("Done · {checkpoints} checkpoints", "Bitti · {checkpoints} kontrol noktası"),
+        RunSummary::Failed => tr!("The run stopped. Open it to see why.", "Çalıştırma durdu. Nedenini görmek için açın.").into(),
     }
 }
 
 fn model_line(s: &TrainData) -> String {
     match &s.project.settings.start_from {
-        StartFrom::Base => "Base OmniVoice".into(),
+        StartFrom::Base => tr!("Base OmniVoice", "Temel OmniVoice").into(),
         StartFrom::Adapter { repo_or_dir } => {
             let name = repo_or_dir.rsplit(['/', '\\']).find(|p| !p.is_empty()).unwrap_or(repo_or_dir);
             name.to_string()
@@ -93,8 +94,8 @@ fn model_line(s: &TrainData) -> String {
 
 fn target_line(s: &TrainData) -> &'static str {
     match s.project.target {
-        TrainTarget::Kaggle => "Kaggle · T4 ×2 · free",
-        TrainTarget::ThisPc => "This PC",
+        TrainTarget::Kaggle => tr!("Kaggle · T4 ×2 · free", "Kaggle · T4 ×2 · ücretsiz"),
+        TrainTarget::ThisPc => tr!("This PC", "Bu bilgisayar"),
         TrainTarget::RunPod => "RunPod",
     }
 }
@@ -131,13 +132,13 @@ fn data_board(s: &TrainData) -> El {
     let p = style::palette();
     let d = data_summary(s);
     let mut pills = row().gap(space::S1).flex_wrap();
-    pills = pills.child(style::pill(&format!("{} clips", d.clips), p.text));
-    pills = pills.child(style::pill(&format!("{} min", fmt_minutes(d.minutes)), p.text));
+    pills = pills.child(style::pill(&tr!("{} clips", "{} klip", d.clips), p.text));
+    pills = pills.child(style::pill(&tr!("{} min", "{} dk", fmt_minutes(d.minutes)), p.text));
     if d.left_out > 0 {
-        pills = pills.child(style::pill(&format!("{} left out", d.left_out), p.text_secondary));
+        pills = pills.child(style::pill(&tr!("{} left out", "{} dışarıda", d.left_out), p.text_secondary));
     }
     if let Some(b) = d.band_khz {
-        pills = pills.child(style::pill(&format!("Band {b} kHz"), p.text_secondary));
+        pills = pills.child(style::pill(&trf!("Band {b} kHz", "Bant {b} kHz"), p.text_secondary));
     }
     let mut list = col().w_full().gap(space::S1);
     for (name, n) in d.sources.iter().take(BOARD_SOURCES) {
@@ -150,14 +151,14 @@ fn data_board(s: &TrainData) -> El {
                 .radius(10.0)
                 .fill(style::white_fill(0.04))
                 .child(text(name.as_str()).font(type_::BODY).color(p.text).truncate().grow(1.0).min_w(0.0))
-                .child(text(format!("{n} clips").as_str()).font(type_::LABEL).color(p.text_secondary)),
+                .child(text(trf!("{n} clips", "{n} klip").as_str()).font(type_::LABEL).color(p.text_secondary)),
         );
     }
     if d.sources.len() > BOARD_SOURCES {
-        list = list.child(secondary(&format!("+{} more", d.sources.len() - BOARD_SOURCES)));
+        list = list.child(secondary(&tr!("+{} more", "+{} tane daha", d.sources.len() - BOARD_SOURCES)));
     }
     if d.sources.is_empty() {
-        list = list.child(secondary("Drop clips or a folder here"));
+        list = list.child(secondary(tr!("Drop clips or a folder here", "Klipleri veya bir klasörü buraya bırakın")));
     }
     let body = col()
         .key("train-drop")
@@ -166,7 +167,7 @@ fn data_board(s: &TrainData) -> El {
         .gap(space::S2)
         .padding(space::S3)
         .clip_rounded(14.0)
-        .child(title("Data"))
+        .child(title(tr!("Data", "Veri")))
         .child(pills)
         .child(list)
         .on_drop_files(|s: &mut App, files, _| s.train.add_files(files))
@@ -179,10 +180,10 @@ fn setup_board(s: &TrainData) -> El {
     let body = col()
         .gap(space::S2)
         .padding(space::S3)
-        .child(title("Model and where"))
-        .child(secondary("Start from"))
+        .child(title(tr!("Model and where", "Model ve yer")))
+        .child(secondary(tr!("Start from", "Başlangıç")))
         .child(text(model_line(s).as_str()).font(type_::BODY).color(p.text).truncate())
-        .child(secondary("Where"))
+        .child(secondary(tr!("Where", "Yer")))
         .child(text(target_line(s)).font(type_::BODY).color(p.text).truncate());
     tile(TrainTile::Setup, style::glass_blur("glass-train-setup", body))
 }
@@ -193,7 +194,7 @@ fn run_board(s: &TrainData) -> El {
     let mut body = col()
         .gap(space::S2)
         .padding(space::S3)
-        .child(title("Run"))
+        .child(title(tr!("Run", "Çalıştırma")))
         .child(text(run_line(s, &r).as_str()).font(type_::BODY).color(p.text).wrap());
     if let RunSummary::Running { step, total } = r {
         body = body.child(progress(step as f32 / total.max(1) as f32));
@@ -238,10 +239,10 @@ fn column_tile(s: &TrainData, t: TrainTile) -> El {
     let (name, line) = match t {
         TrainTile::Data => {
             let d = data_summary(s);
-            ("Data", format!("{} clips · {} min", d.clips, fmt_minutes(d.minutes)))
+            (tr!("Data", "Veri"), tr!("{} clips · {} min", "{} klip · {} dk", d.clips, fmt_minutes(d.minutes)))
         }
-        TrainTile::Setup => ("Model and where", model_line(s)),
-        TrainTile::Run => ("Run", run_line(s, &run_summary(s))),
+        TrainTile::Setup => (tr!("Model and where", "Model ve yer"), model_line(s)),
+        TrainTile::Run => (tr!("Run", "Çalıştırma"), run_line(s, &run_summary(s))),
     };
     let body = col()
         .gap(space::S1)
@@ -255,9 +256,9 @@ fn column_tile(s: &TrainData, t: TrainTile) -> El {
 pub fn open_layout(s: &App, open: TrainTile, adapters: &[AdapterChoice]) -> El {
     let t = &s.train;
     let name = match open {
-        TrainTile::Data => "Data",
-        TrainTile::Setup => "Model and where",
-        TrainTile::Run => "Run",
+        TrainTile::Data => tr!("Data", "Veri"),
+        TrainTile::Setup => tr!("Model and where", "Model ve yer"),
+        TrainTile::Run => tr!("Run", "Çalıştırma"),
     };
     let content = match open {
         TrainTile::Data => crate::train::data_step::view(t),
@@ -273,7 +274,7 @@ pub fn open_layout(s: &App, open: TrainTile, adapters: &[AdapterChoice]) -> El {
         .center_y()
         .gap(space::S2)
         .child(title(name).grow(1.0).min_w(0.0))
-        .child(style::button_kind("train-tile-close", "Close", ButtonKind::Quiet, true, |s, _| s.train.close_tile()));
+        .child(style::button_kind("train-tile-close", tr!("Close", "Kapat"), ButtonKind::Quiet, true, |s, _| s.train.close_tile()));
     let panel = col()
         .w_full()
         .h_full()

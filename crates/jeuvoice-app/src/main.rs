@@ -1,6 +1,7 @@
 //! JeuVoice desktop app: speech, transcription and training in one window.
 
 mod cache;
+mod i18n;
 mod marks;
 mod playback;
 mod runtime_paths;

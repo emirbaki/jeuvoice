@@ -6,17 +6,20 @@ use rune::tok::{space, type_};
 use crate::style;
 use rune::{Cx, El, col, el, row, text};
 
-const TABS: [(Tab, &str, &str); 4] = [
-    (Tab::Voice, "tab-voice", "Voice"),
-    (Tab::Transcribe, "tab-transcribe", "Transcribe"),
-    (Tab::Train, "tab-train", "Train"),
-    (Tab::Settings, "tab-settings", "Settings"),
-];
+fn tab_list() -> [(Tab, &'static str, &'static str); 4] {
+    use crate::i18n::tr;
+    [
+        (Tab::Voice, "tab-voice", tr!("Voice", "Ses")),
+        (Tab::Transcribe, "tab-transcribe", tr!("Transcribe", "Yazıya dök")),
+        (Tab::Train, "tab-train", tr!("Train", "Eğitim")),
+        (Tab::Settings, "tab-settings", tr!("Settings", "Ayarlar")),
+    ]
+}
 
 pub fn view(s: &App, _: &mut Cx<App>) -> El {
     let p = style::palette();
     let mut tabs = row().gap(space::S1).padding(4.0).radius(999.0);
-    for (tab, key, name) in TABS {
+    for (tab, key, name) in tab_list() {
         let on = s.tab == tab;
         let mut button = el()
             .key(key)

@@ -6,6 +6,7 @@ use jeuvoice_core::script_diff::DiffOp;
 use rune::tok::{space, type_};
 use rune::{El, ScrollSpec, Tx, col, el, row, text, text_input};
 
+use crate::i18n::{tr, trf};
 use crate::marks::{counts_text, marks};
 use crate::state::App;
 use crate::transcribe::{Format, TranscribeTab};
@@ -47,13 +48,13 @@ fn file_name(p: &std::path::Path) -> String {
 /// What a file row says about its file.
 fn status(s: &TranscribeTab, state: &ItemState) -> String {
     match state {
-        ItemState::Waiting => "Waiting".into(),
+        ItemState::Waiting => tr!("Waiting", "Bekliyor").into(),
         ItemState::Running(p) => match s.download {
-            Some(Some(pct)) => format!("Downloading the speech model… {pct}%"),
-            Some(None) => "Downloading the speech model…".into(),
-            None => format!("Transcribing… {}%", (p * 100.0).round() as u32),
+            Some(Some(pct)) => trf!("Downloading the speech model… {pct}%", "Konuşma modeli indiriliyor… %{pct}"),
+            Some(None) => tr!("Downloading the speech model…", "Konuşma modeli indiriliyor…").into(),
+            None => tr!("Transcribing… {}%", "Yazıya dökülüyor… %{}", (p * 100.0).round() as u32),
         },
-        ItemState::Done(_) => "Done".into(),
+        ItemState::Done(_) => tr!("Done", "Bitti").into(),
         ItemState::Failed(e) => e.clone(),
     }
 }
@@ -71,8 +72,8 @@ fn files_column(s: &TranscribeTab) -> El {
         .fill(t.card)
         .border(1.0, crate::style::palette().text_secondary.alpha(0.5))
         .border_dash(6.0, 4.0)
-        .child(text("Drop audio or video files here").font(type_::TITLE).color(t.text))
-        .child(text("Audio or video, many at once").font(type_::LABEL).color(t.text_secondary))
+        .child(text(tr!("Drop audio or video files here", "Dosyaları buraya bırakın")).font(type_::TITLE).color(t.text))
+        .child(text(tr!("Audio or video, many at once", "Ses veya video, birden çok dosya")).font(type_::LABEL).color(t.text_secondary))
         .on_drop_files(|s: &mut App, files, _| s.transcribe.add_files(files))
         .accepts_extensions(&MEDIA);
     let mut list = col().w_full().gap(space::S1);
@@ -103,23 +104,23 @@ fn files_column(s: &TranscribeTab) -> El {
         .min_h(0.0)
         .gap(space::S2)
         .child(drop)
-        .child(section("Files"))
+        .child(section(tr!("Files", "Dosyalar")))
         .child(col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(list))
 }
 
 fn main_column(s: &TranscribeTab) -> El {
     let t = crate::style::theme();
     let done = s.selected_done();
-    let title = done.map_or_else(|| "No file open".to_string(), |(p, _)| file_name(p));
+    let title = done.map_or_else(|| tr!("No file open", "Açık dosya yok").to_string(), |(p, _)| file_name(p));
     let has = done.is_some();
     let header = row()
         .w_full()
         .center_y()
         .gap(space::S1)
         .child(text(title).font(type_::TITLE).color(t.text).grow(1.0).truncate())
-        .child(button("export-srt", "Export SRT…", has, |s, tx| s.transcribe.export(Format::Srt, tx)))
-        .child(button("export-vtt", "Export VTT…", has, |s, tx| s.transcribe.export(Format::Vtt, tx)))
-        .child(button("export-txt", "Export TXT…", has, |s, tx| s.transcribe.export(Format::Txt, tx)));
+        .child(button("export-srt", tr!("Export SRT…", "SRT dışa aktar…"), has, |s, tx| s.transcribe.export(Format::Srt, tx)))
+        .child(button("export-vtt", tr!("Export VTT…", "VTT dışa aktar…"), has, |s, tx| s.transcribe.export(Format::Vtt, tx)))
+        .child(button("export-txt", tr!("Export TXT…", "TXT dışa aktar…"), has, |s, tx| s.transcribe.export(Format::Txt, tx)));
 
     let mut wave_card = col().w_full().padding(space::S2).radius(12.0).fill(t.card).gap(space::S2);
     wave_card = match (done, &s.loaded) {
@@ -134,8 +135,8 @@ fn main_column(s: &TranscribeTab) -> El {
             |s: &mut App, i| s.transcribe.seek_word(i),
             |s: &mut App, i| s.transcribe.edit_word(i),
         )),
-        (Some(_), None) => wave_card.child(placeholder("Loading the waveform…")),
-        (None, _) => wave_card.child(placeholder("Drop files on the left. Pick a finished file to see its words here.")),
+        (Some(_), None) => wave_card.child(placeholder(tr!("Loading the waveform…", "Dalga biçimi yükleniyor…"))),
+        (None, _) => wave_card.child(placeholder(tr!("Drop files on the left. Pick a finished file to see its words here.", "Dosyaları sola bırakın. Sözcüklerini burada görmek için biten bir dosya seçin."))),
     };
     if s.editing.is_some() {
         wave_card = wave_card.child(word_editor(s));
@@ -144,7 +145,7 @@ fn main_column(s: &TranscribeTab) -> El {
     let mut main = col().grow(1.0).min_w(0.0).h_full().gap(space::S2).child(header).child(wave_card);
     if s.loaded.is_some() {
         main = main.child(
-            text("Click a word to play from it. Double-click a word to fix it.").font(type_::LABEL).color(t.text_secondary),
+            text(tr!("Click a word to play from it. Double-click a word to fix it.", "Oradan çalmak için bir sözcüğe tıklayın. Düzeltmek için çift tıklayın.")).font(type_::LABEL).color(t.text_secondary),
         );
     }
     if let Some(n) = &s.notice {
@@ -170,10 +171,10 @@ fn word_editor(s: &TranscribeTab) -> El {
         .on_submit(|s: &mut App, _| s.transcribe.save_word());
     row()
         .gap(space::S2)
-        .child(text("Fix the word:").font(type_::LABEL).color(t.text_secondary))
+        .child(text(tr!("Fix the word:", "Sözcüğü düzeltin:")).font(type_::LABEL).color(t.text_secondary))
         .child(field)
-        .child(button("word-save", "Save", true, |s, _| s.transcribe.save_word()))
-        .child(button("word-cancel", "Cancel", true, |s, _| s.transcribe.cancel_edit()))
+        .child(button("word-save", tr!("Save", "Kaydet"), true, |s, _| s.transcribe.save_word()))
+        .child(button("word-cancel", tr!("Cancel", "İptal"), true, |s, _| s.transcribe.cancel_edit()))
 }
 
 /// `m:ss.d`
@@ -185,7 +186,7 @@ fn clock(t: f64) -> String {
 fn play_bar(s: &TranscribeTab) -> El {
     let t = crate::style::theme();
     let duration = s.loaded.as_ref().map_or(0.0, |l| l.duration);
-    let label = if s.is_playing() { "Pause" } else { "Play" };
+    let label = if s.is_playing() { tr!("Pause", "Duraklat") } else { tr!("Play", "Çal") };
     row()
         .w_full()
         .center_y()
@@ -212,13 +213,13 @@ fn script_column(s: &TranscribeTab) -> El {
         .radius(10.0)
         .fill(t.card)
         .border(1.0, t.card_border)
-        .placeholder("Paste the script here", t.text_secondary)
+        .placeholder(tr!("Paste the script here", "Metni buraya yapıştırın"), t.text_secondary)
         .on_edit(|s: &mut App| &mut s.transcribe.script_field)
         .on_submit(|s: &mut App, _| s.transcribe.script_field.insert("\n"));
     let summary = if s.script.trim().is_empty() {
-        "Paste a script to check what the speaker said.".to_string()
+        tr!("Paste a script to check what the speaker said.", "Konuşmacının ne dediğini denetlemek için bir metin yapıştırın.").to_string()
     } else if s.selected_done().is_none() {
-        "Pick a finished file to check it.".to_string()
+        tr!("Pick a finished file to check it.", "Denetlemek için biten bir dosya seçin.").to_string()
     } else {
         counts_text(&s.diff)
     };
@@ -227,9 +228,9 @@ fn script_column(s: &TranscribeTab) -> El {
         .h_full()
         .min_h(0.0)
         .gap(space::S2)
-        .child(text("Script check").font(type_::TITLE).color(t.text))
+        .child(text(tr!("Script check", "Metin denetimi")).font(type_::TITLE).color(t.text))
         .child(field)
-        .child(button("open-script", "Open script…", true, |s, tx| s.transcribe.open_script(tx)))
+        .child(button("open-script", tr!("Open script…", "Metni aç…"), true, |s, tx| s.transcribe.open_script(tx)))
         .child(text(summary).key("script-counts").font(type_::BODY).color(t.text).wrap());
     if let Some((_, tr)) = s.selected_done() {
         let script_words: Vec<&str> = s.script.split_whitespace().collect();
@@ -242,15 +243,15 @@ fn script_column(s: &TranscribeTab) -> El {
                 DiffOp::Same { .. } => continue,
                 DiffOp::Missing { script } => {
                     n_missing += 1;
-                    ("Missing", sw(script).to_string(), red(), format!("diff-missing-{}", n_missing - 1))
+                    (tr!("Missing", "Eksik"), sw(script).to_string(), red(), format!("diff-missing-{}", n_missing - 1))
                 }
                 DiffOp::Added { heard } => {
                     n_added += 1;
-                    ("Added", hw(heard).to_string(), green(), format!("diff-added-{}", n_added - 1))
+                    (tr!("Added", "Fazla"), hw(heard).to_string(), green(), format!("diff-added-{}", n_added - 1))
                 }
                 DiffOp::Changed { script, heard } => {
                     n_changed += 1;
-                    ("Changed", format!("{} → {}", sw(script), hw(heard)), red(), format!("diff-changed-{}", n_changed - 1))
+                    (tr!("Changed", "Farklı"), format!("{} → {}", sw(script), hw(heard)), red(), format!("diff-changed-{}", n_changed - 1))
                 }
             };
             let line = format!("{kind}: {word}");

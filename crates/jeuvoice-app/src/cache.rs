@@ -51,7 +51,7 @@ pub fn load(dir: &Path, source: &Path, language: &str) -> Option<Transcript> {
 /// Save the transcript of `source`, made for the asked `language`. The error is plain words for
 /// the file list.
 pub fn save(dir: &Path, source: &Path, language: &str, transcript: &Transcript) -> Result<(), String> {
-    let fail = |e: &dyn std::fmt::Display| format!("The transcript could not be saved in {}: {e}", dir.display());
+    let fail = |e: &dyn std::fmt::Display| crate::i18n::tr!("The transcript could not be saved in {}: {e}", "Döküm {} konumuna kaydedilemedi: {e}", dir.display());
     let (size, modified) = stamp(source).map_err(|e| fail(&e))?;
     fs::create_dir_all(dir).map_err(|e| fail(&e))?;
     let entry = Entry { size, modified, language: language.to_string(), transcript: transcript.clone() };
