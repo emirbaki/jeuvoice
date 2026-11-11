@@ -247,24 +247,53 @@ fn placeholder(msg: &str) -> El {
 
 fn word_editor(s: &TranscribeTab) -> El {
     let t = crate::style::theme();
-    let field = text_input(&s.word_field, type_::BODY)
-        .key("word-edit")
-        .single_line()
-        .w(220.0)
-        .padding(space::S1)
-        .radius(10.0)
-        .fill(t.control_track)
-        .on_edit(|s: &mut App| &mut s.transcribe.word_field)
-        .on_submit(|s: &mut App, _| s.transcribe.save_word());
-    // A new word slides the edit line in from the right; the field is in place
-    // and its text swaps to the clicked word.
     let i = s.editing.unwrap_or(0);
+    let Some((_, tr)) = s.selected_done() else { return el() };
+    let mut field = Some(
+        text_input(&s.word_field, type_::BODY)
+            .key("word-edit")
+            .single_line()
+            .w(180.0)
+            .padding(space::S1)
+            .radius(10.0)
+            .fill(t.control_track)
+            .on_edit(|s: &mut App| &mut s.transcribe.word_field)
+            .on_submit(|s: &mut App, _| s.transcribe.save_word()),
+    );
+    // The selected word sits in the middle with its neighbours around it. A new
+    // selection rebuilds this row under a new key, so it slides into place.
+    let from = i.saturating_sub(2);
+    let to = (i + 3).min(tr.words.len());
+    let mut context = row()
+        .key(format!("word-context-{i}"))
+        .transition(Transition::offset(10.0, 0.0).combined(Transition::opacity()))
+        .center_y()
+        .gap(space::S1);
+    for j in from..to {
+        if j == i {
+            context = context.child(field.take().expect("the field sits once"));
+        } else {
+            let w = &tr.words[j];
+            context = context.child(
+                el()
+                    .key(format!("word-neighbor-{j}"))
+                    .role("button")
+                    .label(w.text.as_str())
+                    .px(2.0)
+                    .py(1.0)
+                    .radius(4.0)
+                    .cursor(rune::Cursor::Pointer)
+                    .hover(crate::style::hover_fill())
+                    .on_press(move |s: &mut App| s.transcribe.edit_word(j))
+                    .child(text(w.text.as_str()).font(type_::LABEL).color(t.text_secondary)),
+            );
+        }
+    }
     row()
-        .key(format!("word-editor-{i}"))
-        .transition(Transition::offset(8.0, 0.0).combined(Transition::opacity()))
         .gap(space::S2)
-        .child(text(tr!("Fix the word:", "Sözcüğü düzeltin:")).font(type_::LABEL).color(t.text_secondary))
-        .child(field)
+        .center_y()
+        .child(text(tr!("Fix:", "Düzelt:")).font(type_::LABEL).color(t.text_secondary))
+        .child(context)
         .child(button("word-save", tr!("Save", "Kaydet"), true, |s, _| s.transcribe.save_word()))
         .child(button("word-cancel", tr!("Cancel", "İptal"), true, |s, _| s.transcribe.cancel_edit()))
 }

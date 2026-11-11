@@ -343,6 +343,8 @@ fn a_transcript_word_can_be_edited_from_the_panel() {
     rig.tap("transcript-word-1");
     assert_eq!(rig.rt.state.transcribe.editing, Some(1), "a click opens the word");
     assert!(rig.rt.find("word-edit").is_some(), "the edit field is on screen");
+    assert!(rig.rt.find("word-neighbor-0").is_some(), "the previous word is shown");
+    assert!(rig.rt.find("word-neighbor-1").is_none(), "the selected word is the field");
 }
 
 #[test]
