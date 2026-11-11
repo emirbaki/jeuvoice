@@ -75,7 +75,6 @@ pub fn waveform<S: 'static>(
         .on_drag({
             let lens = lens.clone();
             let on_word = on_word.clone();
-            let on_edit = on_word_double.clone();
             let spans = spans.clone();
             move |s: &mut S, d: &mut Drag, tx: &mut rune::Tx| {
                 drag(lens(s), d, duration);
@@ -83,7 +82,6 @@ pub fn waveform<S: 'static>(
                     let t = time_at(lens(s), d.x, d.w, duration);
                     if let Some(i) = word_at(&spans, t) {
                         on_word(s, i);
-                        on_edit(s, i);
                         tx.scroll_into_view(format!("transcript-word-{i}"));
                     }
                 }
@@ -246,9 +244,9 @@ fn word_row<S: 'static>(
     let end = v.start + v.span;
     let spans: Vec<(f64, f64)> = words.iter().map(|w| (w.start, w.end)).collect();
     let (start, span) = (v.start, v.span);
+    let active = word_at(&spans, v.playhead);
     let on_row_click = {
         let seek = on_word.clone();
-        let edit = on_word_double.clone();
         move |s: &mut S, d: &mut Drag, tx: &mut rune::Tx| {
             if d.phase != Phase::Up || d.cancelled() || d.data > 0.0 {
                 return;
@@ -256,7 +254,6 @@ fn word_row<S: 'static>(
             let t = start + f64::from((d.x / d.w.max(1.0)).clamp(0.0, 1.0)) * span;
             if let Some(i) = word_at(&spans, t) {
                 seek(s, i);
-                edit(s, i);
                 tx.scroll_into_view(format!("transcript-word-{i}"));
             }
         }
@@ -298,8 +295,28 @@ fn word_row<S: 'static>(
             .radius(4.0)
             .cursor(Cursor::Pointer)
             .hover(crate::style::hover_fill())
-            .label(w.text.as_str())
-            .on_press(move |s: &mut S| on_word(s, i))
+            .label(w.text.as_str());
+        if active == Some(i) {
+            word = word.child(
+                el()
+                    .key("wave-active")
+                    .matched("wave-active")
+                    .absolute(0.0, 0.0)
+                    .w_full()
+                    .h_full()
+                    .radius(4.0)
+                    .motion(rune::tok::motion::SNAPPY)
+                    .fill(crate::style::palette().accent.alpha(0.22)),
+            );
+        }
+        word = word
+            .on_press({
+                let edit = on_word_double.clone();
+                move |s: &mut S| {
+                    on_word(s, i);
+                    edit(s, i);
+                }
+            })
             .on_double_press(move |s: &mut S| on_word_double(s, i))
             .child(text(w.text.as_str()).font(type_::BODY).color(color));
         if has(Mark::LowProb) {

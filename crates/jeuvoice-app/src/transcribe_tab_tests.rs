@@ -348,7 +348,7 @@ fn a_transcript_word_can_be_edited_from_the_panel() {
 }
 
 #[test]
-fn clicking_the_wave_shows_the_word_editor() {
+fn clicking_the_wave_moves_the_word_row_without_editing() {
     let mut rig = Rig::new();
     rig.transcribed("a.wav");
     let wave = rig.rect("wave");
@@ -357,10 +357,24 @@ fn clicking_the_wave_shows_the_word_editor() {
     rig.rt.pointer_down(x, y);
     rig.rt.pointer_up(x, y);
     rig.rt.frame(1.0 / 60.0);
-    assert_eq!(rig.rt.state.transcribe.editing, Some(1), "the clicked point picks the last word");
-    assert!(rig.rt.find("word-edit").is_some(), "the green edit line is on screen");
-    let edit = rig.rect("word-edit");
-    assert!(edit[1] >= wave[1] + wave[3] - 0.5, "the edit line sits under the wave: {edit:?} vs {wave:?}");
+    assert_eq!(rig.rt.state.transcribe.editing, None, "a wave click only moves the row");
+    assert!(rig.rt.find("word-edit").is_none(), "no editor opens");
+    let pill = rig.rect("wave-active");
+    let word = rig.rect("word-1");
+    assert!(
+        pill[0] >= word[0] - 0.5 && pill[1] >= word[1] - 0.5
+            && pill[0] + pill[2] <= word[0] + word[2] + 0.5,
+        "the active pill {pill:?} slides onto word 1 {word:?}"
+    );
+}
+
+#[test]
+fn clicking_a_word_opens_the_editor() {
+    let mut rig = Rig::new();
+    rig.transcribed("a.wav");
+    rig.tap("word-1");
+    assert_eq!(rig.rt.state.transcribe.editing, Some(1), "a word click opens the edit line");
+    assert!(rig.rt.find("word-edit").is_some());
 }
 
 #[test]
@@ -379,7 +393,7 @@ fn the_transcript_pill_follows_the_playhead() {
 }
 
 #[test]
-fn a_click_on_the_clipped_word_row_edits_the_nearest_word() {
+fn a_click_on_the_clipped_word_row_moves_the_nearest_word_without_editing() {
     let mut rig = Rig::new();
     rig.transcribed("a.wav");
     let row = rig.rect("wave-words");
@@ -388,8 +402,10 @@ fn a_click_on_the_clipped_word_row_edits_the_nearest_word() {
     rig.rt.pointer_down(x, y);
     rig.rt.pointer_up(x, y);
     rig.rt.frame(1.0 / 60.0);
-    assert_eq!(rig.rt.state.transcribe.editing, Some(1), "the last word is the nearest");
-    assert!(rig.rt.find("word-edit").is_some());
+    assert_eq!(rig.rt.state.transcribe.editing, None, "the empty row only moves the selection");
+    let pill = rig.rect("wave-active");
+    let word = rig.rect("word-1");
+    assert!(pill[0] >= word[0] - 0.5 && pill[1] >= word[1] - 0.5, "the last word is the nearest");
 }
 
 #[test]
@@ -454,9 +470,7 @@ fn fixing_a_word_changes_the_export() {
     let mut rig = Rig::new();
     rig.transcribed("a.wav");
     rig.tap("word-1");
-    rig.rt.frame(0.1);
-    rig.tap("word-1");
-    assert_eq!(rig.rt.state.transcribe.editing, Some(1), "a double click opens the word for editing");
+    assert_eq!(rig.rt.state.transcribe.editing, Some(1), "a click opens the word for editing");
     rig.tap("word-edit");
     rig.rt.update(|s, _| {
         let e = &mut s.transcribe.word_field;
