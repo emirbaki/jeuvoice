@@ -327,6 +327,15 @@ fn clicking_a_difference_moves_the_playhead() {
 }
 
 #[test]
+fn the_full_transcript_is_shown_in_a_scrolling_panel() {
+    let mut rig = Rig::new();
+    rig.transcribed("a.wav");
+    assert!(rig.rt.find("transcript-panel").is_some(), "the transcript panel is on screen");
+    assert_eq!(rig.text("transcript-text"), "Joel Ellie");
+    assert!(rig.rt.find("transcript-viewport").is_some(), "the full text can scroll");
+}
+
+#[test]
 fn the_drop_hint_stays_inside_its_box() {
     let rig = Rig::new();
     let drop = rig.rect("drop");
@@ -444,7 +453,7 @@ fn fixture() -> App {
         ("C:/takes/notes.m4a".into(), ItemState::Failed("JeuVoice cannot read this file type: notes.m4a. Try a supported audio or video file and drop it again.".into())),
     ];
     s.selected = Some(0);
-    s.loaded = Some(Loaded { peaks, duration: 10.0 });
+    s.loaded = Some(Loaded { peaks, duration: 10.0, audio: jeuvoice_core::audio::Audio { samples: vec![], rate: 16_000 } });
     s.view = WaveView { start: 0.0, span: 10.0, selection: None, playhead: 3.3 };
     s.script_field = rune::TextEdit::new(script);
     s.script = script.into();

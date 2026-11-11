@@ -3,6 +3,7 @@
 
 use jeuvoice_core::queue::ItemState;
 use jeuvoice_core::script_diff::DiffOp;
+use jeuvoice_core::transcript::Transcript;
 use rune::tok::{space, type_};
 use rune::{El, FileDialogOptions, ScrollSpec, Tx, col, el, row, text, text_input};
 
@@ -169,7 +170,45 @@ fn main_column(s: &TranscribeTab) -> El {
     if let Some(n) = &s.notice {
         main = main.child(text(crate::core_text::message(n)).key("notice").font(type_::LABEL).color(t.text_secondary).wrap());
     }
-    main.child(el().grow(1.0)).child(play_bar(s))
+    // The word row under the wave shows only the visible time span. The full
+    // text needs its own wrapped, scrollable panel.
+    if let Some((_, tr)) = done {
+        main = main.child(transcript_panel(tr));
+    } else {
+        main = main.child(el().grow(1.0));
+    }
+    main.child(play_bar(s))
+}
+
+/// The whole transcript, wrapped, in a panel that scrolls when it is long.
+fn transcript_panel(tr: &Transcript) -> El {
+    let t = crate::style::theme();
+    col()
+        .key("transcript-panel")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .padding(space::S3)
+        .gap(space::S2)
+        .radius(12.0)
+        .fill(t.card)
+        .child(section(tr!("Transcript", "Transkript")))
+        .child(
+            col()
+                .key("transcript-viewport")
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .scroll(ScrollSpec { stick_bottom: false })
+                .child(
+                    text(tr.text())
+                        .key("transcript-text")
+                        .font(type_::BODY)
+                        .color(t.text)
+                        .w_full()
+                        .wrap(),
+                ),
+        )
 }
 
 fn placeholder(msg: &str) -> El {

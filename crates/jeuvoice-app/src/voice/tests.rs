@@ -11,6 +11,7 @@ use jeuvoice_whisper::{FakeTranscriber, TranscribeOptions, Transcriber, WhisperE
 use rune::{Env, FileDialogKind, Runtime};
 
 use crate::settings::MemStore;
+use crate::services::player::PlayerOwner;
 use crate::state::{App, Deps};
 use crate::view::view;
 use crate::voice::state::{VoiceStatus, projects_root};
@@ -259,6 +260,25 @@ fn generate_builds_a_timeline_with_words() {
     assert!(project.paragraphs.iter().all(|p| p.takes.len() == 1 && p.words.len() == 2));
     assert!(dir.join("audio").join("p00_t1.wav").exists());
     assert!(dir.join("audio").join("p01_t1.wav").exists());
+}
+
+#[test]
+fn the_play_button_takes_the_player_and_plays_the_timeline() {
+    let mut rig = Rig::with_engine(Arc::new(FakeEngineApi::new()));
+    // Transcribe may own the shared player after an earlier file.
+    rig.rt.state.transcribe.player_mut().load(
+        PlayerOwner::Transcribe,
+        jeuvoice_core::audio::Audio { samples: vec![0.0; 100], rate: 16_000 },
+    );
+    rig.paste_script("Birinci paragraf burada bitiyor.");
+    rig.tap("voice-generate");
+    rig.until("the timeline is ready", |s| s.voice.timeline.as_ref().is_some_and(|t| !t.words.is_empty()));
+    rig.tap("voice-play");
+    assert_eq!(
+        rig.rt.state.transcribe.player().owner(),
+        Some(PlayerOwner::Voice),
+        "the Voice tab takes the player and loads the timeline"
+    );
 }
 
 #[test]

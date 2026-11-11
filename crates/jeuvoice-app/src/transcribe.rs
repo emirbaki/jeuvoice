@@ -85,10 +85,12 @@ pub struct ModelStatus {
     pub on_gpu: Option<bool>,
 }
 
-/// The selected file's waveform.
+/// The selected file's waveform and its sound, so Play can retake the shared
+/// player after another tab used it.
 pub struct Loaded {
     pub peaks: Peaks,
     pub duration: f64,
+    pub audio: Audio,
 }
 
 /// Item index, its sound (at the sound output's rate when sound is on) and its peaks.
@@ -306,6 +308,11 @@ impl TranscribeTab {
         if self.loaded.is_none() {
             return;
         }
+        // The Voice tab may have taken the shared player; load this file again.
+        if self.player.owner() != Some(PlayerOwner::Transcribe) {
+            let Some(audio) = self.loaded.as_ref().map(|l| l.audio.clone()) else { return };
+            self.player.load(PlayerOwner::Transcribe, audio);
+        }
         let at = self.view.playhead;
         if let Some(pb) = self.player.player(PlayerOwner::Transcribe) {
             if pb.is_playing() {
@@ -314,6 +321,8 @@ impl TranscribeTab {
                 pb.seek(at);
                 pb.play();
             }
+        } else if let Some(e) = self.player.take_error() {
+            self.notice = Some(e);
         }
     }
 
@@ -575,11 +584,11 @@ impl TranscribeTab {
                 let duration = a.samples.len() as f64 / f64::from(a.rate.max(1));
                 self.view = WaveView { start: 0.0, span: duration.max(0.001), selection: None, playhead: 0.0 };
                 self.synced_playhead = 0.0;
-                self.player.load(PlayerOwner::Transcribe, a);
+                self.player.load(PlayerOwner::Transcribe, a.clone());
                 if let Some(e) = self.player.take_error() {
                     self.notice = Some(e);
                 }
-                self.loaded = Some(Loaded { peaks: p, duration });
+                self.loaded = Some(Loaded { peaks: p, duration, audio: a });
             }
             Ok(_) => {}
             Err(e) => self.notice = Some(e),

@@ -137,6 +137,8 @@ pub struct VoiceTab {
     events: mpsc::Receiver<VoiceEvent>,
     pub(crate) pending_generate: bool,
     para_starts: Vec<(usize, f64)>,
+    /// Whether the shared player holds the full timeline (not a single take).
+    timeline_in_player: bool,
     was_playing: bool,
     synced_playhead: f64,
 }
@@ -185,6 +187,7 @@ impl VoiceTab {
             events,
             pending_generate: false,
             para_starts: Vec::new(),
+            timeline_in_player: false,
             was_playing: false,
             synced_playhead: 0.0,
         }
@@ -378,6 +381,7 @@ impl VoiceTab {
         self.synced_playhead = 0.0;
         self.para_starts = starts.to_vec();
         self.timeline = Some(VoiceTimeline { audio, words, language: "tr".into(), peaks, duration });
+        self.timeline_in_player = false;
         self.project = Some(project);
         self.refresh_diff();
     }
@@ -507,6 +511,7 @@ impl VoiceTab {
         self.active_para = Some(para);
         self.view.playhead = start;
         self.sync_para_override_fields();
+        self.timeline_in_player = false;
         player.load(PlayerOwner::Voice, a);
         if let Some(pb) = player.player(PlayerOwner::Voice) {
             pb.seek(0.0);
@@ -782,9 +787,16 @@ impl VoiceTab {
     }
 
     pub fn toggle_play(&mut self, player: &mut SharedPlayer) {
-        let Some(t) = &self.timeline else { return };
-        if t.audio.samples.is_empty() {
+        if self.timeline.as_ref().is_none_or(|t| t.audio.samples.is_empty()) {
             return;
+        }
+        // Generate stores the timeline but does not load it into the shared
+        // player. Take the player here too: Transcribe may still own it.
+        if !self.timeline_in_player || player.owner() != Some(PlayerOwner::Voice) {
+            let audio = self.timeline.as_ref().expect("checked above").audio.clone();
+            player.load(PlayerOwner::Voice, audio);
+            // A failed device leaves no playback; try again on the next press.
+            self.timeline_in_player = player.player(PlayerOwner::Voice).is_some();
         }
         let at = self.view.playhead;
         if let Some(pb) = player.player(PlayerOwner::Voice) {
@@ -794,6 +806,8 @@ impl VoiceTab {
                 pb.seek(at);
                 pb.play();
             }
+        } else if let Some(e) = player.take_error() {
+            self.notice = Some(e);
         }
     }
 

@@ -41,7 +41,8 @@ impl SharedPlayer {
     }
 
     /// The player for `owner`, opening the device on first use. `None` when another
-    /// tab owns it, when sound is off, or when the device cannot open.
+    /// tab owns it, when sound is off, or when the device cannot open. Polling
+    /// code uses this: it never takes the player from the tab the user is on.
     pub fn player(&mut self, owner: PlayerOwner) -> Option<&mut Playback> {
         if self.owner.is_none() {
             self.owner = Some(owner);
@@ -49,6 +50,24 @@ impl SharedPlayer {
         if self.owner != Some(owner) {
             return None;
         }
+        self.ensure_device();
+        self.playback.as_mut()
+    }
+
+    /// The player for `owner`, taking it from another tab. A press on a play
+    /// button uses this: the old tab stops and the new one loads its own audio.
+    pub fn take(&mut self, owner: PlayerOwner) -> Option<&mut Playback> {
+        if self.owner != Some(owner) {
+            if let Some(pb) = self.playback.as_mut() {
+                pb.pause();
+            }
+            self.owner = Some(owner);
+        }
+        self.ensure_device();
+        self.playback.as_mut()
+    }
+
+    fn ensure_device(&mut self) {
         if self.playback.is_none() && self.sound {
             match Playback::new() {
                 Ok(pb) => self.playback = Some(pb),
@@ -58,12 +77,11 @@ impl SharedPlayer {
                 }
             }
         }
-        self.playback.as_mut()
     }
 
-    /// Load a clip for `owner`. Takes the audio by value: no clone.
+    /// Load a clip for `owner`, taking the player. Takes the audio by value: no clone.
     pub fn load(&mut self, owner: PlayerOwner, audio: Audio) {
-        if let Some(pb) = self.player(owner) {
+        if let Some(pb) = self.take(owner) {
             pb.load(Arc::new(audio));
         }
     }
@@ -105,6 +123,17 @@ mod tests {
         assert!(p.player(PlayerOwner::Voice).is_none(), "another tab gets no player");
         assert!(!p.is_playing_for(PlayerOwner::Voice));
         assert!(!p.is_playing_for(PlayerOwner::Transcribe), "no device, nothing plays");
+    }
+
+    #[test]
+    fn another_tab_takes_the_player_on_use() {
+        let mut p = SharedPlayer::new(false);
+        p.load(PlayerOwner::Transcribe, Audio { samples: vec![0.1; 100], rate: 16_000 });
+        assert_eq!(p.owner(), Some(PlayerOwner::Transcribe));
+        p.load(PlayerOwner::Voice, Audio { samples: vec![0.2; 200], rate: 16_000 });
+        assert_eq!(p.owner(), Some(PlayerOwner::Voice), "a load takes the player");
+        assert_eq!(p.take(PlayerOwner::Train).map(|_| ()), None, "no device, but the owner moves");
+        assert_eq!(p.owner(), Some(PlayerOwner::Train));
     }
 
     #[test]
