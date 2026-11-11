@@ -241,20 +241,8 @@ impl VoiceTab {
             self.status = VoiceStatus::Failed(crate::i18n::tr!("Paste a script first.", "Önce bir metin yapıştırın.").into());
             return;
         }
-        let adapter_dir = match &preset.model.adapter {
-            AdapterRef::None => None,
-            other => {
-                let ctx = ResolveCtx { store: store.as_ref(), engine: Some(api.clone()) };
-                match resolve_adapter(other, settings, &ctx) {
-                    Ok(dir) => Some(dir.to_string_lossy().into_owned()),
-                    Err(e) => {
-                        self.status = VoiceStatus::Failed(e);
-                        return;
-                    }
-                }
-            }
-        };
-        // The clip, resolved to an absolute path for the engine.
+        // The adapter may come from Hugging Face: resolve it in the worker, not
+        // here, or the first download freezes the window.
         let preset_dir = self.deps.presets_dir.join(&preset.name);
         let ref_audio =
             preset.ref_audio.as_ref().map(|r| preset_dir.join(r).to_string_lossy().into_owned());
@@ -278,6 +266,7 @@ impl VoiceTab {
         let projects_dir = self.deps.projects_dir.clone();
         let language = settings.whisper_language.clone();
         let use_gpu = settings.use_gpu && !force_cpu;
+        let worker_settings = settings.clone();
         let (events_tx, wake) = (self.events_tx.clone(), self.waker.clone());
         let say = move |e: VoiceEvent| {
             let _ = events_tx.send(e);
@@ -285,7 +274,7 @@ impl VoiceTab {
         };
         self.status = VoiceStatus::Working(crate::i18n::tr!("Starting…", "Başlıyor…").into());
         std::thread::spawn(move || {
-            run_generate(api, transcriber, preset, adapter_dir, ref_audio, project, projects_dir, language, use_gpu, say);
+            run_generate(api, transcriber, preset, store, worker_settings, ref_audio, project, projects_dir, language, use_gpu, say);
         });
     }
 
@@ -475,19 +464,6 @@ impl VoiceTab {
             self.status = VoiceStatus::Failed(crate::i18n::tr!("Choose a preset first.", "Önce bir hazır ayar seçin.").into());
             return;
         };
-        let adapter_dir = match &preset.model.adapter {
-            AdapterRef::None => None,
-            other => {
-                let ctx = ResolveCtx { store: store.as_ref(), engine: Some(api.clone()) };
-                match resolve_adapter(other, settings, &ctx) {
-                    Ok(dir) => Some(dir.to_string_lossy().into_owned()),
-                    Err(e) => {
-                        self.status = VoiceStatus::Failed(e);
-                        return;
-                    }
-                }
-            }
-        };
         let preset_dir = self.deps.presets_dir.join(&preset.name);
         let ref_audio =
             preset.ref_audio.as_ref().map(|r| preset_dir.join(r).to_string_lossy().into_owned());
@@ -503,6 +479,7 @@ impl VoiceTab {
         let projects_dir = self.deps.projects_dir.clone();
         let language = settings.whisper_language.clone();
         let use_gpu = settings.use_gpu && !force_cpu;
+        let worker_settings = settings.clone();
         let (events_tx, wake) = (self.events_tx.clone(), self.waker.clone());
         let say = move |e: VoiceEvent| {
             let _ = events_tx.send(e);
@@ -511,7 +488,7 @@ impl VoiceTab {
         self.status = VoiceStatus::Working(crate::i18n::tr!("Retaking…", "Yeniden çekiliyor…").into());
         self.active_para = regions.first().map(|&(p, _)| p);
         std::thread::spawn(move || {
-            run_retakes(api, transcriber, preset, adapter_dir, ref_audio, project, projects_dir, regions, language, use_gpu, say);
+            run_retakes(api, transcriber, preset, store, worker_settings, ref_audio, project, projects_dir, regions, language, use_gpu, say);
         });
     }
 
@@ -975,13 +952,31 @@ fn parse_opt<T: std::str::FromStr>(s: &str) -> Result<Option<T>, ()> {
     s.parse().map(Some).map_err(|_| ())
 }
 
+/// Resolve the preset's adapter to a folder. A remote adapter downloads here,
+/// on the worker: never on the UI thread.
+fn resolved_adapter(
+    api: &Arc<dyn EngineApi>,
+    preset: &Preset,
+    settings: &Settings,
+    store: &dyn TokenStore,
+) -> Result<Option<String>, String> {
+    match &preset.model.adapter {
+        AdapterRef::None => Ok(None),
+        other => {
+            let ctx = ResolveCtx { store, engine: Some(api.clone()) };
+            resolve_adapter(other, settings, &ctx).map(|dir| Some(dir.to_string_lossy().into_owned()))
+        }
+    }
+}
+
 /// The Generate worker: load, render, join, whisper, save. Reports through `say`.
 #[allow(clippy::too_many_arguments)]
 fn run_generate(
     api: Arc<dyn EngineApi>,
     transcriber: Arc<dyn Transcriber>,
     preset: Preset,
-    adapter_dir: Option<String>,
+    store: Arc<dyn TokenStore>,
+    settings: Settings,
     ref_audio: Option<String>,
     mut project: Project,
     projects_dir: PathBuf,
@@ -990,6 +985,11 @@ fn run_generate(
     say: impl Fn(VoiceEvent) + Send + 'static,
 ) {
     let fail = |e: String| say(VoiceEvent::Failed(e));
+    say(VoiceEvent::Progress(crate::i18n::tr!("Preparing the voice model…", "Ses modeli hazırlanıyor…").into()));
+    let adapter_dir = match resolved_adapter(&api, &preset, &settings, store.as_ref()) {
+        Ok(dir) => dir,
+        Err(e) => return fail(e),
+    };
     say(VoiceEvent::Progress(crate::i18n::tr!("Loading the voice model…", "Ses modeli yükleniyor…").into()));
     let load = match api.load(&preset.model.base, adapter_dir.as_deref(), "auto") {
         Ok(job) => job,
@@ -1106,7 +1106,8 @@ fn run_retakes(
     api: Arc<dyn EngineApi>,
     transcriber: Arc<dyn Transcriber>,
     preset: Preset,
-    adapter_dir: Option<String>,
+    store: Arc<dyn TokenStore>,
+    settings: Settings,
     ref_audio: Option<String>,
     project: Project,
     projects_dir: PathBuf,
@@ -1116,6 +1117,11 @@ fn run_retakes(
     say: impl Fn(VoiceEvent) + Send + 'static,
 ) {
     let fail = |e: String| say(VoiceEvent::Failed(e));
+    say(VoiceEvent::Progress(crate::i18n::tr!("Preparing the voice model…", "Ses modeli hazırlanıyor…").into()));
+    let adapter_dir = match resolved_adapter(&api, &preset, &settings, store.as_ref()) {
+        Ok(dir) => dir,
+        Err(e) => return fail(e),
+    };
     say(VoiceEvent::Progress(crate::i18n::tr!("Loading the voice model…", "Ses modeli yükleniyor…").into()));
     let load = match api.load(&preset.model.base, adapter_dir.as_deref(), "auto") {
         Ok(job) => job,

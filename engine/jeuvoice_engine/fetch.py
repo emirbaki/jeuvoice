@@ -25,29 +25,40 @@ def adapter_dir(data_dir: Path, repo: str, subfolder: str | None) -> Path:
 
 
 def fetch_adapter(repo: str, subfolder: str | None, token: str | None, data_dir: Path, log: logging.Logger) -> str:
-    """Download `subfolder/*` of `repo` and return the adapter folder path."""
+    """Download the adapter and return the folder that holds adapter_config.json.
+
+    `upload_adapter.py` puts the checkpoint files at the repo root, while a
+    model repo may keep them in a subfolder. Try the subfolder first, then the
+    root, so both layouts work. The old code put `local_dir` on the subfolder
+    itself, which made Hugging Face write `subfolder/subfolder/...`.
+    """
     from huggingface_hub import snapshot_download
     from huggingface_hub.utils import HfHubHTTPError
 
-    dest = adapter_dir(data_dir, repo, subfolder)
-    if dest.is_dir() and any(dest.iterdir()):
-        return str(dest)
-    allow = [f"{subfolder}/*"] if subfolder else None
-    try:
-        snapshot_download(
-            repo_id=repo,
-            allow_patterns=allow,
-            token=token or None,
-            local_dir=str(dest),
-            local_dir_use_symlinks=False,
-        )
-    except HfHubHTTPError as e:
-        log.error("adapter download refused for %s: %s\n%s", repo, e, traceback.format_exc())
-        code = e.response.status_code if e.response is not None else 0
-        if code == 401:
-            raise FetchError(HF_TOKEN_MESSAGE) from e
-        raise FetchError(DOWNLOAD_FAILED) from e
-    except Exception as e:  # noqa: BLE001 - plain error to the client, traceback to the log
-        log.error("adapter download failed for %s: %s\n%s", repo, e, traceback.format_exc())
-        raise FetchError(DOWNLOAD_FAILED) from e
-    return str(dest)
+    root = adapter_dir(data_dir, repo, None)
+    candidates = [subfolder] if subfolder else []
+    candidates.append(None)
+    for sub in candidates:
+        allow = [f"{sub}/*"] if sub else None
+        try:
+            snapshot_download(
+                repo_id=repo,
+                allow_patterns=allow,
+                token=token or None,
+                local_dir=str(root),
+                local_dir_use_symlinks=False,
+            )
+        except HfHubHTTPError as e:
+            log.error("adapter download refused for %s (%s): %s\n%s", repo, sub, e, traceback.format_exc())
+            code = e.response.status_code if e.response is not None else 0
+            if code == 401:
+                raise FetchError(HF_TOKEN_MESSAGE) from e
+            # A missing subfolder is normal; the root may hold the files.
+            continue
+        except Exception as e:  # noqa: BLE001 - plain error to the client, traceback to the log
+            log.error("adapter download failed for %s (%s): %s\n%s", repo, sub, e, traceback.format_exc())
+            continue
+        dest = root / (sub or "")
+        if (dest / "adapter_config.json").is_file():
+            return str(dest)
+    raise FetchError(DOWNLOAD_FAILED)

@@ -1,6 +1,7 @@
 """Adapter fetch tests (fake backend; the failure path needs the network)."""
 
 import json
+import logging
 import subprocess
 import sys
 import tempfile
@@ -52,3 +53,27 @@ def test_unknown_repo_gives_a_plain_error():
         except Exception:
             pass
         proc.wait(timeout=15)
+
+
+def test_a_missing_subfolder_falls_back_to_the_repo_root(monkeypatch, tmp_path):
+    # upload_adapter.py puts the files at the repo root, while a preset may
+    # name checkpoint-6000. The fetch must find the root files.
+    import huggingface_hub
+
+    from jeuvoice_engine.fetch import fetch_adapter
+
+    calls = []
+
+    def fake_snapshot_download(repo_id, allow_patterns, token, local_dir, local_dir_use_symlinks):
+        calls.append(allow_patterns)
+        if allow_patterns is None:
+            dest = Path(local_dir)
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "adapter_config.json").write_text("{}")
+        return local_dir
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+    path = fetch_adapter("u/r", "checkpoint-6000", None, tmp_path, logging.getLogger("test"))
+    assert Path(path) == tmp_path / "models" / "u__r"
+    assert (Path(path) / "adapter_config.json").is_file()
+    assert calls == [["checkpoint-6000/*"], None]
