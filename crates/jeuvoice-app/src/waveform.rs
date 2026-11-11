@@ -201,6 +201,17 @@ fn wave_shape(v: &WaveView, peaks: &Peaks, words: &[Word], width: f32) -> Shape 
     shape.view_box(cols as f32, WAVE_H)
 }
 
+/// The word at `t`, or the next one, or the last one when `t` is past the end.
+fn word_at(spans: &[(f64, f64)], t: f64) -> Option<usize> {
+    if let Some(i) = spans.iter().position(|&(a, b)| t >= a && t <= b) {
+        return Some(i);
+    }
+    if let Some(i) = spans.iter().position(|&(a, _)| a >= t) {
+        return Some(i);
+    }
+    spans.len().checked_sub(1)
+}
+
 /// The words in the visible range, each at the x of its start time, or just right of the word
 /// before when they would overlap.
 fn word_row<S: 'static>(
@@ -213,7 +224,29 @@ fn word_row<S: 'static>(
 ) -> El {
     let t = crate::style::theme();
     let end = v.start + v.span;
-    let mut row = el().w_full().h(WORDS_H).clip_rounded(0.0);
+    let spans: Vec<(f64, f64)> = words.iter().map(|w| (w.start, w.end)).collect();
+    let (start, span) = (v.start, v.span);
+    let on_row_click = {
+        let seek = on_word.clone();
+        let edit = on_word_double.clone();
+        move |s: &mut S, d: &mut Drag, _tx: &mut rune::Tx| {
+            if d.phase != Phase::Up || d.cancelled() || d.data > 0.0 {
+                return;
+            }
+            let t = start + f64::from((d.x / d.w.max(1.0)).clamp(0.0, 1.0)) * span;
+            if let Some(i) = word_at(&spans, t) {
+                seek(s, i);
+                edit(s, i);
+            }
+        }
+    };
+    let mut row = el()
+        .key("wave-words")
+        .w_full()
+        .h(WORDS_H)
+        .clip_rounded(0.0)
+        .cursor(Cursor::Text)
+        .on_drag(on_row_click);
     let mut free_x = f32::NEG_INFINITY;
     // Words are in time order, so the first visible word is the first that ends after `start`.
     let first = words.partition_point(|w| w.end <= v.start);

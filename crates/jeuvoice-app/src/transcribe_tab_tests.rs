@@ -331,8 +331,32 @@ fn the_full_transcript_is_shown_in_a_scrolling_panel() {
     let mut rig = Rig::new();
     rig.transcribed("a.wav");
     assert!(rig.rt.find("transcript-panel").is_some(), "the transcript panel is on screen");
-    assert_eq!(rig.text("transcript-text"), "Joel Ellie");
+    assert_eq!(rig.text("transcript-word-0"), "Joel");
+    assert_eq!(rig.text("transcript-word-1"), "Ellie");
     assert!(rig.rt.find("transcript-viewport").is_some(), "the full text can scroll");
+}
+
+#[test]
+fn a_transcript_word_can_be_edited_from_the_panel() {
+    let mut rig = Rig::new();
+    rig.transcribed("a.wav");
+    rig.tap("transcript-word-1");
+    assert_eq!(rig.rt.state.transcribe.editing, Some(1), "a click opens the word");
+    assert!(rig.rt.find("word-edit").is_some(), "the edit field is on screen");
+}
+
+#[test]
+fn a_click_on_the_clipped_word_row_edits_the_nearest_word() {
+    let mut rig = Rig::new();
+    rig.transcribed("a.wav");
+    let row = rig.rect("wave-words");
+    let (x, y) = (row[0] + row[2] * 0.95, row[1] + row[3] * 0.5);
+    rig.rt.pointer_move(x, y);
+    rig.rt.pointer_down(x, y);
+    rig.rt.pointer_up(x, y);
+    rig.rt.frame(1.0 / 60.0);
+    assert_eq!(rig.rt.state.transcribe.editing, Some(1), "the last word is the nearest");
+    assert!(rig.rt.find("word-edit").is_some());
 }
 
 #[test]

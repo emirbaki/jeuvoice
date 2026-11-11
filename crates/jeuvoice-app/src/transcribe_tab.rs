@@ -180,9 +180,30 @@ fn main_column(s: &TranscribeTab) -> El {
     main.child(play_bar(s))
 }
 
-/// The whole transcript, wrapped, in a panel that scrolls when it is long.
+/// The whole transcript as wrapped, clickable words. The wave row under the
+/// waveform shows only the visible time span, so this panel is where a long
+/// transcript can be read and a word double-clicked to fix it.
 fn transcript_panel(tr: &Transcript) -> El {
     let t = crate::style::theme();
+    let mut words = row().w_full().gap(2.0).flex_wrap();
+    for (i, w) in tr.words.iter().enumerate() {
+        words = words.child(
+            el()
+                .key(format!("transcript-word-{i}"))
+                .role("button")
+                .label(w.text.as_str())
+                .px(2.0)
+                .py(1.0)
+                .radius(4.0)
+                .cursor(rune::Cursor::Pointer)
+                .hover(crate::style::hover_fill())
+                .on_press(move |s: &mut App| {
+                    s.transcribe.seek_word(i);
+                    s.transcribe.edit_word(i);
+                })
+                .child(text(w.text.as_str()).font(type_::BODY).color(t.text)),
+        );
+    }
     col()
         .key("transcript-panel")
         .w_full()
@@ -200,14 +221,7 @@ fn transcript_panel(tr: &Transcript) -> El {
                 .grow(1.0)
                 .min_h(0.0)
                 .scroll(ScrollSpec { stick_bottom: false })
-                .child(
-                    text(tr.text())
-                        .key("transcript-text")
-                        .font(type_::BODY)
-                        .color(t.text)
-                        .w_full()
-                        .wrap(),
-                ),
+                .child(words),
         )
 }
 
