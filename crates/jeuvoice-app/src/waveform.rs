@@ -295,6 +295,7 @@ fn word_row<S: 'static>(
             .radius(4.0)
             .cursor(Cursor::Pointer)
             .hover(crate::style::hover_fill())
+            .motion(rune::tok::motion::SNAPPY)
             .label(w.text.as_str());
         if active == Some(i) {
             word = word.child(

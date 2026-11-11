@@ -196,6 +196,7 @@ fn transcript_panel(tr: &Transcript, view: &crate::waveform::WaveView) -> El {
             .radius(4.0)
             .opacity(if in_view { 1.0 } else { 0.45 })
             .transition(Transition::opacity())
+            .motion(rune::tok::motion::SNAPPY)
             .cursor(rune::Cursor::Pointer)
             .hover(crate::style::hover_fill())
             .on_press(move |s: &mut App| {
