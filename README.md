@@ -179,3 +179,31 @@ scripts\cargo.cmd test -p jeuvoice-app --release --test real_train -- --ignored 
 - The client waits (up to 10 minutes) for a fresh dataset version to read `READY` before pushing.
 - The loss curve reads `Eval Loss:` lines, so runs shorter than `eval_steps` show no curve.
 - The macOS build is not tested.
+
+## Status (Plan 4, Setup and installers)
+
+The user guide for teammates is in [docs/user-guide.md](docs/user-guide.md).
+
+### Done for the MVP
+
+- Locked engine packages for Windows (CUDA 12.6) and macOS.
+- The app finds its files in dev mode, in the Windows install folder, and in a macOS `.app`.
+- First-start setup makes the engine environment with a progress screen. An interrupted setup cleans up and starts again. A changed lock file runs setup again. An unchanged lock file keeps the environment.
+- An engine from another JeuVoice version does not start. Settings shows **Repair**, which runs setup again.
+- Windows installer: `scripts\make-installer.cmd` makes `dist\windows\jeuvoice-app_<version>_x64-setup.exe`. It installs per user with no admin rights. The uninstaller asks before it deletes the engine and the models. It never deletes `Documents\JeuVoice`.
+- macOS: `scripts/make-dmg.sh` makes the `.app` and the `.dmg` on an Apple Silicon Mac.
+- Tests: `scripts\cargo.cmd test --workspace` passes. The engine tests pass (`pytest`: 28 passed, 1 skipped. `-m gpu --gpu`: 1 passed).
+
+### What you must still do
+
+1. **Fresh-account test on Windows** (about 30 minutes): install on a second Windows user account or a VM. Fill in the test record in [packaging/windows/README.md](packaging/windows/README.md).
+2. **Signing on Windows** (about 10 minutes): run the `signtool` commands in [packaging/windows/README.md](packaging/windows/README.md) with your certificate.
+3. **Mac run** (about 1 hour): a teammate with an Apple Silicon Mac runs the Mac spike ([docs/mac-spike.md](docs/mac-spike.md)) and `scripts/make-dmg.sh`, then signs and notarizes ([packaging/macos/README.md](packaging/macos/README.md)).
+4. **Upload the tr2 adapter to Hugging Face**, so that teammates without a local checkpoint can use the Voice tab.
+5. **Checks by ear**: follow "Try it by ear" in the Plan 2 section.
+
+### Known gaps
+
+- Setup does not show "No supported graphics card found. Speech will be slow." when there is no NVIDIA card. The engine then runs on the CPU with no message.
+- The free-space check does not work on macOS. It never blocks setup there.
+- The macOS build is not tested.
