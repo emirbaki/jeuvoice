@@ -357,6 +357,7 @@ fn snap_voice() {
             per_second: PEAKS_PER_SECOND,
             min: vec![-0.1; 20],
             max: vec![0.1; 20],
+            zcr: vec![0.05; 20],
         };
         app.voice.project = Some(Project {
             version: 1,

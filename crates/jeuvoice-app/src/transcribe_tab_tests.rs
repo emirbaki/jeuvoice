@@ -382,7 +382,7 @@ fn fixture() -> App {
         let t = k as f32 / PEAKS_PER_SECOND as f32;
         ((t * 3.1).sin().abs() * (0.4 + 0.6 * (t * 0.7).sin().abs()) * (1.0 + 0.15 * (t * 53.0).sin())).min(1.0)
     };
-    let peaks = Peaks { per_second: PEAKS_PER_SECOND, min: (0..n).map(|k| -level(k)).collect(), max: (0..n).map(level).collect() };
+    let peaks = Peaks { per_second: PEAKS_PER_SECOND, min: (0..n).map(|k| -level(k)).collect(), max: (0..n).map(level).collect(), zcr: (0..n).map(|k| (k as f32 * 0.004).sin().abs() * 0.3).collect() };
     let script = "Joel ve Ellie şehirden çıkmak için eski bir tünele giriyor.";
     let s = &mut app.transcribe;
     s.queue.items = vec![

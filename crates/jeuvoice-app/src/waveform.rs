@@ -62,7 +62,7 @@ pub fn waveform<S: 'static>(
     on_word_double: impl Fn(&mut S, usize) + Clone + 'static,
 ) -> El {
     let width = rune::memo::layout_size(key).map_or(DEFAULT_W, |s| s[0]).max(1.0);
-    let wave = canvas(wave_shape(v, peaks, width))
+    let wave = canvas(wave_shape(v, peaks, words, width))
         .key(key)
         .w_full()
         .h(WAVE_H)
@@ -115,29 +115,88 @@ fn zoom(v: &mut WaveView, frac: f64, dy: f64, duration: f64) {
     v.start = (pinned - frac * span).clamp(0.0, (duration - span).max(0.0));
 }
 
-/// Vertical min-to-max strokes, one per point column, with the selection and playhead on top.
-fn wave_shape(v: &WaveView, peaks: &Peaks, width: f32) -> Shape {
+/// The alpha of the wave after the play position.
+pub const UNPLAYED_ALPHA: f32 = 0.30;
+/// Crossing rates at or below this are pure orange; at or above `TEAL_RATE`, pure teal.
+const ORANGE_RATE: f32 = 0.02;
+const TEAL_RATE: f32 = 0.25;
+/// A word end gets a gap only when the word is at least this wide on screen.
+const MIN_GAP_WORD_W: f32 = 12.0;
+const GAP_HALF_W: f32 = 1.5;
+
+/// The color for a crossing rate: orange (low sounds) to pink to teal (hissing sounds).
+#[cfg(test)]
+pub fn pitch_color(rate: f32) -> Color {
+    pitch_color_in(&crate::style::palette(), rate)
+}
+
+fn pitch_color_in(p: &crate::style::Palette, rate: f32) -> Color {
+    let t = ((rate - ORANGE_RATE) / (TEAL_RATE - ORANGE_RATE)).clamp(0.0, 1.0);
+    let c = if t <= 0.0 {
+        p.accent
+    } else if t >= 1.0 {
+        p.teal
+    } else if t < 0.5 {
+        p.accent.mix(p.pink, t * 2.0)
+    } else {
+        p.pink.mix(p.teal, (t - 0.5) * 2.0)
+    };
+    Color { a: 1.0, ..c }
+}
+
+/// The pitch color, bright before the play position and dim after it.
+#[cfg(test)]
+fn column_color(col: usize, playhead_col: f32, rate: f32) -> Color {
+    column_color_in(&crate::style::palette(), col, playhead_col, rate)
+}
+
+fn column_color_in(p: &crate::style::Palette, col: usize, playhead_col: f32, rate: f32) -> Color {
+    let a = if (col as f32) < playhead_col { 1.0 } else { UNPLAYED_ALPHA };
+    Color { a, ..pitch_color_in(p, rate) }
+}
+
+/// Vertical min-to-max strokes, one per point column, colored by pitch, with gaps at word
+/// ends and the selection and playhead on top.
+fn wave_shape(v: &WaveView, peaks: &Peaks, words: &[Word], width: f32) -> Shape {
     let cols = width.round().max(1.0) as usize;
     let mid = WAVE_H * 0.5;
-    let ink = tok::accent(0, true);
+    let x_of = |t: f64| ((t - v.start) / v.span * cols as f64) as f32;
+    let playhead_col = x_of(v.playhead);
+    let pal = crate::style::palette();
+    // Words are in time order, so the gap positions are sorted and one cursor walks them.
+    let gaps: Vec<f32> = words
+        .iter()
+        .filter(|w| w.end > v.start && w.end < v.start + v.span && x_of(w.end) - x_of(w.start) >= MIN_GAP_WORD_W)
+        .map(|w| x_of(w.end))
+        .collect();
+    let rates = peaks.range_zcr(v.start, v.start + v.span, cols);
     let mut shape = Shape::new().line([0.0, mid], [cols as f32, mid], 1.0, LineCap::Butt, oklcha(1.0, 0.0, 0.0, 0.08));
+    let mut next_gap = 0;
     for (i, (lo, hi)) in peaks.range(v.start, v.start + v.span, cols).into_iter().enumerate() {
         let x = i as f32 + 0.5;
+        while next_gap < gaps.len() && gaps[next_gap] + GAP_HALF_W <= x {
+            next_gap += 1;
+        }
+        if gaps.get(next_gap).is_some_and(|g| (g - x).abs() < GAP_HALF_W) {
+            continue;
+        }
         let top = mid - hi.clamp(-1.0, 1.0) * (mid - 2.0);
         let bottom = (mid - lo.clamp(-1.0, 1.0) * (mid - 2.0)).max(top + 1.0);
-        shape = shape.line([x, top], [x, bottom], 1.0, LineCap::Butt, ink);
+        let rate = rates.get(i).copied().unwrap_or(0.0);
+        shape = shape.line([x, top], [x, bottom], 1.0, LineCap::Butt, column_color_in(&pal, i, playhead_col, rate));
     }
-    let x_of = |t: f64| ((t - v.start) / v.span * cols as f64) as f32;
     if let Some((a, b)) = v.selection {
         let (a, b) = (x_of(a).max(0.0), x_of(b).min(cols as f32));
         if b > a {
-            let tint = Color { a: 0.28, ..tok::accent(0, true) };
+            let tint = Color { a: 0.22, ..pal.accent };
             shape = shape.fill(vec![[a, 0.0], [b, 0.0], [b, WAVE_H], [a, WAVE_H]], tint);
         }
     }
-    let p = x_of(v.playhead);
-    if (0.0..=cols as f32).contains(&p) {
-        shape = shape.line([p, 0.0], [p, WAVE_H], 1.5, LineCap::Butt, tok::theme(true).text);
+    if (0.0..=cols as f32).contains(&playhead_col) {
+        let p = playhead_col;
+        // A soft glow under the playhead line.
+        shape = shape.line([p, 0.0], [p, WAVE_H], 5.0, LineCap::Butt, oklcha(1.0, 0.0, 0.0, 0.25));
+        shape = shape.line([p, 0.0], [p, WAVE_H], 1.5, LineCap::Butt, pal.text);
     }
     shape.view_box(cols as f32, WAVE_H)
 }
@@ -215,6 +274,7 @@ fn missing_bar(key: String, x: f32) -> El {
 
 #[cfg(test)]
 mod tests {
+    use rune::Color;
     use super::{Mark, WaveView, waveform};
     use jeuvoice_core::peaks::{PEAKS_PER_SECOND, Peaks};
     use jeuvoice_core::transcript::Word;
@@ -247,6 +307,7 @@ mod tests {
             per_second: PEAKS_PER_SECOND,
             min: (0..n).map(|k| -level(k)).collect(),
             max: (0..n).map(level).collect(),
+            zcr: (0..n).map(|k| (k as f32 * 0.05).sin().abs() * 0.3).collect(),
         }
     }
 
@@ -297,6 +358,63 @@ mod tests {
         let (rect, _) = rt.presented("wave").expect("the wave is on screen");
         assert_eq!(rect[2], 1000.0, "the wave fills the window's width");
         rect[1] + rect[3] * 0.5
+    }
+
+    /// The old drawing: the same strokes in one color, without rates or gaps.
+    fn old_wave_shape(v: &WaveView, peaks: &Peaks, width: f32) -> rune::Shape {
+        let cols = width.round().max(1.0) as usize;
+        let mid = super::WAVE_H * 0.5;
+        let ink = rune::tok::accent(0, true);
+        let mut shape = rune::Shape::new();
+        for (i, (lo, hi)) in peaks.range(v.start, v.start + v.span, cols).into_iter().enumerate() {
+            let x = i as f32 + 0.5;
+            let top = mid - hi.clamp(-1.0, 1.0) * (mid - 2.0);
+            let bottom = (mid - lo.clamp(-1.0, 1.0) * (mid - 2.0)).max(top + 1.0);
+            shape = shape.line([x, top], [x, bottom], 1.0, rune::LineCap::Butt, ink);
+        }
+        shape.view_box(cols as f32, super::WAVE_H)
+    }
+
+    /// `scripts\cargo.cmd test -p jeuvoice-app --release wave_shape_speed -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn wave_shape_speed() {
+        let n = 600 * PEAKS_PER_SECOND as usize;
+        let peaks = Peaks {
+            per_second: PEAKS_PER_SECOND,
+            min: (0..n).map(|k| -((k as f32 * 0.01).sin().abs())).collect(),
+            max: (0..n).map(|k| (k as f32 * 0.01).sin().abs()).collect(),
+            zcr: (0..n).map(|k| (k as f32 * 0.003).sin().abs() * 0.3).collect(),
+        };
+        let words: Vec<Word> = (0..1200).map(|i| word("söz", i as f64 * 0.5, i as f64 * 0.5 + 0.4, 0.9)).collect();
+        let v = WaveView { start: 0.0, span: 600.0, selection: None, playhead: 300.0 };
+        let time = |f: &dyn Fn()| {
+            let t = std::time::Instant::now();
+            for _ in 0..100 {
+                f();
+            }
+            t.elapsed().as_secs_f64() * 1000.0 / 100.0
+        };
+        let before = time(&|| drop(old_wave_shape(&v, &peaks, 1600.0)));
+        let after = time(&|| drop(super::wave_shape(&v, &peaks, &words, 1600.0)));
+        println!("wave_shape 10 min, 1600 columns: before {before:.3} ms, after {after:.3} ms");
+        assert!(after < 2.0 * before, "after {after:.3} ms is more than twice before {before:.3} ms");
+    }
+
+    #[test]
+    fn pitch_color_runs_orange_to_teal() {
+        let p = crate::style::palette();
+        assert_eq!(super::pitch_color(0.0), Color { a: 1.0, ..p.accent });
+        assert_eq!(super::pitch_color(0.5), Color { a: 1.0, ..p.teal });
+        let mid = super::pitch_color(0.1);
+        assert_ne!(mid, Color { a: 1.0, ..p.accent });
+        assert_ne!(mid, Color { a: 1.0, ..p.teal });
+    }
+
+    #[test]
+    fn columns_after_the_playhead_are_dim() {
+        assert_eq!(super::column_color(0, 50.0, 0.1).a, 1.0);
+        assert_eq!(super::column_color(99, 50.0, 0.1).a, super::UNPLAYED_ALPHA);
     }
 
     #[test]

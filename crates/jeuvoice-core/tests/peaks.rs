@@ -53,3 +53,41 @@ fn range_narrower_than_a_bucket_uses_the_bucket_at_its_start() {
         assert_eq!(*col, (bucket, bucket), "column {i}");
     }
 }
+
+fn sine(freq: f32, rate: u32) -> Audio {
+    let samples = (0..rate).map(|i| 0.5 * (std::f32::consts::TAU * freq * i as f32 / rate as f32).sin()).collect();
+    Audio { samples, rate }
+}
+
+fn mean(v: &[f32]) -> f32 {
+    v.iter().sum::<f32>() / v.len() as f32
+}
+
+#[test]
+fn a_high_tone_has_a_higher_rate_than_a_low_tone() {
+    let high = peaks(&sine(4000.0, 24_000), 200);
+    let low = peaks(&sine(200.0, 24_000), 200);
+    assert_eq!(high.zcr.len(), high.min.len());
+    assert!(mean(&high.zcr) > 5.0 * mean(&low.zcr), "{} vs {}", mean(&high.zcr), mean(&low.zcr));
+}
+
+#[test]
+fn silence_has_rate_zero() {
+    let p = peaks(&Audio { samples: vec![0.0; 24_000], rate: 24_000 }, 200);
+    assert!(p.zcr.iter().all(|&z| z == 0.0), "silence crosses nothing");
+}
+
+#[test]
+fn clipped_audio_keeps_a_finite_rate() {
+    let p = peaks(&square_wave(), 100);
+    assert!(p.zcr.iter().all(|z| z.is_finite() && (0.0..=1.0).contains(z)), "{:?}", &p.zcr[..4]);
+}
+
+#[test]
+fn range_zcr_averages_buckets() {
+    let p = peaks(&square_wave(), 100);
+    let cols = p.range_zcr(0.0, 1.0, 10);
+    assert_eq!(cols.len(), 10);
+    assert!(cols.iter().all(|&z| z > 0.9), "a square wave at Nyquist crosses at each sample: {cols:?}");
+    assert_eq!(p.range_zcr(2.0, 3.0, 4), vec![0.0; 4], "past the end is 0");
+}
