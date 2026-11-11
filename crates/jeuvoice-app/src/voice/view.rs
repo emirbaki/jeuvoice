@@ -1,6 +1,6 @@
 //! The Voice tab: project bar, script or timeline, takes, play bar and status.
 
-use rune::tok::{self, radius, space, type_};
+use rune::tok::{space, type_};
 use rune::{Color, El, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, el, row, text, text_input};
 
 use crate::marks::{counts_text, marks};
@@ -19,7 +19,7 @@ pub fn view(s: &App) -> El {
             .w_full()
             .grow(1.0)
             .center()
-            .child(text("The voice engine does not run on this Mac yet.").font(type_::BODY).color(tok::theme(true).text));
+            .child(text("The voice engine does not run on this Mac yet.").font(type_::BODY).color(crate::style::theme().text));
     }
     row()
         .w_full()
@@ -27,8 +27,16 @@ pub fn view(s: &App) -> El {
         .min_h(0.0)
         .gap(space::S3)
         .padding(space::S3)
-        .child(side_column(s))
-        .child(main_column(s))
+        .child(crate::style::glass_blur("glass-voice-takes", side_column(s).padding(space::S3)))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .h_full()
+                .gap(space::S3)
+                .child(crate::style::glass_blur("glass-voice-editor", main_column(s).w_full().padding(space::S3)).grow(1.0).min_h(0.0))
+                .child(crate::style::glass_blur("glass-voice-play", play_bar(s))),
+        )
         .on_key(|s: &mut App, ev: &KeyEvent, _tx: &mut Tx| {
             if voice_field_focused(s) {
                 return false;
@@ -69,7 +77,7 @@ fn voice_field_focused(s: &App) -> bool {
 }
 
 fn side_column(s: &App) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let v = &s.voice;
     let mut list = col().w_full().gap(space::S1);
     for p in &v.presets {
@@ -83,8 +91,8 @@ fn side_column(s: &App) -> El {
                 .label(label.as_str())
                 .focusable(true)
                 .padding(space::S2)
-                .radius(radius::SM)
-                .fill(if on { tok::accent(0, true) } else { t.control_track })
+                .radius(10.0)
+                .fill(if on { crate::style::palette().accent.alpha(0.22) } else { t.control_track })
                 .on_press(move |s: &mut App| s.voice.preset_name = name.clone())
                 .child(text(label).font(type_::LABEL).color(t.text)),
         );
@@ -111,6 +119,7 @@ fn takes_panel(s: &App) -> El {
                 .w_full()
                 .center_y()
                 .gap(space::S2)
+                .flex_wrap()
                 .child(button("voice-retake", "Retake region", true, |s, _| {
                     let store = s.token_store();
                     let settings = s.settings.clone();
@@ -142,7 +151,7 @@ fn takes_panel(s: &App) -> El {
 
 /// One take row: tap to play and pick it for "Use this take".
 fn takes_list(s: &App) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let mut list = col().w_full().gap(space::S1);
     let takes: Vec<(usize, u32)> = s
         .voice
@@ -164,8 +173,8 @@ fn takes_list(s: &App) -> El {
                 .w_full()
                 .px(space::S2)
                 .py(space::S1)
-                .radius(radius::SM)
-                .fill(if on { tok::accent(0, true).alpha(0.25) } else { t.card })
+                .radius(10.0)
+                .fill(if on { crate::style::palette().accent.alpha(0.18) } else { t.card })
                 .on_press(move |s: &mut App| {
                     let (transcribe, voice) = (&mut s.transcribe, &mut s.voice);
                     voice.play_take(transcribe.player_mut(), para, id)
@@ -177,7 +186,7 @@ fn takes_list(s: &App) -> El {
 }
 
 fn main_column(s: &App) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let v = &s.voice;
     let title = v.project.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "No project".into());
     let header = row()
@@ -187,7 +196,7 @@ fn main_column(s: &App) -> El {
         .child(text(title).key("voice-project").font(type_::TITLE).color(t.text).grow(1.0).truncate())
         .child(button("voice-open", "Open…", true, |s, tx| s.voice.open_dialog(tx)))
         .child(button("voice-new", "New", true, |s, _| s.voice.new_project()))
-        .child(button("voice-generate", "Generate", v.project.is_some() || !v.script_field.text.trim().is_empty(), |s, _| {
+        .child(crate::style::button_kind("voice-generate", "Generate", crate::style::ButtonKind::Main, v.project.is_some() || !v.script_field.text.trim().is_empty(), |s, _| {
             let cpu = crate::services::engine::whisper_must_use_cpu(&s.transcribe.engine_state());
             let store = s.token_store();
             let settings = s.settings.clone();
@@ -220,12 +229,12 @@ fn main_column(s: &App) -> El {
     if let Some(n) = &v.notice {
         main = main.child(text(n.as_str()).key("voice-notice").font(type_::LABEL).color(t.text_secondary).wrap());
     }
-    main.child(el().grow(1.0)).child(play_bar(s))
+    main
 }
 
 /// Fix one word: the field says it as it should sound.
 fn fix_panel(s: &App) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let fix = s.voice.fix_word.as_ref().expect("fix panel shows for a word");
     let heard =
         s.voice.timeline.as_ref().and_then(|tl| tl.words.get(fix.index)).map(|w| w.text.clone()).unwrap_or_default();
@@ -234,7 +243,7 @@ fn fix_panel(s: &App) -> El {
         .single_line()
         .w(220.0)
         .padding(space::S1)
-        .radius(radius::SM)
+        .radius(10.0)
         .fill(t.control_track)
         .on_edit(|s: &mut App| &mut s.voice.fix_word.as_mut().expect("fix panel shows").field);
     col()
@@ -277,7 +286,7 @@ fn advanced_block(s: &App) -> El {
         .child(adv_text(s, "voice-en", "English terms (,)", |s| &s.voice.adv_en, |s| &mut s.voice.adv_en))
         .child(adv_text(s, "voice-quote", "Quote terms (,)", |s| &s.voice.adv_quote, |s| &mut s.voice.adv_quote))
         .child(adv_text(s, "voice-respell", "Respell OLD=NEW (,)", |s| &s.voice.adv_respell, |s| &mut s.voice.adv_respell))
-        .child(text(format!("{para} guidance/seed (empty = default)")).font(type_::LABEL).color(tok::theme(true).text_secondary))
+        .child(text(format!("{para} guidance/seed (empty = default)")).font(type_::LABEL).color(crate::style::theme().text_secondary))
         .child(adv_text(
             s,
             "voice-para-guidance",
@@ -296,40 +305,40 @@ fn adv_text(
     get: fn(&App) -> &TextEdit,
     set: fn(&mut App) -> &mut TextEdit,
 ) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     row().gap(space::S2).child(text(label).font(type_::LABEL).color(t.text_secondary).w(140.0)).child(
         text_input(get(s), type_::BODY)
             .key(key)
             .single_line()
             .w(220.0)
             .padding(space::S1)
-            .radius(radius::SM)
+            .radius(10.0)
             .fill(t.control_track)
             .on_edit(move |s: &mut App| set(s)),
     )
 }
 
 fn name_row(s: &App) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let field = text_input(&s.voice.name_field, type_::BODY)
         .key("voice-name")
         .single_line()
         .w(220.0)
         .padding(space::S1)
-        .radius(radius::SM)
+        .radius(10.0)
         .fill(t.card)
         .on_edit(|s: &mut App| &mut s.voice.name_field);
     row().gap(space::S2).child(text("Project:").font(type_::LABEL).color(t.text_secondary)).child(field)
 }
 
 fn script_field(s: &App) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     text_input(&s.voice.script_field, type_::BODY)
         .key("voice-script")
         .w_full()
         .h(220.0)
         .padding(space::S2)
-        .radius(radius::SM)
+        .radius(10.0)
         .fill(t.card)
         .border(1.0, t.card_border)
         .placeholder("Paste the script here, one paragraph per block", t.text_secondary)
@@ -337,8 +346,8 @@ fn script_field(s: &App) -> El {
 }
 
 fn wave_card(s: &App, tl: &VoiceTimeline) -> El {
-    let t = tok::theme(true);
-    let card = col().w_full().padding(space::S2).radius(radius::MD).fill(t.card).gap(space::S2);
+    let t = crate::style::theme();
+    let card = col().w_full().padding(space::S2).radius(12.0).fill(t.card).gap(space::S2);
     card.child(waveform(
         "voice-wave",
         &s.voice.view,
@@ -366,12 +375,12 @@ fn status_color(status: &VoiceStatus) -> Color {
     match status {
         VoiceStatus::Failed(_) => red(),
         VoiceStatus::Ready => green(),
-        _ => tok::theme(true).text,
+        _ => crate::style::theme().text,
     }
 }
 
 fn play_bar(s: &App) -> El {
-    let t = tok::theme(true);
+    let t = crate::style::theme();
     let duration = s.voice.timeline.as_ref().map_or(0.0, |l| l.duration);
     let label = if s.voice.is_playing(s.transcribe.player()) { "Pause" } else { "Play" };
     row()
@@ -379,8 +388,6 @@ fn play_bar(s: &App) -> El {
         .center_y()
         .gap(space::S2)
         .padding(space::S2)
-        .radius(radius::MD)
-        .fill(t.card)
         .child(button("voice-play", label, s.voice.timeline.is_some(), |s, _| {
             let (transcribe, voice) = (&mut s.transcribe, &mut s.voice);
             voice.toggle_play(transcribe.player_mut())

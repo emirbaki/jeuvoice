@@ -506,3 +506,37 @@ fn advanced_guidance_reaches_the_next_render() {
     assert!(retakes.iter().all(|r| r.guidance == 3.5), "guidance reaches every retake");
     assert_eq!(rig.rt.state.voice.project.as_ref().unwrap().render.guidance, 3.5, "saved to the project");
 }
+
+// -- the Frost look --
+
+#[test]
+fn generate_is_the_only_main_button() {
+    let mut rig = Rig::with_engine(Arc::new(FakeEngineApi::new()));
+    rig.paste_script("Birinci paragraf burada bitiyor.");
+    let _ = crate::style::take_main_keys();
+    rig.rt.update(|s, _| s.voice.notice = Some("redraw".into()));
+    rig.rt.frame(1.0 / 60.0);
+    let keys = crate::style::take_main_keys();
+    assert!(!keys.is_empty(), "a frame drew the page");
+    assert!(keys.iter().all(|k| k == "voice-generate"), "only Generate is a main button: {keys:?}");
+}
+
+#[test]
+fn word_fix_keeps_the_blur_budget() {
+    let mut rig = Rig::with_engine(Arc::new(FakeEngineApi::new()));
+    rig.paste_script("Birinci paragraf burada bitiyor.");
+    rig.tap("voice-generate");
+    rig.until("the timeline is ready", |s| s.voice.timeline.as_ref().is_some_and(|t| !t.words.is_empty()));
+    rig.rt.state.voice.fix_word(1);
+    rig.tap("voice-play");
+    rig.tap("voice-play");
+    assert!(rig.on_screen("voice-say-as"));
+    let blurred = rig
+        .rt
+        .elements()
+        .iter()
+        .filter(|e| !e.exiting && e.key.as_deref().is_some_and(|k| k.starts_with("glass-")))
+        .count();
+    assert!(blurred <= 4, "{blurred} blurred panels");
+    assert!(rig.on_screen("glass-voice-editor"), "the editor is a blurred glass panel");
+}
