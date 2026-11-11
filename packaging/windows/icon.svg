@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+  <radialGradient id="bg" cx="50%" cy="42%" r="70%">
+    <stop offset="0" stop-color="#1A1A1A"/><stop offset="1" stop-color="#000"/>
+  </radialGradient>
+  <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+    <stop offset="0" stop-color="#FF7A1A" stop-opacity=".22"/><stop offset="1" stop-color="#FF7A1A" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="wave" x1="0" y1="760" x2="0" y2="930" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#FFC15E"/><stop offset="1" stop-color="#FF5A00"/>
+  </linearGradient>
+  <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+    <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000" flood-opacity=".8"/>
+  </filter>
+</defs>
+<rect width="1024" height="1024" fill="url(#bg)"/>
+<ellipse cx="512" cy="845" rx="300" ry="120" fill="url(#glow)"/>
+<g transform="translate(0 -8) translate(512 380) scale(0.9) translate(-512 -380)" fill-rule="evenodd" stroke-linejoin="round" stroke-width="16">
+  <g filter="url(#shadow)"><g transform="translate(0 88)" fill="#7A2E06" stroke="#7A2E06"><path transform="translate(-26 0)" d="M160 150H300V450A110 160 0 0 1 190 610A110 160 0 0 1 80 450V440H140A20 20 0 0 0 160 420Z"/><path d="M450 150H580V262H495A30 30 0 0 0 495 322H580V438H495A30 30 0 0 0 495 498H580V610H450A120 120 0 0 1 330 490V270A120 120 0 0 1 450 150Z"/><path transform="translate(26 0)" d="M610 150H750V420A27 27 0 0 0 804 420V150H944V440A167 170 0 0 1 610 440Z"/></g><g transform="translate(0 66)" fill="#B8470B" stroke="#B8470B"><path transform="translate(-26 0)" d="M160 150H300V450A110 160 0 0 1 190 610A110 160 0 0 1 80 450V440H140A20 20 0 0 0 160 420Z"/><path d="M450 150H580V262H495A30 30 0 0 0 495 322H580V438H495A30 30 0 0 0 495 498H580V610H450A120 120 0 0 1 330 490V270A120 120 0 0 1 450 150Z"/><path transform="translate(26 0)" d="M610 150H750V420A27 27 0 0 0 804 420V150H944V440A167 170 0 0 1 610 440Z"/></g><g transform="translate(0 44)" fill="#E8650F" stroke="#E8650F"><path transform="translate(-26 0)" d="M160 150H300V450A110 160 0 0 1 190 610A110 160 0 0 1 80 450V440H140A20 20 0 0 0 160 420Z"/><path d="M450 150H580V262H495A30 30 0 0 0 495 322H580V438H495A30 30 0 0 0 495 498H580V610H450A120 120 0 0 1 330 490V270A120 120 0 0 1 450 150Z"/><path transform="translate(26 0)" d="M610 150H750V420A27 27 0 0 0 804 420V150H944V440A167 170 0 0 1 610 440Z"/></g><g transform="translate(0 22)" fill="#FF9A2E" stroke="#FF9A2E"><path transform="translate(-26 0)" d="M160 150H300V450A110 160 0 0 1 190 610A110 160 0 0 1 80 450V440H140A20 20 0 0 0 160 420Z"/><path d="M450 150H580V262H495A30 30 0 0 0 495 322H580V438H495A30 30 0 0 0 495 498H580V610H450A120 120 0 0 1 330 490V270A120 120 0 0 1 450 150Z"/><path transform="translate(26 0)" d="M610 150H750V420A27 27 0 0 0 804 420V150H944V440A167 170 0 0 1 610 440Z"/></g></g>
+  <g fill="#FFFFFF" stroke="#FFFFFF"><path transform="translate(-26 0)" d="M160 150H300V450A110 160 0 0 1 190 610A110 160 0 0 1 80 450V440H140A20 20 0 0 0 160 420Z"/><path d="M450 150H580V262H495A30 30 0 0 0 495 322H580V438H495A30 30 0 0 0 495 498H580V610H450A120 120 0 0 1 330 490V270A120 120 0 0 1 450 150Z"/><path transform="translate(26 0)" d="M610 150H750V420A27 27 0 0 0 804 420V150H944V440A167 170 0 0 1 610 440Z"/></g>
+</g>
+<g stroke="url(#wave)" stroke-width="14" stroke-linecap="round"><line x1="272" y1="837" x2="272" y2="853"/><line x1="296" y1="830" x2="296" y2="860"/><line x1="320" y1="819" x2="320" y2="871"/><line x1="344" y1="828" x2="344" y2="862"/><line x1="368" y1="810" x2="368" y2="880"/><line x1="392" y1="793" x2="392" y2="897"/><line x1="416" y1="807" x2="416" y2="883"/><line x1="440" y1="780" x2="440" y2="910"/><line x1="464" y1="765" x2="464" y2="925"/><line x1="488" y1="786" x2="488" y2="904"/><line x1="512" y1="755" x2="512" y2="935"/><line x1="536" y1="786" x2="536" y2="904"/><line x1="560" y1="765" x2="560" y2="925"/><line x1="584" y1="780" x2="584" y2="910"/><line x1="608" y1="807" x2="608" y2="883"/><line x1="632" y1="793" x2="632" y2="897"/><line x1="656" y1="810" x2="656" y2="880"/><line x1="680" y1="828" x2="680" y2="862"/><line x1="704" y1="819" x2="704" y2="871"/><line x1="728" y1="830" x2="728" y2="860"/><line x1="752" y1="837" x2="752" y2="853"/></g>
+</svg>

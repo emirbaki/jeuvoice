@@ -71,17 +71,18 @@ default). It never deletes presets or projects in `Documents\JeuVoice`.
 
 ## App icon
 
-`make-icon.py` draws the icon with Pillow: a Frost-dark tile, white "JEU" and
-five orange soundwave bars. It writes `icon.png` (1024 px, for reference) and
-`icon.ico` (16 to 256 px) in this folder.
+`make-icon.py` draws the icon as SVG: a black tile, white "JEU" with an orange
+3D layer stack, and an orange soundwave. It writes `icon.svg` (the source),
+`icon.png` (1024 px) and `icon.ico` (16 to 256 px) in this folder.
 
 ```cmd
+engine\.venv\Scripts\pip install resvg-py
 engine\.venv\Scripts\python packaging\windows\make-icon.py
 ```
 
-The colors are the constants at the top of the script; keep them in step with
-`crates\jeuvoice-app\src\style.rs`. The script uses Arial Black from
-`C:\Windows\Fonts\ariblk.ttf`.
+The letter paths, layer colors and wave heights are the constants at the top
+of the script. The script uses `resvg-py` to render the SVG and Pillow to write
+the ICO.
 
 `crates\jeuvoice-app\build.rs` embeds `icon.ico` in the exe, so Explorer, the
 taskbar and the window use it. `cargo-packager` reads the same file from

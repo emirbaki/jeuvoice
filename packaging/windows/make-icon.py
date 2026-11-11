@@ -1,78 +1,90 @@
-"""Draws the JeuVoice app icon: a Frost-dark tile, white "JEU", orange soundwave.
+"""Draws the JeuVoice app icon: black tile, white "JEU", orange soundwave.
 
-Run it with the engine Python, which has Pillow:
+The "JEU" letters are hand-drawn SVG paths with an orange 3D layer stack.
+The soundwave is a row of rounded orange bars. Run it with a Python that has
+Pillow and resvg-py (pip install resvg-py):
 
     engine\\.venv\\Scripts\\python packaging\\windows\\make-icon.py
 
-It writes packaging\\windows\\icon.png (1024 px) and icon.ico (16-256 px).
-The exe embeds icon.ico through build.rs; cargo-packager uses it for the
-installer. Keep the drawing flat and bold: it must read at 16 px.
+It writes packaging\\windows\\icon.svg (the source), icon.png (1024 px) and
+icon.ico (16-256 px). The exe embeds icon.ico through build.rs; cargo-packager
+uses it for the installer.
 """
 
+import io
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+import resvg_py
+from PIL import Image
 
-S = 1024
 HERE = Path(__file__).resolve().parent
-FONT = r"C:\Windows\Fonts\ariblk.ttf"  # Arial Black
-TEXT = "JEU"
-WHITE = (255, 255, 255, 255)
-ORANGE = (255, 159, 90, 255)       # style.rs accent #ff9f5a
-ORANGE_LIGHT = (255, 184, 132, 255)
-TILE_TOP = (27, 28, 34)
-TILE_BOTTOM = (15, 16, 20)
+
+# Letter shapes on a 1024 canvas. The even-odd fill cuts the E and U slots.
+J = ("M160 150H300V450A110 160 0 0 1 190 610A110 160 0 0 1 80 450"
+     "V440H140A20 20 0 0 0 160 420Z")
+E = ("M450 150H580V262H495A30 30 0 0 0 495 322H580V438H495A30 30 0 0 0 495 498H580V610"
+     "H450A120 120 0 0 1 330 490V270A120 120 0 0 1 450 150Z")
+U = ("M610 150H750V420A27 27 0 0 0 804 420V150H944V440"
+     "A167 170 0 0 1 610 440Z")
+
+# The 3D stack under the letters: offset (px down) and color, back to front.
+LAYERS = [(88, "#7A2E06"), (66, "#B8470B"), (44, "#E8650F"), (22, "#FF9A2E")]
+
+# Soundwave bar heights, left half and the middle bar. The right half mirrors it.
+WAVE_HALF = [16, 30, 52, 34, 70, 104, 76, 130, 160, 118, 180]
+WAVE_STEP, WAVE_Y = 24, 845
 
 
-def tile() -> Image.Image:
-    """The rounded tile with a soft vertical gradient."""
-    gradient = Image.new("RGBA", (S, S))
-    draw = ImageDraw.Draw(gradient)
-    for y in range(S):
-        t = y / (S - 1)
-        color = tuple(round(TILE_TOP[i] + (TILE_BOTTOM[i] - TILE_TOP[i]) * t) for i in range(3))
-        draw.line([(0, y), (S, y)], fill=(*color, 255))
-    mask = Image.new("L", (S, S), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, S - 1, S - 1], radius=210, fill=255)
-    image = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    image.paste(gradient, (0, 0), mask)
-    # A thin light edge, like the glass panels in the app.
-    ImageDraw.Draw(image).rounded_rectangle(
-        [2, 2, S - 3, S - 3], radius=208, outline=(255, 255, 255, 18), width=3
-    )
-    return image
+def svg() -> str:
+    letters = (f'<path transform="translate(-26 0)" d="{J}"/><path d="{E}"/>'
+               f'<path transform="translate(26 0)" d="{U}"/>')
+    stack = "".join(
+        f'<g transform="translate(0 {dy})" fill="{c}" stroke="{c}">{letters}</g>'
+        for dy, c in LAYERS)
+
+    heights = WAVE_HALF + WAVE_HALF[-2::-1]
+    x0 = 512 - WAVE_STEP * (len(heights) // 2)
+    bars = "".join(
+        f'<line x1="{x0 + i * WAVE_STEP}" y1="{WAVE_Y - v / 2:.0f}" '
+        f'x2="{x0 + i * WAVE_STEP}" y2="{WAVE_Y + v / 2:.0f}"/>'
+        for i, v in enumerate(heights))
+
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+  <radialGradient id="bg" cx="50%" cy="42%" r="70%">
+    <stop offset="0" stop-color="#1A1A1A"/><stop offset="1" stop-color="#000"/>
+  </radialGradient>
+  <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+    <stop offset="0" stop-color="#FF7A1A" stop-opacity=".22"/><stop offset="1" stop-color="#FF7A1A" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="wave" x1="0" y1="760" x2="0" y2="930" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#FFC15E"/><stop offset="1" stop-color="#FF5A00"/>
+  </linearGradient>
+  <filter id="shadow" x="-20%" y="-20%" width="140%" height="160%">
+    <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000" flood-opacity=".8"/>
+  </filter>
+</defs>
+<rect width="1024" height="1024" fill="url(#bg)"/>
+<ellipse cx="512" cy="{WAVE_Y}" rx="300" ry="120" fill="url(#glow)"/>
+<g transform="translate(0 -8) translate(512 380) scale(0.9) translate(-512 -380)" fill-rule="evenodd" stroke-linejoin="round" stroke-width="16">
+  <g filter="url(#shadow)">{stack}</g>
+  <g fill="#FFFFFF" stroke="#FFFFFF">{letters}</g>
+</g>
+<g stroke="url(#wave)" stroke-width="14" stroke-linecap="round">{bars}</g>
+</svg>
+'''
 
 
 def main() -> None:
-    image = tile()
-    draw = ImageDraw.Draw(image)
-
-    # "JEU": Arial Black, tightly spaced, centered in the top half.
-    font = ImageFont.truetype(FONT, 250)
-    spacing = 4
-    widths = [draw.textlength(ch, font=font) for ch in TEXT]
-    x = (S - (sum(widths) + spacing * (len(TEXT) - 1))) / 2
-    for ch, width in zip(TEXT, widths):
-        draw.text((x, 150), ch, font=font, fill=WHITE)
-        x += width + spacing
-
-    # The soundwave: five rounded bars, the middle one a little brighter.
-    heights = [140, 260, 350, 260, 140]
-    bar_w, gap, bottom = 92, 52, 880
-    x = (S - (len(heights) * bar_w + (len(heights) - 1) * gap)) / 2
-    for i, height in enumerate(heights):
-        color = ORANGE_LIGHT if i == 2 else ORANGE
-        draw.rounded_rectangle(
-            [x, bottom - height, x + bar_w, bottom], radius=bar_w / 2, fill=color
-        )
-        x += bar_w + gap
-
+    source = svg()
+    (HERE / "icon.svg").write_text(source, encoding="utf-8")
+    image = Image.open(io.BytesIO(bytes(resvg_py.svg_to_bytes(svg_string=source))))
     image.save(HERE / "icon.png")
     image.save(
         HERE / "icon.ico",
         sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
     )
-    print(f"wrote {HERE / 'icon.png'} and {HERE / 'icon.ico'}")
+    print(f"wrote {HERE / 'icon.svg'}, {HERE / 'icon.png'} and {HERE / 'icon.ico'}")
 
 
 if __name__ == "__main__":
