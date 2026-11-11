@@ -32,6 +32,11 @@ pub fn view(s: &App, _: &mut Cx<App>) -> El {
     }
     let body = match s.tab {
         Tab::Transcribe => transcribe_tab::view(&s.transcribe),
+        // First start: Voice shows the setup page; Train waits for the engine.
+        Tab::Voice if !s.setup.ready() => {
+            crate::setup::view::view(s.setup.state(), |s: &mut App, _| s.setup.retry())
+        }
+        Tab::Train if !s.setup.ready() => crate::setup::view::waiting_hint(),
         Tab::Voice => voice::view::view(s),
         Tab::Settings => settings_tab::view(s),
         Tab::Train => train::view(s),
@@ -49,7 +54,7 @@ mod tests {
 
     #[test]
     fn transcribe_is_the_first_tab_and_tabs_switch() {
-        let deps = Deps { transcriber: Arc::new(FakeTranscriber(Default::default())), ensure_model: None, cache_dir: None, sound: false, model: None, settings: Default::default(), settings_path: None, token_store: Arc::new(crate::settings::MemStore::default()) };
+        let deps = Deps { transcriber: Arc::new(FakeTranscriber(Default::default())), ensure_model: None, cache_dir: None, sound: false, model: None, settings: Default::default(), settings_path: None, token_store: Arc::new(crate::settings::MemStore::default()), setup_paths: None };
         let mut rt = Runtime::new(App::new(deps), view, (1100.0, 720.0), Env { system_dark: true, scale: 2.0 });
         rt.frame(0.0);
         assert_eq!(rt.state.tab, Tab::Transcribe);

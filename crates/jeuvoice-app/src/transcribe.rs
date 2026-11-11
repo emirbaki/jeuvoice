@@ -471,6 +471,12 @@ impl TranscribeTab {
         self.engine.restart();
     }
 
+    /// Setup just made the env; point the shared engine service at it.
+    pub(crate) fn refresh_engine_config(&mut self) {
+        let config = self.engine.paths().engine_config();
+        self.engine.set_config(config);
+    }
+
     /// Start the next waiting file when nothing runs and no cache lookup is out. While the
     /// voice engine holds a small GPU, Whisper runs on the CPU — and the engine unloads
     /// first when no Voice job runs, so Whisper gets the whole card.

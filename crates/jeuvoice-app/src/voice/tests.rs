@@ -168,6 +168,7 @@ impl Rig {
             settings: Default::default(),
             settings_path: Some(tmp.path().join("config").join("settings.json")),
             token_store: Arc::new(MemStore::default()),
+            setup_paths: None,
         };
         let mut app = App::new(deps);
         test_preset(&tmp.path().join("presets"));
@@ -341,6 +342,7 @@ fn snap_voice() {
             settings: Default::default(),
             settings_path: None,
             token_store: Arc::new(MemStore::default()),
+            setup_paths: None,
         };
         let mut app = App::new(deps);
         app.tab = crate::state::Tab::Voice;

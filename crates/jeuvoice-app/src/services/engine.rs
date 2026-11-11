@@ -88,6 +88,11 @@ impl EngineService {
         &self.paths
     }
 
+    /// Point at a newly installed engine; setup just made the env python.
+    pub(crate) fn set_config(&mut self, config: Option<EngineConfig>) {
+        self.config = config;
+    }
+
     pub fn state(&self) -> EngineState {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }

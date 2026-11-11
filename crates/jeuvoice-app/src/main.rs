@@ -4,6 +4,7 @@ mod cache;
 mod marks;
 mod playback;
 mod runtime_paths;
+mod setup;
 mod services;
 mod settings;
 mod settings_tab;
@@ -95,6 +96,7 @@ fn init() -> App {
         settings: Settings::load(),
         settings_path: Settings::default_path(),
         token_store: Arc::new(settings::KeyringStore),
+        setup_paths: Some(runtime_paths::detect()),
     })
 }
 

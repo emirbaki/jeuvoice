@@ -79,6 +79,7 @@ impl Rig {
             settings: Default::default(),
             settings_path: None,
             token_store: Arc::new(MemStore::default()),
+            setup_paths: None,
         };
         let mut app = App::new(deps);
         app.train = TrainData::new(
@@ -234,6 +235,7 @@ fn fixture() -> App {
         settings: Default::default(),
         settings_path: None,
         token_store: Arc::new(MemStore::default()),
+        setup_paths: None,
     };
     let mut app = App::new(deps);
     app.tab = crate::state::Tab::Train;

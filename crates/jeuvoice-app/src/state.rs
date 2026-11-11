@@ -7,6 +7,7 @@ use jeuvoice_whisper::Transcriber;
 use rune::{TextEdit, Tx, Waker};
 
 use crate::settings::{Settings, TokenStore};
+use crate::setup::{SetupDriver, SetupState};
 use crate::train::state::{TrainData, training_root};
 use crate::transcribe::TranscribeTab;
 use crate::voice::state::{VoiceDeps, projects_root};
@@ -48,6 +49,8 @@ pub struct Deps {
     pub settings_path: Option<PathBuf>,
     /// Reads and writes the Hugging Face token in the OS keychain.
     pub token_store: Arc<dyn TokenStore>,
+    /// Where the app runs from; `None` turns first-start setup off (tests).
+    pub setup_paths: Option<crate::runtime_paths::RuntimePaths>,
 }
 
 pub struct App {
@@ -55,6 +58,8 @@ pub struct App {
     pub transcribe: TranscribeTab,
     pub train: TrainData,
     pub voice: crate::voice::state::VoiceTab,
+    /// The first-start engine setup; `ready()` gates the Voice and Train tabs.
+    pub setup: SetupDriver,
     pub settings: Settings,
     /// Why the last save of the settings failed, in plain words.
     pub settings_error: Option<String>,
@@ -94,11 +99,15 @@ impl App {
             kaggle_store.clone(),
             deps.sound,
         );
+        // A fresh install opens on the setup screen; dev and tests open on Transcribe.
+        let setup = SetupDriver::new(deps.setup_paths.clone());
+        let first_tab = if matches!(setup.state(), SetupState::Checking) { Tab::Voice } else { Tab::Transcribe };
         let mut app = Self {
-            tab: Tab::Transcribe,
+            tab: first_tab,
             transcribe: TranscribeTab::new(deps),
             train,
             voice,
+            setup,
             settings,
             settings_error: None,
             settings_path,
@@ -253,13 +262,19 @@ impl App {
     pub fn setup(s: &mut App, waker: Waker) {
         s.transcribe.setup(waker.clone());
         s.train.setup(waker.clone());
-        s.voice.setup(waker);
+        s.voice.setup(waker.clone());
+        s.setup.start(waker);
     }
 
     /// `AppSpec::poll`: takes in what the other threads finished.
     pub fn poll(s: &mut App, _clock: f64, tx: &mut Tx) -> bool {
+        let mut changed = s.setup.poll();
+        if changed && s.setup.ready() {
+            // Setup just made the env the engine service was built without.
+            s.transcribe.refresh_engine_config();
+        }
         let voice_busy = s.voice.is_busy();
-        let mut changed = s.transcribe.poll(tx, &s.settings, voice_busy);
+        changed |= s.transcribe.poll(tx, &s.settings, voice_busy);
         // The Train tab shares the Voice engine once it is ready.
         if s.train.engine_api.is_none() {
             s.train.engine_api = s.transcribe.engine_api();

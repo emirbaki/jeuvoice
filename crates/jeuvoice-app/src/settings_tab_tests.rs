@@ -64,6 +64,7 @@ impl Rig {
             settings,
             settings_path: Some(tmp.path().join("config").join("settings.json")),
             token_store: store.clone(),
+            setup_paths: None,
         };
         let mut app = App::new(deps);
         App::setup(&mut app, Arc::new(|| {}));
@@ -321,6 +322,7 @@ fn snap_settings() {
             settings: Settings::default(),
             settings_path: None,
             token_store: Arc::new(MemStore::default()),
+            setup_paths: None,
         };
         let mut app = App::new(deps);
         app.tab = crate::state::Tab::Settings;
