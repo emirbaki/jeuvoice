@@ -14,6 +14,42 @@ use serde_json::Value;
 
 use crate::train::{StartFrom, TrainSettings};
 
+/// Why the bundle could not be made. `Display` gives the plain English text.
+/// The app shows its own words for each case, with `detail` as the cause.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BundleError {
+    /// A manifest row is not JSON. `split` is "train" or "dev" when known.
+    BrokenRow { split: Option<String>, detail: String },
+    ManifestRead { split: String, detail: String },
+    ManifestPack { split: String, detail: String },
+    /// No audio file for the clip `id`.
+    ClipMissing { id: String },
+    ClipPack { id: String, detail: String },
+    AudioPack { detail: String },
+    Folder { detail: String },
+    Save { detail: String },
+    Pack { detail: String },
+}
+
+impl std::fmt::Display for BundleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BrokenRow { split: None, detail } => write!(f, "The manifest has a broken row: {detail}"),
+            Self::BrokenRow { split: Some(split), detail } => write!(f, "The {split} manifest has a broken row: {detail}"),
+            Self::ManifestRead { split, detail } => write!(f, "The {split} manifest could not be read: {detail}"),
+            Self::ManifestPack { split, detail } => write!(f, "The {split} manifest could not be packed: {detail}"),
+            Self::ClipMissing { id } => write!(f, "The clip {id} has no audio file."),
+            Self::ClipPack { id, detail } => write!(f, "The clip {id} could not be packed: {detail}"),
+            Self::AudioPack { detail } => write!(f, "The audio pack could not be written: {detail}"),
+            Self::Folder { detail } => write!(f, "The bundle folder could not be made: {detail}"),
+            Self::Save { detail } => write!(f, "The bundle could not be saved: {detail}"),
+            Self::Pack { detail } => write!(f, "The bundle could not be packed: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for BundleError {}
+
 /// Commit of `k2-fsa/OmniVoice` the installs pin (PyPI has no LoRA training).
 const OMNIVOICE_COMMIT: &str = "08be0b4ccbac3e13e374e86fbfead4b4cac343e2";
 
@@ -52,13 +88,13 @@ pub fn data_config(manifest_dir: &str) -> Value {
 
 /// Rewrite raw manifest rows for the bundle: `audio_path` becomes
 /// `audio/<id>.<ext>`, relative to the run folder the notebook unpacks to.
-pub fn bundle_manifests(jsonl: &str) -> Result<Vec<Value>, String> {
+pub fn bundle_manifests(jsonl: &str) -> Result<Vec<Value>, BundleError> {
     jsonl
         .lines()
         .filter(|l| !l.trim().is_empty())
         .map(|line| {
             let mut row: Value =
-                serde_json::from_str(line).map_err(|e| format!("The manifest has a broken row: {e}"))?;
+                serde_json::from_str(line).map_err(|e| BundleError::BrokenRow { split: None, detail: e.to_string() })?;
             let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("clip").to_string();
             let ext = row
                 .get("audio_path")
@@ -194,22 +230,22 @@ pub fn build_bundle(
     manifests: &Path,
     cfg: &Value,
     data: &Value,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, BundleError> {
     let mut splits: Vec<(&str, Vec<(PathBuf, Value)>, String)> = Vec::new();
     for split in ["train", "dev"] {
         let text = std::fs::read_to_string(manifests.join(format!("{split}.jsonl")))
-            .map_err(|e| format!("The {split} manifest could not be read: {e}"))?;
+            .map_err(|e| BundleError::ManifestRead { split: split.into(), detail: e.to_string() })?;
         let rewritten = bundle_manifests(&text)?;
         let originals: Vec<Value> = text
             .lines()
             .filter(|l| !l.trim().is_empty())
             .map(serde_json::from_str)
             .collect::<Result<_, _>>()
-            .map_err(|e| format!("The {split} manifest has a broken row: {e}"))?;
+            .map_err(|e| BundleError::BrokenRow { split: Some(split.into()), detail: e.to_string() })?;
         let mut out = String::new();
         let mut pairs = Vec::with_capacity(rewritten.len());
         for (orig, new) in originals.into_iter().zip(rewritten) {
-            out.push_str(&serde_json::to_string(&new).map_err(|e| format!("The {split} manifest could not be packed: {e}"))?);
+            out.push_str(&serde_json::to_string(&new).map_err(|e| BundleError::ManifestPack { split: split.into(), detail: e.to_string() })?);
             out.push('\n');
             let from = orig.get("audio_path").and_then(|v| v.as_str()).map(PathBuf::from).unwrap_or_default();
             pairs.push((from, new));
@@ -227,16 +263,16 @@ pub fn build_bundle(
                 let bytes = [clips_dir.join(format!("{id}.{ext}")), from.clone()]
                     .into_iter()
                     .find_map(|p| std::fs::read(p).ok())
-                    .ok_or_else(|| format!("The clip {id} has no audio file."))?;
+                    .ok_or_else(|| BundleError::ClipMissing { id: id.into() })?;
                 let mut header = tar::Header::new_gnu();
                 header.set_size(bytes.len() as u64);
                 header.set_mode(0o644);
                 header.set_cksum();
                 tar.append_data(&mut header, &entry, &bytes[..])
-                    .map_err(|e| format!("The clip {id} could not be packed: {e}"))?;
+                    .map_err(|e| BundleError::ClipPack { id: id.into(), detail: e.to_string() })?;
             }
         }
-        tar.into_inner().map_err(|e| format!("The audio pack could not be written: {e}"))?;
+        tar.into_inner().map_err(|e| BundleError::AudioPack { detail: e.to_string() })?;
     }
     let mut zip_buf = Vec::new();
     {
@@ -256,12 +292,12 @@ pub fn build_bundle(
         zip.write_all(&tar_buf).map_err(plain)?;
         zip.finish().map_err(plain)?;
     }
-    std::fs::create_dir_all(dir).map_err(|e| format!("The bundle folder could not be made: {e}"))?;
+    std::fs::create_dir_all(dir).map_err(|e| BundleError::Folder { detail: e.to_string() })?;
     let out = dir.join(format!("{name}.zip"));
-    std::fs::write(&out, zip_buf).map_err(|e| format!("The bundle could not be saved: {e}"))?;
+    std::fs::write(&out, zip_buf).map_err(|e| BundleError::Save { detail: e.to_string() })?;
     return Ok(out);
 
-    fn plain<E: std::fmt::Display>(e: E) -> String {
-        format!("The bundle could not be packed: {e}")
+    fn plain<E: std::fmt::Display>(e: E) -> BundleError {
+        BundleError::Pack { detail: e.to_string() }
     }
 }

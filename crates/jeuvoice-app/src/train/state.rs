@@ -1100,7 +1100,7 @@ impl TrainData {
                     self.notice = Some(e);
                 }
             }
-            Err(e) => self.notice = Some(e.to_string()),
+            Err(e) => self.notice = Some(crate::core_text::audio_error(&e)),
         }
     }
 
@@ -1124,7 +1124,7 @@ impl TrainData {
                     self.notice = Some(e);
                 }
             }
-            Err(e) => self.notice = Some(e.to_string()),
+            Err(e) => self.notice = Some(crate::core_text::audio_error(&e)),
         }
     }
 

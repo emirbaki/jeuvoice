@@ -49,7 +49,7 @@ pub fn spawn_build(params: BundleParams, events: Sender<BundleEvent>, waker: Wak
             &params.data,
         ) {
             Ok(path) => BundleEvent::Done(path),
-            Err(e) => BundleEvent::Failed(e),
+            Err(e) => BundleEvent::Failed(crate::core_text::bundle_error(&e)),
         };
         let _ = events.send(event);
         waker();

@@ -6,6 +6,9 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
+/// The failure text when a job panics. The app compares against it to show its own words.
+pub const INTERNAL_ERROR: &str = "Transcription stopped because of an internal error.";
+
 /// A transcription job. It gets a progress callback (0.0 to 1.0).
 pub type Job = Box<dyn FnOnce(&mut dyn FnMut(f32)) -> Result<Transcript, String> + Send>;
 
@@ -82,9 +85,7 @@ pub fn spawn_worker(
             let last = match outcome {
                 Ok(Ok(t)) => Update::Done(t),
                 Ok(Err(e)) => Update::Failed(e),
-                Err(_) => Update::Failed(
-                    "Transcription stopped because of an internal error.".to_string(),
-                ),
+                Err(_) => Update::Failed(INTERNAL_ERROR.to_string()),
             };
             let _ = updates.send((i, last));
             wake();

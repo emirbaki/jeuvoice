@@ -165,7 +165,7 @@ impl SpeechService {
             }
             match (path, samples) {
                 (Some(path), _) => {
-                    let a = audio::decode(&path).map_err(|e| e.to_string())?;
+                    let a = audio::decode(&path).map_err(|e| crate::core_text::audio_error(&e))?;
                     let t = transcribe_samples(&transcriber, &to_whisper(&a), &opts, progress)?;
                     if let Some(dir) = cache_dir
                         && let Err(e) = cache::save(&dir, &path, &opts.language, &t)

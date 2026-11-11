@@ -77,7 +77,7 @@ impl PresetEditor {
         let audio = match audio::decode(path) {
             Ok(a) => a,
             Err(e) => {
-                self.clip_error = Some(e.to_string());
+                self.clip_error = Some(crate::core_text::audio_error(&e));
                 return;
             }
         };

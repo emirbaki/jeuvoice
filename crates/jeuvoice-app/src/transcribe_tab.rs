@@ -55,7 +55,7 @@ fn status(s: &TranscribeTab, state: &ItemState) -> String {
             None => tr!("Transcribing… {}%", "Yazıya dökülüyor… %{}", (p * 100.0).round() as u32),
         },
         ItemState::Done(_) => tr!("Done", "Bitti").into(),
-        ItemState::Failed(e) => e.clone(),
+        ItemState::Failed(e) => crate::core_text::queue_failure(e),
     }
 }
 

@@ -234,7 +234,8 @@ pub fn build_bundle_flow(
     let data = jeuvoice_core::kaggle_bundle::data_config("tokens");
     let run_id = slug(project_name, run_name);
     let bundle_marker = format!("bundle_{run_id}.txt");
-    let bundle = jeuvoice_core::kaggle_bundle::build_bundle(&run_dir, &run_id, &audio_src, &out_dir, &cfg, &data)?;
+    let bundle = jeuvoice_core::kaggle_bundle::build_bundle(&run_dir, &run_id, &audio_src, &out_dir, &cfg, &data)
+        .map_err(|e| crate::core_text::bundle_error(&e))?;
     let notebook_text = jeuvoice_core::kaggle_bundle::notebook(&run_id, &bundle_marker);
     std::fs::write(run_dir.join("notebook.ipynb"), &notebook_text)
         .map_err(|e| crate::i18n::trf!("The notebook could not be saved: {e}", "Not defteri kaydedilemedi: {e}"))?;

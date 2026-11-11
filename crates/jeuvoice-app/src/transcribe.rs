@@ -290,7 +290,7 @@ impl TranscribeTab {
         let rate = self.player.player(PlayerOwner::Transcribe).map(|pb| pb.rate());
         let path = self.queue.items[i].0.clone();
         self.decode.request(path, move |path| {
-            let a = audio::decode(&path).map_err(|e| e.to_string())?;
+            let a = audio::decode(&path).map_err(|e| crate::core_text::audio_error(&e))?;
             let p = peaks(&a, PEAKS_PER_SECOND);
             // Resample here once, so `SharedPlayer::load` on the UI thread only copies.
             let a = match rate {

@@ -336,7 +336,7 @@ impl VoiceTab {
                 self.status = VoiceStatus::Ready;
                 self.notice = None;
             }
-            Err(e) => self.notice = Some(e.to_string()),
+            Err(e) => self.notice = Some(crate::core_text::project_error(&e)),
         }
     }
 
@@ -1059,7 +1059,7 @@ fn run_generate(
         let path = audio_dir.join(&file);
         let data = match audio::decode(&path) {
             Ok(a) => audio::to_whisper(&a),
-            Err(e) => return fail(e.to_string()),
+            Err(e) => return fail(crate::core_text::audio_error(&e)),
         };
         let opts = TranscribeOptions { language: language.clone(), use_gpu };
         let words = match transcriber.transcribe(&data, &opts, &mut |_| {}) {
@@ -1190,7 +1190,7 @@ fn run_retakes(
             let path = audio_dir.join(&file);
             let data = match audio::decode(&path) {
                 Ok(a) => audio::to_whisper(&a),
-                Err(e) => return fail(e.to_string()),
+                Err(e) => return fail(crate::core_text::audio_error(&e)),
             };
             let opts = TranscribeOptions { language: language.clone(), use_gpu };
             let words = match transcriber.transcribe(&data, &opts, &mut |_| {}) {
