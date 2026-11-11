@@ -149,7 +149,7 @@ fn main_column(s: &TranscribeTab) -> El {
         );
     }
     if let Some(n) = &s.notice {
-        main = main.child(text(n.as_str()).key("notice").font(type_::LABEL).color(t.text_secondary).wrap());
+        main = main.child(text(crate::core_text::message(n)).key("notice").font(type_::LABEL).color(t.text_secondary).wrap());
     }
     main.child(el().grow(1.0)).child(play_bar(s))
 }

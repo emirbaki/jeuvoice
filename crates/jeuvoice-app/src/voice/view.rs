@@ -228,7 +228,7 @@ fn main_column(s: &App) -> El {
     }
     main = main.child(advanced_block(s));
     if let Some(n) = &v.notice {
-        main = main.child(text(n.as_str()).key("voice-notice").font(type_::LABEL).color(t.text_secondary).wrap());
+        main = main.child(text(crate::core_text::message(n)).key("voice-notice").font(type_::LABEL).color(t.text_secondary).wrap());
     }
     main
 }
@@ -368,7 +368,7 @@ fn status_text(status: &VoiceStatus) -> String {
         VoiceStatus::StartingEngine => tr!("Starting the voice engine… This takes about a minute the first time.", "Ses motoru başlıyor… İlk seferde yaklaşık bir dakika sürer.").into(),
         VoiceStatus::Working(m) => m.clone(),
         VoiceStatus::Ready => tr!("Done.", "Bitti.").into(),
-        VoiceStatus::Failed(e) => e.clone(),
+        VoiceStatus::Failed(e) => crate::core_text::message(e),
     }
 }
 

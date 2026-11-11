@@ -39,7 +39,7 @@ pub fn view(s: &TrainData) -> El {
         page = page.child(review_panel(s, name));
     }
     if let Some(n) = &s.notice {
-        page = page.child(text(n.as_str()).key("train-notice").font(type_::LABEL).color(t.text_secondary).wrap());
+        page = page.child(text(crate::core_text::message(n)).key("train-notice").font(type_::LABEL).color(t.text_secondary).wrap());
     }
     page
 }
@@ -123,7 +123,7 @@ fn source_row(s: &TrainData, i: usize, source: &Source) -> El {
                 .grow(1.0)
                 .min_w(0.0)
                 .child(text(source.name.as_str()).font(type_::BODY).color(t.text))
-                .child(text(status.as_str()).key(format!("train-status-{i}")).font(type_::LABEL).color(t.text_secondary).wrap()),
+                .child(text(crate::core_text::message(&status)).key(format!("train-status-{i}")).font(type_::LABEL).color(t.text_secondary).wrap()),
         )
         .child(button(&format!("train-wminus-{i}"), "−", source.weight > 1, {
             let name = source.name.clone();
@@ -219,7 +219,7 @@ fn review_panel(s: &TrainData, name: &str) -> El {
             );
         }
         if let Some(reason) = &c.clip.excluded {
-            card = card.child(text(reason.as_str()).font(type_::LABEL).color(t.text_secondary).wrap());
+            card = card.child(text(crate::core_text::message(reason)).font(type_::LABEL).color(t.text_secondary).wrap());
         }
         list = list.child(card);
     }

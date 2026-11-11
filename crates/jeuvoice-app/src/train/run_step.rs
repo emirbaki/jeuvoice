@@ -170,7 +170,7 @@ fn status_card(s: &TrainData) -> El {
             err.push('\n');
             err.push_str(line);
         }
-        card = card.child(text(err.as_str()).key("train-run-error").font(type_::LABEL).color(t.text_secondary).wrap());
+        card = card.child(text(crate::core_text::message(&err)).key("train-run-error").font(type_::LABEL).color(t.text_secondary).wrap());
     }
     if s.losses.len() >= 2 {
         card = card.child(loss_curve(&s.losses));

@@ -33,7 +33,7 @@ pub fn view(state: &SetupState, retry: impl Fn(&mut crate::state::App, &mut rune
         SetupState::Running { step, progress, detail } => (Some(*step), *progress, detail.clone()),
         SetupState::Failed { message } => {
             page = page
-                .child(text(message.as_str()).key("setup-error").font(type_::BODY).color(t.text).wrap())
+                .child(text(crate::core_text::message(message)).key("setup-error").font(type_::BODY).color(t.text).wrap())
                 .child(button("setup-retry", tr!("Try again", "Tekrar dene"), true, retry));
             return wrap(page);
         }

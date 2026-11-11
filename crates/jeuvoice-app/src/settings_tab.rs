@@ -200,7 +200,7 @@ fn model_block(s: &TranscribeTab) -> El {
             .child(text(label).key("model-progress-text").font(type_::LABEL).color(t.text_secondary));
     }
     if let Some(e) = &s.model_error {
-        block = block.child(text(e.as_str()).key("model-error").font(type_::LABEL).color(red()).wrap());
+        block = block.child(text(crate::core_text::message(e)).key("model-error").font(type_::LABEL).color(red()).wrap());
     }
     block
 }
@@ -232,7 +232,7 @@ fn token_block(s: &App) -> El {
                 .wrap(),
         );
     if let Some(m) = &s.files_status {
-        block = block.child(text(m.as_str()).key("files-status").font(type_::LABEL).color(t.text).wrap());
+        block = block.child(text(crate::core_text::message(m)).key("files-status").font(type_::LABEL).color(t.text).wrap());
     }
     block
 }
@@ -286,7 +286,7 @@ fn profiles_block(s: &App) -> El {
             .wrap(),
     );
     if let Some(m) = &s.files_status {
-        block = block.child(text(m.as_str()).key("profiles-status").font(type_::LABEL).color(t.text).wrap());
+        block = block.child(text(crate::core_text::message(m)).key("profiles-status").font(type_::LABEL).color(t.text).wrap());
     }
     block
 }
@@ -332,7 +332,10 @@ fn engine_block(app: &App) -> El {
         EngineState::Off => (tr!("Voice engine: off", "Ses motoru: kapalı").to_string(), false),
         EngineState::Starting => (tr!("Voice engine: starting…", "Ses motoru: başlıyor…").to_string(), false),
         EngineState::Ready(h) => (tr!("Voice engine: ready ({})", "Ses motoru: hazır ({})", h.device), false),
-        EngineState::Failed(e) => (trf!("Voice engine: {e}", "Ses motoru: {e}"), true),
+        EngineState::Failed(e) => {
+            let e = crate::core_text::message(&e);
+            (trf!("Voice engine: {e}", "Ses motoru: {e}"), true)
+        }
     };
     col()
         .gap(space::S2)
