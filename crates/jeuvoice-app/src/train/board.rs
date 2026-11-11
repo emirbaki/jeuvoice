@@ -125,7 +125,7 @@ fn tile(tile: TrainTile, panel: El) -> El {
         .role("button")
         .cursor(rune::Cursor::Pointer)
         .on_press(move |s: &mut App| s.train.open(tile))
-        .child(panel.w_full().h_full())
+        .child(panel.w_full().h_full().hover(crate::style::hover_fill()))
 }
 
 fn data_board(s: &TrainData) -> El {

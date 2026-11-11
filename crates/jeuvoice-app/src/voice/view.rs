@@ -94,6 +94,8 @@ fn side_column(s: &App) -> El {
                 .padding(space::S2)
                 .radius(10.0)
                 .fill(if on { crate::style::palette().accent.alpha(0.22) } else { t.control_track })
+                .hover(if on { crate::style::palette().accent.alpha(0.30) } else { crate::style::hover_fill() })
+                .cursor(rune::Cursor::Pointer)
                 .on_press(move |s: &mut App| s.voice.preset_name = name.clone())
                 .child(text(label).font(type_::LABEL).color(t.text)),
         );
@@ -176,6 +178,8 @@ fn takes_list(s: &App) -> El {
                 .py(space::S1)
                 .radius(10.0)
                 .fill(if on { crate::style::palette().accent.alpha(0.18) } else { t.card })
+                .hover(if on { crate::style::palette().accent.alpha(0.28) } else { crate::style::hover_fill() })
+                .cursor(rune::Cursor::Pointer)
                 .on_press(move |s: &mut App| {
                     let (transcribe, voice) = (&mut s.transcribe, &mut s.voice);
                     voice.play_take(transcribe.player_mut(), para, id)

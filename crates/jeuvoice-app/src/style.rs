@@ -92,6 +92,12 @@ pub fn white_fill(css_alpha: f32) -> Color {
     white(css_alpha)
 }
 
+/// The fill a glass button or a clickable row gets under the pointer: one step
+/// lighter than `glass`, so it separates from the page without a border.
+pub fn hover_fill() -> Color {
+    white(0.11)
+}
+
 /// The rune theme with the Frost colors, for code that reads theme fields
 /// (`t.card`, `t.text`). Pages call this, never `tok::theme(true)`.
 pub fn theme() -> rune::tok::Theme {
@@ -170,12 +176,21 @@ pub fn button_kind(key: &str, label: &str, kind: ButtonKind, enabled: bool, on: 
         .label(label)
         .focusable(enabled)
         .disabled(!enabled)
+        .cursor(if enabled { rune::Cursor::Pointer } else { rune::Cursor::Default })
         .px(space::S3)
         .py(space::S2)
         .radius(999.0)
         .fill(fill)
         .opacity(if enabled { 1.0 } else { 0.45 })
         .child(text(label).font(type_::LABEL).color(ink));
+    // The button must stand out from the page under the pointer. A disabled
+    // button has no hover: it takes no press.
+    let hover = match kind {
+        ButtonKind::Main => p.accent.mix(rune::Color::WHITE, 0.14),
+        ButtonKind::Normal => white(0.15),
+        ButtonKind::Quiet => white(0.07),
+    };
+    let b = if enabled { b.hover(hover) } else { b };
     let b = if kind == ButtonKind::Normal { b.border(1.0, p.glass_border) } else { b };
     if enabled { b.on_press_tx(on) } else { b }
 }

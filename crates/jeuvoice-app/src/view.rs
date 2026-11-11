@@ -66,6 +66,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
             .px(space::S3)
             .py(6.0)
             .radius(999.0)
+            .hover(style::hover_fill())
             .cursor(rune::Cursor::Pointer)
             .on_press(move |s: &mut App| s.tab = tab);
         if on {

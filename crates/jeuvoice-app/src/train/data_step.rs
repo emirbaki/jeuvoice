@@ -207,6 +207,9 @@ fn review_panel(s: &TrainData, name: &str) -> El {
                     .role("button")
                     .label(tr!("Edit the text", "Metni düzenle"))
                     .focusable(true)
+                    .cursor(rune::Cursor::Pointer)
+                    .radius(8.0)
+                    .hover(crate::style::hover_fill())
                     .child(text(shown).font(type_::BODY).color(t.text).wrap())
                     .on_press({
                         let id = id.clone();

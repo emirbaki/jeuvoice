@@ -4,7 +4,7 @@
 use jeuvoice_core::queue::ItemState;
 use jeuvoice_core::script_diff::DiffOp;
 use rune::tok::{space, type_};
-use rune::{El, ScrollSpec, Tx, col, el, row, text, text_input};
+use rune::{El, FileDialogOptions, ScrollSpec, Tx, col, el, row, text, text_input};
 
 use crate::i18n::{tr, trf};
 use crate::marks::{counts_text, marks};
@@ -70,10 +70,26 @@ fn files_column(s: &TranscribeTab) -> El {
         .radius(12.0)
         .center()
         .fill(t.card)
+        .hover(crate::style::hover_fill())
         .border(1.0, crate::style::palette().text_secondary.alpha(0.5))
         .border_dash(6.0, 4.0)
-        .child(text(tr!("Drop audio or video files here", "Dosyaları buraya bırakın")).font(type_::TITLE).color(t.text))
-        .child(text(tr!("Audio or video, many at once", "Ses veya video, birden çok dosya")).font(type_::LABEL).color(t.text_secondary))
+        .cursor(rune::Cursor::Pointer)
+        .child(text(tr!("Drop audio or video files here", "Dosyaları buraya bırakın")).font(type_::TITLE).color(t.text).wrap())
+        .child(text(tr!("Click to pick, or drop many", "Seçmek için tıklayın veya bırakın")).key("drop-hint").font(type_::LABEL).color(t.text_secondary).wrap())
+        .on_press_tx(|_s: &mut App, tx: &mut Tx| {
+            let options = FileDialogOptions {
+                title: tr!("Open audio or video", "Ses veya video aç").into(),
+                ..Default::default()
+            }
+            .filter(tr!("Audio or video", "Ses veya video"), &MEDIA);
+            tx.open_file(options, |s: &mut App, result, _tx| match result {
+                Ok(Some(path)) => s.transcribe.add_files(&[path]),
+                Ok(None) => {}
+                Err(e) => {
+                    s.transcribe.notice = Some(trf!("The Open window could not open: {e}", "Aç penceresi açılamadı: {e}"))
+                }
+            });
+        })
         .on_drop_files(|s: &mut App, files, _| s.transcribe.add_files(files))
         .accepts_extensions(&MEDIA);
     let mut list = col().w_full().gap(space::S1);
@@ -87,6 +103,8 @@ fn files_column(s: &TranscribeTab) -> El {
             .gap(2.0)
             .radius(10.0)
             .fill(if on { crate::style::palette().accent.alpha(0.18) } else { t.card })
+            .hover(if on { crate::style::palette().accent.alpha(0.28) } else { crate::style::hover_fill() })
+            .cursor(rune::Cursor::Pointer)
             .on_press(move |s: &mut App| s.transcribe.select(i))
             .child(text(file_name(path)).font(type_::TITLE).color(t.text).truncate())
             .child(
@@ -267,6 +285,7 @@ fn script_column(s: &TranscribeTab) -> El {
                     .py(2.0)
                     .radius(10.0)
                     .cursor(rune::Cursor::Pointer)
+                    .hover(crate::style::hover_fill())
                     .on_press(move |s: &mut App| s.transcribe.seek_diff(k))
                     .child(text(kind).font(type_::LABEL).color(t.text_secondary).w(64.0))
                     .child(crate::style::pill(&word, color).key(pill_key)),

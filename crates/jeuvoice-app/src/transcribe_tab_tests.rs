@@ -11,7 +11,7 @@ use jeuvoice_core::subtitles::to_srt;
 use jeuvoice_core::transcript::{Transcript, Word};
 use jeuvoice_engine_client::{EngineApi, EngineError, FakeEngineApi, Health, JobId, JobStatus, RenderRequest};
 use jeuvoice_whisper::{FakeTranscriber, TranscribeOptions, Transcriber, WhisperError};
-use rune::{Env, FileDialogKind, Runtime};
+use rune::{Cursor, Env, FileDialogKind, Runtime};
 
 use crate::marks::counts_text;
 use crate::services::engine::EngineState;
@@ -113,6 +113,16 @@ impl Rig {
             .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
             .and_then(|e| e.text.or(e.label))
             .unwrap_or_else(|| panic!("{key} shows text"))
+    }
+
+    /// The layout rectangle of the live element keyed `key`.
+    fn rect(&self, key: &str) -> [f32; 4] {
+        self.rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some(key) && !e.exiting)
+            .unwrap_or_else(|| panic!("{key} is on screen"))
+            .target
     }
 
     /// Drop one WAV named `name` and wait until it is done and its waveform shows.
@@ -314,6 +324,48 @@ fn clicking_a_difference_moves_the_playhead() {
     let k = rig.rt.state.transcribe.diff.iter().position(|op| matches!(op, jeuvoice_core::script_diff::DiffOp::Missing { .. })).unwrap();
     rig.tap(&format!("diff-{k}"));
     assert_eq!(rig.rt.state.transcribe.view.playhead, 0.8, "the playhead jumps to \"Ellie\"");
+}
+
+#[test]
+fn the_drop_hint_stays_inside_its_box() {
+    let rig = Rig::new();
+    let drop = rig.rect("drop");
+    let hint = rig.rect("drop-hint");
+    assert!(
+        hint[0] >= drop[0] - 0.5 && hint[0] + hint[2] <= drop[0] + drop[2] + 0.5,
+        "the hint {hint:?} fits inside the drop box {drop:?}"
+    );
+}
+
+#[test]
+fn the_drop_zone_is_clickable_and_shows_a_pointer() {
+    let mut rig = Rig::new();
+
+    // The field and the buttons announce that they take a press.
+    let (x, y) = rig.rt.find("drop").unwrap();
+    rig.rt.pointer_move(x, y);
+    rig.rt.frame(1.0 / 60.0);
+    assert_eq!(rig.rt.cursor(), Cursor::Pointer, "the drop field shows a pointer");
+    let (x, y) = rig.rt.find("open-script").unwrap();
+    rig.rt.pointer_move(x, y);
+    rig.rt.frame(1.0 / 60.0);
+    assert_eq!(rig.rt.cursor(), Cursor::Pointer, "buttons show a pointer");
+    let (x, y) = rig.rt.find("export-srt").unwrap();
+    rig.rt.pointer_move(x, y);
+    rig.rt.frame(1.0 / 60.0);
+    assert_eq!(rig.rt.cursor(), Cursor::Default, "a disabled button does not");
+
+    // A click opens the Open dialog and queues the picked file.
+    rig.tap("drop");
+    let (kind, options) = rig.rt.file_dialog().expect("an Open dialog opens");
+    assert_eq!(kind, FileDialogKind::Open);
+    assert!(
+        options.filters.iter().any(|(_, exts)| exts.iter().any(|e| e == "wav")),
+        "the dialog offers audio and video files: {options:?}"
+    );
+    let picked = wav(rig.dir(), "picked.wav");
+    rig.rt.resolve_file_dialog(Some(picked)).unwrap();
+    rig.until("the picked file is in the queue", |s| s.transcribe.queue.items.len() == 1);
 }
 
 #[test]

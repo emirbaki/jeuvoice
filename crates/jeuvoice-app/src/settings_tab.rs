@@ -114,6 +114,8 @@ fn radio_row(pills: &[(&'static str, &'static str, bool)], on_pick: impl Fn(&mut
                 .padding(space::S2)
                 .radius(10.0)
                 .fill(if on { crate::style::palette().accent.alpha(0.22) } else { t.control_track })
+                .hover(if on { crate::style::palette().accent.alpha(0.30) } else { crate::style::hover_fill() })
+                .cursor(rune::Cursor::Pointer)
                 .on_press(move |s: &mut App| pick(s, i))
                 .child(text(name).font(type_::LABEL).color(t.text)),
         );
@@ -149,11 +151,16 @@ fn gpu_switch(on: bool) -> El {
         .padding(3.0)
         .radius(12.0)
         .fill(if on { crate::style::palette().accent } else { t.control_track });
+    let track = track.hover(if on {
+        crate::style::palette().accent.mix(rune::Color::WHITE, 0.14)
+    } else {
+        crate::style::hover_fill()
+    });
     let track = if on { track.justify_end() } else { track.justify_start() };
     row()
         .center_y()
         .gap(space::S2)
-        .child(track.on_press(move |s: &mut App| s.set_use_gpu(!on)).child(knob))
+        .child(track.cursor(rune::Cursor::Pointer).on_press(move |s: &mut App| s.set_use_gpu(!on)).child(knob))
         .child(text(tr!("Use GPU", "GPU kullan")).font(type_::BODY).color(t.text))
 }
 
