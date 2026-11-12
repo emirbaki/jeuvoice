@@ -49,6 +49,12 @@ pub struct Preset {
     pub para_pause: f32,
     pub num_step: u32,
     pub speed: f32,
+    /// Semitones to move the voice after the render: negative is lower. 0 changes nothing.
+    #[serde(default)]
+    pub pitch_shift: f32,
+    /// The token sampling temperature: 0 picks the likeliest sound, more gives more variety.
+    #[serde(default)]
+    pub variety: f32,
 }
 
 /// The engine's render fields of a preset, with the reference clip resolved to files.
@@ -59,6 +65,8 @@ pub fn to_engine_json(preset: &Preset, ref_audio: Option<String>, ref_text: Opti
         "guidance": preset.guidance,
         "num_step": preset.num_step,
         "speed": preset.speed,
+        "pitch_shift": preset.pitch_shift,
+        "variety": preset.variety,
         "instruct": preset.instruct,
         "ref_audio": ref_audio.or_else(|| preset.ref_audio.clone()),
         "ref_text": ref_text.or_else(|| preset.ref_text.clone()),
@@ -139,6 +147,8 @@ pub fn default_preset() -> Preset {
         para_pause: 0.3,
         num_step: 32,
         speed: 1.0,
+        pitch_shift: 0.0,
+        variety: 0.0,
     }
 }
 

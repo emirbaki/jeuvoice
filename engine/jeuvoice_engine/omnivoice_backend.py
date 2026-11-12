@@ -56,7 +56,8 @@ class OmniVoiceBackend:
             return None
         return self._model.create_voice_clone_prompt(ref_audio=ref_wav, ref_text=ref_text)
 
-    def render(self, part: Part, prompt, instruct, seed, guidance, num_step, speed, duration=None) -> np.ndarray:
+    def render(self, part: Part, prompt, instruct, seed, guidance, num_step, speed, duration=None, variety=0.0) -> np.ndarray:
+        """`variety` is the token sampling temperature: 0 picks the likeliest token (the default)."""
         import torch
 
         assert self._model is not None, "load first"
@@ -70,5 +71,6 @@ class OmniVoiceBackend:
             speed=speed,
             duration=duration,
             guidance_scale=guidance,
+            class_temperature=variety,
         )[0]
         return np.asarray(wav, dtype=np.float32).squeeze()

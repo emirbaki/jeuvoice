@@ -84,6 +84,18 @@ impl Pitch {
         }
     }
 
+    /// The pitch shift this choice gives, in semitones. The tr2 model does not follow
+    /// the pitch words well, so the app moves the pitch after the render too.
+    pub fn semitones(self) -> f32 {
+        match self {
+            Pitch::VeryLow => -4.0,
+            Pitch::Low => -2.0,
+            Pitch::Moderate => 0.0,
+            Pitch::High => 2.0,
+            Pitch::VeryHigh => 4.0,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Pitch::VeryLow => tr!("Very low", "Çok kalın"),

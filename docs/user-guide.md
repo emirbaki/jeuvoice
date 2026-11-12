@@ -112,7 +112,13 @@ The Voices tab lists your voices on the left. **Sami** is the built-in voice. Yo
 
 ### Save, listen, delete
 
-- **Settings** (closed at first) holds the base seed, guidance and speed.
+- **Settings** (closed at first) holds these settings. The panel scrolls when it is longer than the window.
+  - **Model**: **tr2 (Turkish)** speaks Turkish well. **Base model** follows gender, age and pitch better, but speaks Turkish less well.
+  - **Pitch shift**: makes the voice lower (−) or higher (+), in semitones. A pitch chip sets it too (Very low −4 … Very high +4).
+  - **Variety**: 0 gives the likeliest sound. A higher value gives more different voices from the same seed.
+  - **Speed**, **Base seed**, **Guidance** and **Quality steps** (16, 32 or 64: more is slower and cleaner).
+  - **Pauses**: the silence between sentences and between paragraphs.
+- The voice settings use fixed English words for the model (for example `female, elderly`). The model does not always follow **Elderly**.
 - Type a name and click **Save**. The new voice shows in the Voice tab at once and is selected there.
 - New voices use the same model as Sami (the tr2 adapter).
 - Click a voice in the list, then **Listen**, to hear the test sentence with it.

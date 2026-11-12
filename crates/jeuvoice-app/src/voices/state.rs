@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jeuvoice_core::audio;
-use jeuvoice_core::preset::{BUILTIN_PRESET, ModelRef, Preset, PresetKind, default_preset, delete_preset, list_presets};
+use jeuvoice_core::preset::{AdapterRef, BUILTIN_PRESET, ModelRef, Preset, PresetKind, default_preset, delete_preset, list_presets};
 use jeuvoice_engine_client::{EngineApi, EngineError, Health, JobId, JobStatus, RenderRequest};
 use jeuvoice_whisper::Transcriber;
 use rune::{TextEdit, Waker};
@@ -63,6 +63,10 @@ struct TryInputs {
     traits: crate::voices::traits::VoiceTraits,
     guidance: f32,
     speed: f32,
+    pitch_shift: f32,
+    variety: f32,
+    num_step: u32,
+    use_base_model: bool,
     clip: Option<PathBuf>,
     clip_text: String,
 }
@@ -175,13 +179,15 @@ impl VoicesTab {
         list
     }
 
-    /// The model a new voice uses: Sami's, as it is on disk.
+    /// The model a new voice uses: Sami's, as it is on disk. With the base model
+    /// choice, the same base without an adapter.
     pub fn new_voice_model(&self) -> ModelRef {
-        list_presets(&self.presets_dir)
+        let sami = list_presets(&self.presets_dir)
             .into_iter()
             .find(|p| p.name == BUILTIN_PRESET)
             .map(|p| p.model)
-            .unwrap_or_else(|| default_preset().model)
+            .unwrap_or_else(|| default_preset().model);
+        if self.editor.use_base_model { ModelRef { adapter: AdapterRef::None, ..sami } } else { sami }
     }
 
     /// This tab uses the engine or Whisper now.
@@ -369,6 +375,10 @@ impl VoicesTab {
             traits: self.editor.traits.clone(),
             guidance: self.editor.guidance,
             speed: self.editor.speed,
+            pitch_shift: self.editor.pitch_shift,
+            variety: self.editor.variety,
+            num_step: self.editor.num_step,
+            use_base_model: self.editor.use_base_model,
             clip: self.editor.clip.clone(),
             clip_text: self.clip_text_field.text.trim().to_string(),
         }

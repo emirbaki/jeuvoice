@@ -132,6 +132,8 @@ mod tests {
             para_pause: 0.3,
             num_step: 32,
             speed: 1.0,
+            pitch_shift: 0.0,
+            variety: 0.0,
         }
     }
 

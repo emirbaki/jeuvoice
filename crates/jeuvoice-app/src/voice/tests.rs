@@ -108,6 +108,8 @@ fn test_preset(presets: &Path) -> Preset {
         para_pause: 0.3,
         num_step: 32,
         speed: 1.0,
+        pitch_shift: 0.0,
+        variety: 0.0,
     };
     // Seed presets need no clip: save without one.
     save_preset(presets, &preset, None).unwrap();

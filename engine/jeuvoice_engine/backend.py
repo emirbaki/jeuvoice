@@ -34,6 +34,7 @@ class Backend(Protocol):
         num_step: int,
         speed: float,
         duration: float | None,
+        variety: float = 0.0,
     ) -> np.ndarray: ...
 
 
@@ -62,7 +63,7 @@ class FakeBackend:
     def make_prompt(self, ref_wav: str | None, ref_text: str | None) -> object | None:
         return ("prompt", ref_wav, ref_text) if ref_wav or ref_text else None
 
-    def render(self, part, prompt, instruct, seed, guidance, num_step, speed, duration=None):
+    def render(self, part, prompt, instruct, seed, guidance, num_step, speed, duration=None, variety=0.0):
         rng = np.random.default_rng(seed)
         amp = 0.3 + 0.1 * rng.random()
         n = max(1, int(0.06 * len(part.text) * SAMPLE_RATE))

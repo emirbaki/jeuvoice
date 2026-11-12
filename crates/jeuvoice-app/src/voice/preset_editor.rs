@@ -53,6 +53,18 @@ pub struct PresetEditor {
     pub traits: VoiceTraits,
     pub guidance: f32,
     pub speed: f32,
+    /// Semitones to move the voice after the render: negative is lower.
+    pub pitch_shift: f32,
+    /// The token sampling temperature: 0 is the likeliest sound.
+    pub variety: f32,
+    /// Model steps: more is slower and cleaner.
+    pub num_step: u32,
+    /// Silence between sentences and between paragraphs, in seconds.
+    pub pause: f32,
+    pub para_pause: f32,
+    /// Use the base model without the tr2 adapter. It follows the voice attributes
+    /// better, but speaks Turkish less well.
+    pub use_base_model: bool,
     pub tries: Vec<TryVoice>,
     /// Which try the user picked.
     pub picked: Option<usize>,
@@ -73,6 +85,12 @@ impl PresetEditor {
             traits: VoiceTraits::default(),
             guidance: 2.5,
             speed: 1.0,
+            pitch_shift: 0.0,
+            variety: 0.0,
+            num_step: 32,
+            pause: 0.1,
+            para_pause: 0.3,
+            use_base_model: false,
             tries: Vec::new(),
             picked: None,
             status: None,
@@ -151,7 +169,16 @@ impl PresetEditor {
 
     /// The render settings every try shares.
     fn wire_preset(&self) -> WirePreset {
-        WirePreset { guidance: self.guidance, speed: self.speed, ..WirePreset::default() }
+        WirePreset {
+            guidance: self.guidance,
+            speed: self.speed,
+            pitch_shift: self.pitch_shift,
+            variety: self.variety,
+            num_step: self.num_step,
+            pause: f64::from(self.pause),
+            para_pause: f64::from(self.para_pause),
+            ..WirePreset::default()
+        }
     }
 
     /// Why `name` cannot be a new voice name, in plain words, or `None` when it can.
@@ -263,10 +290,12 @@ impl PresetEditor {
             instruct,
             model,
             guidance: self.guidance,
-            pause: 0.1,
-            para_pause: 0.3,
-            num_step: 32,
+            pause: self.pause,
+            para_pause: self.para_pause,
+            num_step: self.num_step,
             speed: self.speed,
+            pitch_shift: self.pitch_shift,
+            variety: self.variety,
         };
         save_preset(presets_dir, &preset, ref_wav.as_deref()).map_err(|e| crate::i18n::trf!("The preset could not be saved: {e}", "Hazır ayar kaydedilemedi: {e}"))?;
         self.status = Some(crate::i18n::trf!("Saved preset {name}.", "{name} hazır ayarı kaydedildi."));

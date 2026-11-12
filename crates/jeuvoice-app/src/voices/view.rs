@@ -24,7 +24,26 @@ pub fn view(s: &App) -> El {
         .gap(space::S3)
         .padding(space::S3)
         .child(style::glass_blur("glass-voices-list", voice_list(s).w(LIST_W).h_full().padding(space::S3)))
-        .child(style::glass_blur("glass-voices-maker", maker(s).w_full().h_full().padding(space::S3)).grow(1.0).min_w(0.0))
+        .child(
+            style::glass_blur(
+                "glass-voices-maker",
+                col()
+                    .w_full()
+                    .h_full()
+                    .min_h(0.0)
+                    .child(
+                        col()
+                            .key("voices-maker-scroll")
+                            .w_full()
+                            .grow(1.0)
+                            .min_h(0.0)
+                            .scroll(ScrollSpec { stick_bottom: false })
+                            .child(maker(s).w_full().padding(space::S3)),
+                    ),
+            )
+            .grow(1.0)
+            .min_w(0.0),
+        )
 }
 
 fn voice_list(s: &App) -> El {
@@ -171,8 +190,9 @@ fn trait_chips(s: &App) -> El {
     for (pi, slug) in Pitch::ALL.into_iter().zip(["very-low", "low", "moderate", "high", "very-high"]) {
         let on = t.pitch == Some(pi);
         pitches = pitches.child(chip(&format!("voices-chip-pitch-{slug}"), pi.label(), on, move |s: &mut App| {
-            let tr = &mut s.voices.editor.traits;
-            tr.pitch = if tr.pitch == Some(pi) { None } else { Some(pi) };
+            let ed = &mut s.voices.editor;
+            ed.traits.pitch = if ed.traits.pitch == Some(pi) { None } else { Some(pi) };
+            ed.pitch_shift = ed.traits.pitch.map_or(0.0, Pitch::semitones);
         }));
     }
     let whisper = chip("voices-chip-style-whisper", tr!("Whisper", "Fısıltı"), t.whisper, |s: &mut App| {
@@ -253,30 +273,120 @@ fn settings_block(s: &App) -> El {
                 .child(text(value.as_str()).key(key).font(type_::BODY).color(p.text).w(48.0))
                 .child(style::button(&format!("{key}-plus"), "+", true, move |s, _| plus(s)))
         };
+        let model_chip = |key: &str, label: &str, base: bool| {
+            chip(key, label, ed.use_base_model == base, move |s: &mut App| s.voices.editor.use_base_model = base)
+        };
+        let model_hint = if ed.use_base_model {
+            tr!(
+                "The base model follows gender, age and pitch better, but speaks Turkish less well.",
+                "Temel model cinsiyet, yaş ve perdeyi daha iyi uygular, ama Türkçeyi daha az iyi okur."
+            )
+        } else {
+            tr!(
+                "tr2 speaks Turkish well, but follows the pitch words less. Use Pitch shift for a lower or higher voice.",
+                "tr2 Türkçeyi iyi okur, ama perde kelimelerini az uygular. Kalın veya ince ses için Perde kaydırmayı kullanın."
+            )
+        };
+        let group = |title: &str| text(title).font(type_::LABEL).color(p.text).pt(space::S1);
         block = block
-            .child(stepper(
-                "voices-seed",
-                tr!("Base seed", "Başlangıç seed"),
-                ed.base_seed.to_string(),
-                |s| s.voices.editor.base_seed = s.voices.editor.base_seed.saturating_sub(1).max(1),
-                |s| s.voices.editor.base_seed += 1,
-            ))
-            .child(stepper(
-                "voices-guidance",
-                tr!("Guidance", "Guidance"),
-                format!("{:.1}", ed.guidance),
-                |s| s.voices.editor.guidance = (s.voices.editor.guidance - 0.5).max(1.0),
-                |s| s.voices.editor.guidance = (s.voices.editor.guidance + 0.5).min(5.0),
-            ))
-            .child(stepper(
-                "voices-speed",
-                tr!("Speed", "Hız"),
-                format!("{:.1}", ed.speed),
-                |s| s.voices.editor.speed = ((s.voices.editor.speed - 0.1) * 10.0).round() / 10.0,
-                |s| s.voices.editor.speed = ((s.voices.editor.speed + 0.1) * 10.0).round() / 10.0,
-            ));
+            .child(group(tr!("Model", "Model")))
+            .child(
+                row()
+                    .gap(space::S1)
+                    .child(model_chip("voices-model-tr2", tr!("tr2 (Turkish)", "tr2 (Türkçe)"), false))
+                    .child(model_chip("voices-model-base", tr!("Base model", "Temel model"), true)),
+            )
+            .child(text(model_hint).font(type_::LABEL).color(p.text_secondary).wrap())
+            .child(group(tr!("Voice", "Ses")))
+            .child(
+                row()
+                    .gap(space::S3)
+                    .flex_wrap()
+                    .child(stepper(
+                        "voices-pitch",
+                        tr!("Pitch shift", "Perde kaydırma"),
+                        semitones(ed.pitch_shift),
+                        |s| s.voices.editor.pitch_shift = (s.voices.editor.pitch_shift - 1.0).max(-12.0),
+                        |s| s.voices.editor.pitch_shift = (s.voices.editor.pitch_shift + 1.0).min(12.0),
+                    ))
+                    .child(stepper(
+                        "voices-variety",
+                        tr!("Variety", "Çeşitlilik"),
+                        format!("{:.1}", ed.variety),
+                        |s| s.voices.editor.variety = nudge(s.voices.editor.variety, -0.1, 0.0, 1.5),
+                        |s| s.voices.editor.variety = nudge(s.voices.editor.variety, 0.1, 0.0, 1.5),
+                    ))
+                    .child(stepper(
+                        "voices-speed",
+                        tr!("Speed", "Hız"),
+                        format!("{:.1}", ed.speed),
+                        |s| s.voices.editor.speed = nudge(s.voices.editor.speed, -0.1, 0.5, 2.0),
+                        |s| s.voices.editor.speed = nudge(s.voices.editor.speed, 0.1, 0.5, 2.0),
+                    )),
+            )
+            .child(group(tr!("Render", "Üretim")))
+            .child(
+                row()
+                    .gap(space::S3)
+                    .flex_wrap()
+                    .child(stepper(
+                        "voices-seed",
+                        tr!("Base seed", "Başlangıç seed"),
+                        ed.base_seed.to_string(),
+                        |s| s.voices.editor.base_seed = s.voices.editor.base_seed.saturating_sub(1).max(1),
+                        |s| s.voices.editor.base_seed += 1,
+                    ))
+                    .child(stepper(
+                        "voices-guidance",
+                        tr!("Guidance", "Guidance"),
+                        format!("{:.1}", ed.guidance),
+                        |s| s.voices.editor.guidance = (s.voices.editor.guidance - 0.5).max(1.0),
+                        |s| s.voices.editor.guidance = (s.voices.editor.guidance + 0.5).min(5.0),
+                    ))
+                    .child(stepper(
+                        "voices-steps",
+                        tr!("Quality steps", "Kalite adımı"),
+                        ed.num_step.to_string(),
+                        |s| s.voices.editor.num_step = (s.voices.editor.num_step / 2).max(16),
+                        |s| s.voices.editor.num_step = (s.voices.editor.num_step * 2).min(64),
+                    )),
+            )
+            .child(group(tr!("Pauses", "Duraklamalar")))
+            .child(
+                row()
+                    .gap(space::S3)
+                    .flex_wrap()
+                    .child(stepper(
+                        "voices-pause",
+                        tr!("Sentence (s)", "Cümle (sn)"),
+                        format!("{:.2}", ed.pause),
+                        |s| s.voices.editor.pause = nudge(s.voices.editor.pause, -0.05, 0.0, 1.0),
+                        |s| s.voices.editor.pause = nudge(s.voices.editor.pause, 0.05, 0.0, 1.0),
+                    ))
+                    .child(stepper(
+                        "voices-para-pause",
+                        tr!("Paragraph (s)", "Paragraf (sn)"),
+                        format!("{:.1}", ed.para_pause),
+                        |s| s.voices.editor.para_pause = nudge(s.voices.editor.para_pause, -0.1, 0.0, 2.0),
+                        |s| s.voices.editor.para_pause = nudge(s.voices.editor.para_pause, 0.1, 0.0, 2.0),
+                    )),
+            );
     }
     block
+}
+
+/// `value + by`, kept in `lo..=hi` and rounded to 0.01, so steps do not drift.
+fn nudge(value: f32, by: f32, lo: f32, hi: f32) -> f32 {
+    (((value + by) * 100.0).round() / 100.0).clamp(lo, hi)
+}
+
+/// A pitch shift for the screen: "0", "+2", "−3".
+fn semitones(v: f32) -> String {
+    match v {
+        v if v > 0.0 => format!("+{v:.0}"),
+        v if v < 0.0 => format!("−{:.0}", -v),
+        _ => "0".into(),
+    }
 }
 
 fn try_row(s: &App) -> El {

@@ -22,6 +22,8 @@ use crate::voices::traits::{Age, Gender};
 pub(crate) struct Gate {
     inner: FakeEngineApi,
     pub calls: Mutex<Vec<String>>,
+    /// Every render request, to check the settings it sends.
+    pub requests: Mutex<Vec<RenderRequest>>,
     pub open: AtomicBool,
     /// While set, `job` fails as if the engine process died.
     pub broken: AtomicBool,
@@ -29,7 +31,7 @@ pub(crate) struct Gate {
 
 impl Gate {
     pub fn new(open: bool) -> Arc<Self> {
-        Arc::new(Self { inner: FakeEngineApi::new(), calls: Mutex::new(vec![]), open: AtomicBool::new(open), broken: AtomicBool::new(false) })
+        Arc::new(Self { inner: FakeEngineApi::new(), calls: Mutex::new(vec![]), requests: Mutex::new(vec![]), open: AtomicBool::new(open), broken: AtomicBool::new(false) })
     }
 }
 
@@ -46,6 +48,7 @@ impl EngineApi for Gate {
     }
     fn render(&self, req: &RenderRequest) -> Result<JobId, EngineError> {
         self.calls.lock().unwrap().push(format!("render {} {}", req.base_seed, req.script));
+        self.requests.lock().unwrap().push(req.clone());
         self.inner.render(req)
     }
     fn job(&self, id: &JobId) -> Result<JobStatus, EngineError> {
@@ -74,6 +77,10 @@ struct Rig {
 
 impl Rig {
     fn new(engine: Arc<Gate>) -> Self {
+        Self::sized(engine, (1100.0, 720.0))
+    }
+
+    fn sized(engine: Arc<Gate>, size: (f32, f32)) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let deps = Deps {
             transcriber: Arc::new(FakeTranscriber(Transcript {
@@ -97,7 +104,7 @@ impl Rig {
         app.voice.engine_api = Some(engine.clone());
         app.voices.engine_api = Some(engine.clone());
         App::setup(&mut app, Arc::new(|| {}));
-        let mut rt = Runtime::new(app, view, (1100.0, 720.0), Env { system_dark: true, scale: 2.0 });
+        let mut rt = Runtime::new(app, view, size, Env { system_dark: true, scale: 2.0 });
         rt.poll = Some(App::poll);
         rt.frame(0.0);
         Rig { rt, tmp, engine }
@@ -151,6 +158,135 @@ impl Rig {
         });
         self.until("three tries", |s| s.voices.editor.tries.len() == 3 && s.voices.editor.tries.iter().all(|t| t.done));
     }
+}
+
+#[test]
+fn the_maker_scrolls_when_it_is_longer_than_the_window() {
+    // A short window, so the maker is longer than it in English and in Turkish.
+    let window_h = 520.0;
+    let mut rig = Rig::sized(Gate::new(true), (1100.0, window_h));
+    rig.rt.update(|s, _| {
+        s.tab = Tab::Voices;
+        s.voices.show_settings = true;
+    });
+    rig.three_tries();
+    // `rect` is where the button is drawn this frame, after scrolling.
+    let save = |rig: &Rig| {
+        rig.rt.elements().into_iter().find(|e| e.key.as_deref() == Some("voices-save") && !e.exiting).expect("voices-save is on screen").rect
+    };
+    let before = save(&rig);
+    assert!(before[1] + before[3] > window_h, "the fixture is longer than the window: {before:?}");
+    let (x, y) = rig.rt.find("voices-maker-scroll").unwrap();
+    for _ in 0..20 {
+        rig.rt.wheel(x, y, -100.0);
+        rig.rt.frame(1.0 / 60.0);
+    }
+    for _ in 0..60 {
+        rig.rt.frame(1.0 / 60.0);
+    }
+    let after = save(&rig);
+    assert!(after[1] + after[3] <= window_h, "Save scrolls into the window: {before:?} -> {after:?}");
+}
+
+/// Set the shape settings a user changes in Settings.
+fn shape(s: &mut App) {
+    let ed = &mut s.voices.editor;
+    ed.pitch_shift = -3.0;
+    ed.variety = 0.4;
+    ed.num_step = 64;
+    ed.pause = 0.25;
+    ed.para_pause = 0.6;
+}
+
+#[test]
+fn tries_send_the_shape_settings() {
+    let mut rig = Rig::new(Gate::new(true));
+    rig.rt.update(|s, _| shape(s));
+    rig.three_tries();
+    let requests = rig.engine.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3);
+    for r in requests {
+        assert_eq!((r.preset.pitch_shift, r.preset.variety, r.preset.num_step), (-3.0, 0.4, 64));
+    }
+}
+
+#[test]
+fn a_saved_voice_keeps_the_shape_settings() {
+    let mut rig = Rig::new(Gate::new(true));
+    rig.rt.update(|s, _| shape(s));
+    rig.three_tries();
+    rig.rt.update(|s, _| s.voices.name_field = rune::TextEdit::new("Ece"));
+    assert_eq!(rig.rt.state.voices_save(), Ok("Ece".to_string()));
+    let ece = saved(&rig.presets(), "Ece").unwrap();
+    assert_eq!((ece.pitch_shift, ece.variety, ece.num_step), (-3.0, 0.4, 64));
+    assert_eq!((ece.pause, ece.para_pause), (0.25, 0.6));
+}
+
+#[test]
+fn a_pitch_chip_sets_the_pitch_shift() {
+    let mut rig = Rig::new(Gate::new(true));
+    rig.rt.update(|s, _| {
+        s.tab = Tab::Voices;
+        s.voices.mode = VoicesMode::Describe;
+    });
+    rig.rt.frame(1.0 / 60.0);
+    rig.tap("voices-chip-pitch-very-low");
+    assert_eq!(rig.rt.state.voices.editor.pitch_shift, -4.0);
+    rig.tap("voices-chip-pitch-high");
+    assert_eq!(rig.rt.state.voices.editor.pitch_shift, 2.0);
+    rig.tap("voices-chip-pitch-high");
+    assert_eq!(rig.rt.state.voices.editor.pitch_shift, 0.0, "no pitch picked: no shift");
+}
+
+#[test]
+fn the_base_model_choice_loads_and_saves_no_adapter() {
+    let mut rig = Rig::new(Gate::new(true));
+    rig.rt.update(|s, _| s.voices.editor.use_base_model = true);
+    rig.three_tries();
+    let calls = rig.engine.calls.lock().unwrap().clone();
+    assert!(calls.iter().any(|c| c == "load k2-fsa/OmniVoice - auto"), "{calls:?}");
+    rig.rt.update(|s, _| s.voices.name_field = rune::TextEdit::new("Ece"));
+    assert_eq!(rig.rt.state.voices_save(), Ok("Ece".to_string()));
+    assert_eq!(saved(&rig.presets(), "Ece").unwrap().model.adapter, AdapterRef::None);
+}
+
+#[test]
+fn save_needs_a_new_try_after_a_shape_change() {
+    let mut rig = Rig::new(Gate::new(true));
+    rig.three_tries();
+    rig.rt.update(|s, _| {
+        s.voices.editor.pitch_shift = 2.0;
+        s.voices.name_field = rune::TextEdit::new("Ece");
+    });
+    assert!(rig.rt.state.voices_save().is_err());
+    rig.rt.update(|s, _| {
+        s.voices.editor.pitch_shift = 0.0;
+        s.voices.editor.use_base_model = true;
+    });
+    assert!(rig.rt.state.voices_save().is_err());
+}
+
+#[test]
+fn the_settings_change_the_shape() {
+    let mut rig = Rig::new(Gate::new(true));
+    rig.rt.update(|s, _| {
+        s.tab = Tab::Voices;
+        s.voices.show_settings = true;
+    });
+    rig.rt.frame(1.0 / 60.0);
+    rig.tap("voices-model-base");
+    rig.tap("voices-pitch-minus");
+    rig.tap("voices-variety-plus");
+    rig.tap("voices-steps-plus");
+    rig.tap("voices-pause-plus");
+    rig.tap("voices-para-pause-minus");
+    let ed = &rig.rt.state.voices.editor;
+    assert!(ed.use_base_model);
+    assert_eq!((ed.pitch_shift, ed.num_step), (-1.0, 64));
+    assert!((ed.variety - 0.1).abs() < 1e-6, "{}", ed.variety);
+    assert!((ed.pause - 0.15).abs() < 1e-6 && (ed.para_pause - 0.2).abs() < 1e-6, "{} {}", ed.pause, ed.para_pause);
+    rig.tap("voices-model-tr2");
+    assert!(!rig.rt.state.voices.editor.use_base_model);
 }
 
 fn saved(dir: &Path, name: &str) -> Option<Preset> {
@@ -337,6 +473,8 @@ fn snap_voices() {
             s.voices.editor.traits.pitch = Some(crate::voices::traits::Pitch::High);
             s.voices.name_field = rune::TextEdit::new("Ece 2");
             s.voices.selected = Some("Sami".into());
+            s.voices.show_settings = true;
+            s.voices.editor.pitch_shift = 2.0;
             s.tab = Tab::Voices;
         });
         let tmp = std::mem::replace(&mut rig.tmp, tempfile::tempdir().unwrap());

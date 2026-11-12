@@ -145,6 +145,8 @@ def make_render_run(store: JobStore, req: dict):
     num_step = int(preset.get("num_step", 32))
     speed = float(preset.get("speed", 1.0))
     instruct = preset.get("instruct")
+    pitch_shift = float(preset.get("pitch_shift") or 0.0)
+    variety = float(preset.get("variety") or 0.0)
     base_seed = int(req.get("base_seed", 1))
     overrides = req.get("part_overrides") or {}
     wanted = req.get("paragraphs")
@@ -174,8 +176,8 @@ def make_render_run(store: JobStore, req: dict):
             ov = overrides.get(str(part.index), {})
             seed = int(ov.get("seed", _seed_for(part.index, base_seed, has_prompt)))
             part_guidance = float(ov.get("guidance", guidance))
-            wav = store.backend.render(part, prompt, instruct, seed, part_guidance, num_step, speed, None)
-            wav = np.asarray(wav, dtype=np.float32)
+            wav = store.backend.render(part, prompt, instruct, seed, part_guidance, num_step, speed, None, variety=variety)
+            wav = shift_pitch(np.asarray(wav, dtype=np.float32), pitch_shift)
             file = out_dir / f"part_{part.index}.wav"
             sf.write(file, wav, SAMPLE_RATE)
             rendered.append({
@@ -197,6 +199,15 @@ def make_render_run(store: JobStore, req: dict):
         return {"parts": rendered, "pause": pause, "para_pause": para_pause}
 
     return _run
+
+
+def shift_pitch(wav: np.ndarray, semitones: float) -> np.ndarray:
+    """Make the voice lower (negative) or higher (positive) by `semitones`. Same length."""
+    if semitones == 0.0 or len(wav) == 0:
+        return wav
+    import librosa
+
+    return librosa.effects.pitch_shift(wav, sr=SAMPLE_RATE, n_steps=semitones).astype(np.float32)
 
 
 def _seed_for(part_index: int, base_seed: int, has_prompt: bool) -> int:

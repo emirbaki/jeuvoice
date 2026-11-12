@@ -23,6 +23,8 @@ fn clone_preset() -> Preset {
         para_pause: 0.3,
         num_step: 32,
         speed: 1.0,
+        pitch_shift: 0.0,
+        variety: 0.0,
     }
 }
 
@@ -154,4 +156,22 @@ fn delete_never_leaves_the_presets_folder() {
         assert!(delete_preset(&presets, name).is_err(), "{name} is refused");
     }
     assert!(outside.join("preset.json").is_file(), "the folder outside stays");
+}
+
+#[test]
+fn an_old_preset_without_shape_settings_loads_with_none() {
+    let mut json = serde_json::to_value(default_preset()).unwrap();
+    let map = json.as_object_mut().unwrap();
+    map.remove("pitch_shift");
+    map.remove("variety");
+    let p: Preset = serde_json::from_value(json).unwrap();
+    assert_eq!((p.pitch_shift, p.variety), (0.0, 0.0));
+}
+
+#[test]
+fn the_engine_gets_the_shape_settings() {
+    let p = Preset { pitch_shift: -3.0, variety: 0.4, ..default_preset() };
+    let json = jeuvoice_core::preset::to_engine_json(&p, None, None);
+    assert_eq!(json["pitch_shift"], -3.0);
+    assert_eq!(json["variety"].as_f64().unwrap() as f32, 0.4);
 }

@@ -64,6 +64,10 @@ pub struct Preset {
     pub guidance: f32,
     pub num_step: u32,
     pub speed: f32,
+    /// Semitones to move the voice after the render (negative is lower).
+    pub pitch_shift: f32,
+    /// The token sampling temperature (0 is the likeliest sound).
+    pub variety: f32,
     pub instruct: Option<String>,
     pub ref_audio: Option<String>,
     pub ref_text: Option<String>,
@@ -79,6 +83,8 @@ impl Default for Preset {
             guidance: 2.5,
             num_step: 32,
             speed: 1.0,
+            pitch_shift: 0.0,
+            variety: 0.0,
             instruct: None,
             ref_audio: None,
             ref_text: None,
