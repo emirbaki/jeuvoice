@@ -344,3 +344,100 @@ fn snap_voices() {
     rune::App::new(spec).args(["--snap".to_string(), out.to_string()]).run();
     println!("wrote {out}");
 }
+
+/// The real flow with the dev engine (`engine/.venv`, GPU, the tr2 adapter in the
+/// app data folder). About 5 minutes. Keeps the picked tries in `target/voices-real/`.
+/// `scripts\cargo.cmd test -p jeuvoice-app --release real_voices_flow -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn real_voices_flow() {
+    use jeuvoice_engine_client::{EngineConfig, EngineProcess};
+
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let data = directories::ProjectDirs::from("com", "Jeu", "JeuVoice").unwrap().data_dir().to_path_buf();
+    let proc = EngineProcess::start(&EngineConfig {
+        python: repo.join("engine/.venv/Scripts/python.exe"),
+        engine_dir: repo.join("engine"),
+        data_dir: data,
+        backend: "omnivoice".into(),
+    })
+    .expect("the engine starts");
+    let api: Arc<dyn EngineApi> = Arc::new(proc.api());
+    let keep = repo.join("target/voices-real");
+    let _ = std::fs::remove_dir_all(&keep);
+    std::fs::create_dir_all(&keep).unwrap();
+
+    let mut rig = Rig::new(Gate::new(true));
+    rig.rt.update(|s, _| {
+        s.voices.engine_api = Some(api.clone());
+        s.voice.engine_api = Some(api.clone());
+    });
+    let long = |rig: &mut Rig, what: &str, done: &dyn Fn(&App) -> bool| {
+        let start = Instant::now();
+        while !done(&rig.rt.state) {
+            assert!(start.elapsed() < Duration::from_secs(900), "{what} takes too long: {:?}", rig.rt.state.voices.status);
+            std::thread::sleep(Duration::from_millis(100));
+            rig.rt.frame(1.0 / 60.0);
+        }
+        println!("{what}: {:.0} s", start.elapsed().as_secs_f64());
+    };
+    let keep_try = |rig: &Rig, name: &str| {
+        let file = rig.rt.state.voices.editor.tries[0].file.clone().expect("the try has a file");
+        std::fs::copy(&file, keep.join(format!("{name}.wav"))).unwrap();
+    };
+
+    // 1. Describe, try, save.
+    rig.rt.update(|s, _| {
+        s.voices.mode = VoicesMode::Describe;
+        s.voices.editor.traits.gender = Some(Gender::Female);
+        s.voices.editor.traits.age = Some(Age::YoungAdult);
+        s.voices_try(false);
+    });
+    long(&mut rig, "three described tries", &|s| s.voices.editor.tries.len() == 3 && s.voices.editor.tries.iter().all(|t| t.done));
+    assert_eq!(rig.rt.state.voices.status, crate::voices::state::VoicesStatus::Idle);
+    keep_try(&rig, "described-seed1");
+    rig.rt.update(|s, _| {
+        s.voices.editor.picked = Some(0);
+        s.voices.name_field = rune::TextEdit::new("Gercek Ece");
+    });
+    assert_eq!(rig.rt.state.voices_save(), Ok("Gercek Ece".to_string()));
+
+    // 2. Clone from Sami's clip, try, save.
+    let clip = repo.join("assets/presets/Sami/ref.wav");
+    let text = std::fs::read_to_string(repo.join("assets/presets/Sami/ref.txt")).unwrap();
+    rig.rt.update(|s, _| {
+        s.voices.editor.tries.clear();
+        s.voices.drop_clip(clip.clone(), "tr");
+    });
+    long(&mut rig, "clip check", &|s| s.voices.status == crate::voices::state::VoicesStatus::Idle);
+    assert!(rig.rt.state.voices.editor.clip.is_some(), "the clip is usable: {:?}", rig.rt.state.voices.editor.clip_error);
+    rig.rt.update(|s, _| {
+        s.voices.clip_text_field = rune::TextEdit::new(text.trim());
+        s.voices_try(false);
+    });
+    long(&mut rig, "clone try", &|s| s.voices.editor.tries.len() == 1 && s.voices.editor.tries[0].done && !s.voices.is_busy());
+    keep_try(&rig, "clone");
+    rig.rt.update(|s, _| {
+        s.voices.editor.picked = Some(0);
+        s.voices.name_field = rune::TextEdit::new("Gercek Klon");
+    });
+    assert_eq!(rig.rt.state.voices_save(), Ok("Gercek Klon".to_string()));
+
+    // 3. One paragraph with each saved voice in the Voice tab.
+    for name in ["Gercek Ece", "Gercek Klon"] {
+        rig.rt.update(|s, _| {
+            s.voice.preset_name = name.into();
+            s.voice.project = None;
+            s.voice.timeline = None;
+            s.voice.name_field = rune::TextEdit::new(name);
+            s.voice.script_field = rune::TextEdit::new("Bugün size kısa bir hikâye anlatacağım.");
+            s.generate_voice();
+        });
+        long(&mut rig, &format!("generate with {name}"), &|s| s.voice.timeline.is_some() && !s.voice.is_busy());
+        let tl = rig.rt.state.voice.timeline.as_ref().unwrap();
+        let secs = tl.audio.samples.len() as f64 / f64::from(tl.audio.rate);
+        println!("{name}: {secs:.1} s of audio");
+        assert!(secs > 1.0, "{name} made audio");
+    }
+    proc.stop();
+}

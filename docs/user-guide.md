@@ -57,7 +57,7 @@ The voice needs model files. Do one of these in **Settings**:
 ### Make a voice-over
 
 1. Open the **Voice** tab.
-2. Pick a preset. The default preset is `ses_0007`.
+2. Pick a voice. The built-in voice is **Sami**.
 3. Paste your script. Put an empty line between paragraphs.
 4. Click **Generate**. The first time, the model loads (about 30 seconds). Then JeuVoice reads one paragraph at a time.
 5. Press play to listen.
@@ -89,7 +89,35 @@ A name in Latin letters (for example `iPhone`) gets an **Add to English terms?**
 
 ### Presets
 
-To make a preset, drop a short clean clip of the voice and type what the clip says. Give the preset a name and save it.
+A preset is a saved voice. Make and manage voices in the **Voices** tab.
+
+## Voices
+
+The Voices tab lists your voices on the left. **Sami** is the built-in voice. You cannot delete Sami.
+
+### Make a voice from a description
+
+1. Click **+ New voice**, then **Describe**.
+2. Pick the gender, age and pitch. You can leave a group empty. **Whisper** makes a whispering voice.
+3. Click **Try 3 voices**. The first time, the voice model loads (about 30 seconds).
+4. Press ▶ on each try to listen. Click the try you like. It gets an orange outline.
+5. Click **+ Try 3 more** for three more tries.
+
+### Make a voice from a clip (clone)
+
+1. Click **+ New voice**, then **Clone**.
+2. Drop a clean clip of 3 to 10 seconds, or click the area to pick a file.
+3. Whisper writes what the clip says. Read the text and fix it.
+4. Click **Try** and listen.
+
+### Save, listen, delete
+
+- **Settings** (closed at first) holds the base seed, guidance and speed.
+- Type a name and click **Save**. The new voice shows in the Voice tab at once and is selected there.
+- New voices use the same model as Sami (the tr2 adapter).
+- Click a voice in the list, then **Listen**, to hear the test sentence with it.
+- Click ✕ next to a voice to delete it. The app asks first. A project that used a deleted voice opens with Sami.
+- While the Voice tab generates, **Try** and **Listen** wait. While the Voices tab works, **Generate** waits.
 
 ## Train
 
