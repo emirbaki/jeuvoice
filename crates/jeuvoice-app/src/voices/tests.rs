@@ -23,11 +23,13 @@ pub(crate) struct Gate {
     inner: FakeEngineApi,
     pub calls: Mutex<Vec<String>>,
     pub open: AtomicBool,
+    /// While set, `job` fails as if the engine process died.
+    pub broken: AtomicBool,
 }
 
 impl Gate {
     pub fn new(open: bool) -> Arc<Self> {
-        Arc::new(Self { inner: FakeEngineApi::new(), calls: Mutex::new(vec![]), open: AtomicBool::new(open) })
+        Arc::new(Self { inner: FakeEngineApi::new(), calls: Mutex::new(vec![]), open: AtomicBool::new(open), broken: AtomicBool::new(false) })
     }
 }
 
@@ -47,6 +49,9 @@ impl EngineApi for Gate {
         self.inner.render(req)
     }
     fn job(&self, id: &JobId) -> Result<JobStatus, EngineError> {
+        if self.broken.load(Ordering::SeqCst) {
+            return Err(EngineError::Failed("the engine is gone".into()));
+        }
         let status = self.inner.job(id)?;
         if !self.open.load(Ordering::SeqCst) && status.result.as_ref().is_some_and(|r| r.get("parts").is_some()) {
             return Ok(JobStatus { state: JobState::Running, progress: 0.5, message: String::new(), result: None, error: None });
@@ -440,4 +445,89 @@ fn real_voices_flow() {
         assert!(secs > 1.0, "{name} made audio");
     }
     proc.stop();
+}
+
+// -- final review fixes --
+
+/// Start three describe tries that stay "running" until the gate opens.
+fn running_tries(rig: &mut Rig) {
+    rig.rt.update(|s, _| {
+        s.voices.mode = VoicesMode::Describe;
+        s.voices_try(false);
+    });
+    rig.until("three tries started", |s| s.voices.editor.tries.len() == 3);
+}
+
+#[test]
+fn a_clip_drop_while_tries_render_waits() {
+    let mut rig = Rig::new(Gate::new(false));
+    running_tries(&mut rig);
+    let clip = rig.tmp.path().join("clip.wav");
+    std::fs::write(&clip, b"RIFF").unwrap();
+    rig.rt.update(|s, _| s.voices.drop_clip(clip.clone(), "tr"));
+    assert_eq!(rig.rt.state.voices.status, crate::voices::state::VoicesStatus::Rendering, "the drop does not replace the render");
+    assert!(rig.rt.state.voices.notice.is_some(), "the drop says why it waits");
+    rig.engine.open.store(true, Ordering::SeqCst);
+    rig.until("the tries end", |s| !s.voices.is_busy());
+}
+
+#[test]
+fn voice_tab_retakes_wait_while_voices_render() {
+    let mut rig = Rig::new(Gate::new(false));
+    running_tries(&mut rig);
+    rig.rt.update(|s, _| s.tab = Tab::Voice);
+    rig.rt.frame(1.0 / 60.0);
+    for key in ["voice-retake", "voice-try-more"] {
+        assert!(!rig.focusable(key), "{key} is off while the Voices tab renders");
+    }
+    rig.engine.open.store(true, Ordering::SeqCst);
+    rig.until("the tries end", |s| !s.voices.is_busy());
+}
+
+#[test]
+fn save_needs_a_try_with_the_current_inputs() {
+    let mut rig = Rig::new(Gate::new(true));
+    rig.three_tries();
+    rig.rt.update(|s, _| {
+        s.voices.editor.picked = Some(1);
+        s.voices.editor.traits.pitch = Some(crate::voices::traits::Pitch::High);
+        s.voices.name_field = rune::TextEdit::new("Ece");
+    });
+    assert!(rig.rt.state.voices_save().is_err(), "the inputs changed after the try");
+    assert!(saved(&rig.presets(), "Ece").is_none(), "nothing is written");
+    rig.rt.update(|s, _| s.voices.mode = VoicesMode::Clone);
+    assert!(rig.rt.state.voices_save().is_err(), "a mode change also needs a new try");
+}
+
+#[test]
+fn an_engine_that_fails_to_start_frees_both_tabs() {
+    let mut rig = Rig::new(Gate::new(true));
+    rig.rt.update(|s, _| {
+        s.voices.engine_api = None;
+        s.voices.mode = VoicesMode::Describe;
+        s.voices_try(false);
+    });
+    rig.until("the start fails", |s| matches!(s.voices.status, crate::voices::state::VoicesStatus::Failed(_)));
+    assert!(!rig.rt.state.voices.is_busy());
+}
+
+#[test]
+fn tries_end_when_the_engine_stops_answering() {
+    let mut rig = Rig::new(Gate::new(false));
+    running_tries(&mut rig);
+    rig.engine.broken.store(true, Ordering::SeqCst);
+    rig.until("the tries give up", |s| !s.voices.is_busy());
+    assert!(matches!(rig.rt.state.voices.status, crate::voices::state::VoicesStatus::Failed(_)));
+}
+
+#[test]
+fn delete_errors_are_plain_text() {
+    let mut rig = Rig::new(Gate::new(true));
+    save_preset(&rig.presets(), &Preset { name: "Ece".into(), ..default_preset() }, None).unwrap();
+    rig.rt.update(|s, _| s.voices.ask_delete("Ece"));
+    std::fs::remove_dir_all(rig.presets().join("Ece")).unwrap();
+    rig.rt.update(|s, _| s.voices_confirm_delete());
+    let notice = rig.rt.state.voices.notice.clone().unwrap_or_default();
+    assert!(notice.contains("Ece"), "{notice}");
+    assert!(!notice.contains("Missing") && !notice.contains("Io("), "no Debug text: {notice}");
 }

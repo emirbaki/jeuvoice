@@ -29,7 +29,12 @@ pub struct TryVoice {
     pub job: String,
     pub file: Option<PathBuf>,
     pub done: bool,
+    /// Job reads that failed in a row. Many mean the engine stopped.
+    pub read_errors: u32,
 }
+
+/// After this many failed job reads in a row, a try ends with an error.
+const MAX_READ_ERRORS: u32 = 20;
 
 /// Make clone and seed presets.
 pub struct PresetEditor {
@@ -190,7 +195,7 @@ impl PresetEditor {
             out_dir: out_dir.join(format!("try-{seed}")),
         };
         match self.engine.render(&req) {
-            Ok(job) => self.tries.push(TryVoice { seed, job, file: None, done: false }),
+            Ok(job) => self.tries.push(TryVoice { seed, job, file: None, done: false, read_errors: 0 }),
             Err(e) => self.status = Some(e.to_string()),
         }
     }
@@ -201,7 +206,19 @@ impl PresetEditor {
             if t.done {
                 continue;
             }
-            let Ok(status) = self.engine.job(&t.job) else { continue };
+            let Ok(status) = self.engine.job(&t.job) else {
+                t.read_errors += 1;
+                if t.read_errors >= MAX_READ_ERRORS {
+                    t.done = true;
+                    self.status = Some(crate::i18n::tr!(
+                        "The voice engine stopped answering. Restart it in Settings.",
+                        "Ses motoru cevap vermiyor. Ayarlar'dan yeniden başlatın."
+                    )
+                    .into());
+                }
+                continue;
+            };
+            t.read_errors = 0;
             match status.state {
                 JobState::Done => {
                     t.done = true;

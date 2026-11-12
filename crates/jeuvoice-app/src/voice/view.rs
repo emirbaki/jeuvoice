@@ -123,14 +123,14 @@ fn takes_panel(s: &App) -> El {
                 .center_y()
                 .gap(space::S2)
                 .flex_wrap()
-                .child(button("voice-retake", tr!("Retake region", "Bölgeyi yeniden çek"), true, |s, _| {
+                .child(button("voice-retake", tr!("Retake region", "Bölgeyi yeniden çek"), !s.voices.is_busy(), |s, _| {
                     let store = s.token_store();
                     let settings = s.settings.clone();
                     let cpu = crate::services::engine::whisper_must_use_cpu(&s.transcribe.engine_state());
                     let (engine, voice) = (&mut s.transcribe, &mut s.voice);
                     voice.retake(engine.engine_mut(), &settings, store, cpu)
                 }))
-                .child(button("voice-try-more", tr!("+ Try 3 more", "+ 3 tane daha dene"), true, |s, _| {
+                .child(button("voice-try-more", tr!("+ Try 3 more", "+ 3 tane daha dene"), !s.voices.is_busy(), |s, _| {
                     let store = s.token_store();
                     let settings = s.settings.clone();
                     let cpu = crate::services::engine::whisper_must_use_cpu(&s.transcribe.engine_state());
@@ -263,7 +263,7 @@ fn fix_panel(s: &App) -> El {
             row()
                 .gap(space::S2)
                 .child(field)
-                .child(button("voice-retake-word", tr!("Retake word", "Sözcüğü yeniden çek"), true, |s, _| {
+                .child(button("voice-retake-word", tr!("Retake word", "Sözcüğü yeniden çek"), !s.voices.is_busy(), |s, _| {
                     let store = s.token_store();
                     let settings = s.settings.clone();
                     let cpu = crate::services::engine::whisper_must_use_cpu(&s.transcribe.engine_state());

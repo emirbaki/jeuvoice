@@ -99,6 +99,8 @@ pub enum PresetDeleteError {
     Builtin,
     /// No preset has this name.
     Missing,
+    /// The name is not one plain folder name (it holds a path).
+    Invalid,
     Io(std::io::Error),
 }
 
@@ -106,6 +108,11 @@ pub enum PresetDeleteError {
 pub fn delete_preset(presets_dir: &Path, name: &str) -> Result<(), PresetDeleteError> {
     if canonical_preset_name(name) == BUILTIN_PRESET {
         return Err(PresetDeleteError::Builtin);
+    }
+    // Only one plain folder name: never a path that leaves the presets folder.
+    let plain = matches!(Path::new(name).components().collect::<Vec<_>>().as_slice(), [std::path::Component::Normal(_)]);
+    if !plain || name.contains(['/', '\\', ':']) {
+        return Err(PresetDeleteError::Invalid);
     }
     let folder = presets_dir.join(name);
     if !folder.join("preset.json").is_file() {

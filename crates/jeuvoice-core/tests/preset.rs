@@ -142,3 +142,16 @@ fn delete_removes_the_folder() {
     assert!(!tmp.path().join("Ece").exists());
     assert!(matches!(delete_preset(tmp.path(), "Ece"), Err(PresetDeleteError::Missing)));
 }
+
+#[test]
+fn delete_never_leaves_the_presets_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let presets = tmp.path().join("presets");
+    let outside = tmp.path().join("outside");
+    save_preset(tmp.path(), &Preset { name: "outside".into(), ..default_preset() }, None).unwrap();
+    fs::create_dir_all(&presets).unwrap();
+    for name in ["../outside", r"..\outside", outside.to_str().unwrap()] {
+        assert!(delete_preset(&presets, name).is_err(), "{name} is refused");
+    }
+    assert!(outside.join("preset.json").is_file(), "the folder outside stays");
+}

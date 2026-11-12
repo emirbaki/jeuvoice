@@ -56,6 +56,17 @@ enum VoicesEvent {
     Tick,
 }
 
+/// What a try was made with: a save must store the same.
+#[derive(Clone, Debug, PartialEq)]
+struct TryInputs {
+    mode: VoicesMode,
+    traits: crate::voices::traits::VoiceTraits,
+    guidance: f32,
+    speed: f32,
+    clip: Option<PathBuf>,
+    clip_text: String,
+}
+
 /// An engine that answers nothing: the editor holds it until the real engine starts.
 struct NoEngine;
 
@@ -108,6 +119,8 @@ pub struct VoicesTab {
     tries_dir: PathBuf,
     transcriber: Arc<dyn Transcriber>,
     pending: Option<Pending>,
+    /// The inputs of the current tries. Save stores a voice only with these.
+    tried_with: Option<TryInputs>,
     /// Stops the tick worker that polls the try renders.
     ticking: Option<Arc<AtomicBool>>,
     waker: Waker,
@@ -136,6 +149,7 @@ impl VoicesTab {
             tries_dir,
             transcriber,
             pending: None,
+            tried_with: None,
             ticking: None,
             waker: Arc::new(|| {}),
             events_tx,
@@ -208,6 +222,10 @@ impl VoicesTab {
 
     /// Check a dropped clip on a worker: its length, then Whisper text for the user to check.
     pub fn drop_clip(&mut self, path: PathBuf, language: &str) {
+        if let Some(reason) = self.try_block_reason(false) {
+            self.notice = Some(reason.into());
+            return;
+        }
         self.mode = VoicesMode::Clone;
         self.status = VoicesStatus::CheckingClip;
         let (transcriber, language, say) = (self.transcriber.clone(), language.to_string(), self.sender());
@@ -270,6 +288,13 @@ impl VoicesTab {
 
     /// Save the picked try as a voice. The new voice uses Sami's model.
     pub fn save(&mut self) -> Result<String, String> {
+        if !self.tries_match_inputs() {
+            return Err(tr!(
+                "The settings changed after the last try. Try again, listen, then save.",
+                "Son denemeden sonra ayarlar değişti. Yeniden deneyin, dinleyin, sonra kaydedin."
+            )
+            .into());
+        }
         self.editor.name = self.name_field.text.trim().to_string();
         self.editor.kind = match self.mode {
             VoicesMode::Clone => PresetKind::Clone,
@@ -305,7 +330,13 @@ impl VoicesTab {
                 Some(name)
             }
             Err(e) => {
-                self.notice = Some(trf!("The voice {name} could not be deleted: {e:?}", "{name} sesi silinemedi: {e:?}"));
+                use jeuvoice_core::preset::PresetDeleteError as E;
+                self.notice = Some(match e {
+                    E::Missing => trf!("The voice {name} is gone already.", "{name} sesi zaten yok."),
+                    E::Builtin => tr!("Sami cannot be deleted.", "Sami silinemez.").into(),
+                    E::Invalid => trf!("The voice {name} could not be deleted.", "{name} sesi silinemedi."),
+                    E::Io(err) => trf!("The voice {name} could not be deleted: {err}", "{name} sesi silinemedi: {err}"),
+                });
                 None
             }
         }
@@ -323,6 +354,29 @@ impl VoicesTab {
 
     pub fn has_pending(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// The engine could not start: drop what waited for it and say why.
+    pub fn fail_pending(&mut self, why: String) {
+        self.pending = None;
+        self.status = VoicesStatus::Failed(why);
+    }
+
+    /// The inputs a save would store now.
+    fn inputs(&self) -> TryInputs {
+        TryInputs {
+            mode: self.mode,
+            traits: self.editor.traits.clone(),
+            guidance: self.editor.guidance,
+            speed: self.editor.speed,
+            clip: self.editor.clip.clone(),
+            clip_text: self.clip_text_field.text.trim().to_string(),
+        }
+    }
+
+    /// The tries were made with the inputs a save would store now.
+    pub fn tries_match_inputs(&self) -> bool {
+        !self.editor.tries.is_empty() && self.tried_with.as_ref() == Some(&self.inputs())
     }
 
     /// Take the worker reports. True when the screen must redraw.
@@ -367,6 +421,7 @@ impl VoicesTab {
     }
 
     fn start_tries(&mut self, more: bool) {
+        self.tried_with = Some(self.inputs());
         match self.mode {
             VoicesMode::Clone => {
                 self.editor.kind = PresetKind::Clone;

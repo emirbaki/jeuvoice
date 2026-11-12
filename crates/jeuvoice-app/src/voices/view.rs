@@ -346,7 +346,7 @@ fn status_line(s: &App) -> El {
 
 fn save_row(s: &App) -> El {
     let p = style::palette();
-    let can_save = !s.voices.editor.tries.is_empty() && !s.voices.is_busy();
+    let can_save = s.voices.tries_match_inputs() && !s.voices.is_busy();
     row()
         .w_full()
         .gap(space::S2)

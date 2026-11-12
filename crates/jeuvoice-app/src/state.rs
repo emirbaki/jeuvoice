@@ -426,6 +426,12 @@ impl App {
                 changed = true;
             }
         }
+        if s.voices.has_pending()
+            && let crate::services::engine::EngineState::Failed(why) = s.transcribe.engine_state()
+        {
+            s.voices.fail_pending(why);
+            changed = true;
+        }
         changed |= s.voices.poll(s.transcribe.player_mut());
         // A Generate pressed while the engine started now continues.
         if s.voice.pending_generate && matches!(s.transcribe.engine_state(), crate::services::engine::EngineState::Ready(_)) {
