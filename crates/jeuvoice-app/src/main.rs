@@ -22,6 +22,7 @@ mod transcribe_tab;
 /// Voice tab pieces. The Voice tab (Task 11) plugs these into the window.
 #[allow(dead_code)]
 mod voice;
+mod voices;
 mod version;
 mod view;
 mod waveform;
