@@ -18,6 +18,8 @@ pub enum PlayerOwner {
     Voice,
     /// The Train tab review list takes the player with this.
     Train,
+    /// The Voices tab plays tries and Listen renders with this.
+    Voices,
 }
 
 /// One [`Playback`] with an owner. Opening the device can fail: then playback stays

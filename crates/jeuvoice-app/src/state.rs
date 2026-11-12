@@ -17,6 +17,7 @@ pub use crate::services::speech::EnsureModel;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Voice,
+    Voices,
     Transcribe,
     Train,
     Settings,
@@ -58,6 +59,8 @@ pub struct App {
     pub transcribe: TranscribeTab,
     pub train: TrainData,
     pub voice: crate::voice::state::VoiceTab,
+    /// The Voices tab: make, listen to, save and delete voices.
+    pub voices: crate::voices::state::VoicesTab,
     /// The first-start engine setup; `ready()` gates the Voice and Train tabs.
     pub setup: SetupDriver,
     pub settings: Settings,
@@ -95,6 +98,13 @@ impl App {
             presets_dir: jeuvoice_core::preset::default_presets_dir().unwrap_or_else(std::env::temp_dir),
             projects_dir: projects_root(),
         });
+        let voices = crate::voices::state::VoicesTab::new(
+            jeuvoice_core::preset::default_presets_dir().unwrap_or_else(std::env::temp_dir),
+            directories::ProjectDirs::from("com", "Jeu", "JeuVoice")
+                .map(|d| d.data_dir().join("voice-tries"))
+                .unwrap_or_else(|| std::env::temp_dir().join("jeuvoice-voice-tries")),
+            deps.transcriber.clone(),
+        );
         let training_dir = training_root().join("My training");
         let kaggle_store: Arc<dyn jeuvoice_kaggle::KeyStore> = std::sync::Arc::new(jeuvoice_kaggle::KeyringStore);
         let train = TrainData::new(
@@ -115,6 +125,7 @@ impl App {
             transcribe: TranscribeTab::new(deps),
             train,
             voice,
+            voices,
             setup,
             settings,
             settings_error: None,
@@ -267,6 +278,45 @@ impl App {
     }
 
     /// The token store for the voice model files.
+    /// Voices tab: start the tries (three, or three more).
+    pub fn voices_try(&mut self, more: bool) {
+        let store = self.token_store();
+        let voice_busy = self.voice.is_busy();
+        let (transcribe, voices) = (&mut self.transcribe, &mut self.voices);
+        voices.try_voices(more, transcribe.engine_mut(), &self.settings, store, voice_busy);
+    }
+
+    /// Voices tab: render the test sentence with a saved voice.
+    pub fn voices_listen(&mut self, name: &str) {
+        let store = self.token_store();
+        let voice_busy = self.voice.is_busy();
+        let (transcribe, voices) = (&mut self.transcribe, &mut self.voices);
+        voices.listen(name, transcribe.engine_mut(), &self.settings, store, voice_busy);
+    }
+
+    /// Voices tab: save the picked try. The Voice tab lists and selects the new voice.
+    pub fn voices_save(&mut self) -> Result<String, String> {
+        let name = self.voices.save();
+        if let Ok(name) = &name {
+            self.voice.refresh_presets();
+            self.voice.preset_name = name.clone();
+        }
+        if let Err(e) = &name {
+            self.voices.notice = Some(e.clone());
+        }
+        name
+    }
+
+    /// Voices tab: delete the voice the question asked about.
+    pub fn voices_confirm_delete(&mut self) {
+        if let Some(name) = self.voices.confirm_delete() {
+            self.voice.refresh_presets();
+            if self.voice.preset_name == name {
+                self.voice.preset_name = jeuvoice_core::preset::BUILTIN_PRESET.into();
+            }
+        }
+    }
+
     pub(crate) fn token_store(&self) -> Arc<dyn TokenStore> {
         self.token_store.clone()
     }
@@ -288,6 +338,7 @@ impl App {
         s.transcribe.setup(waker.clone());
         s.train.setup(waker.clone());
         s.voice.setup(waker.clone());
+        s.voices.setup(waker.clone());
         if s.probe_gpu {
             // nvidia-smi can take a second: never block the first frame.
             let (tx, rx) = std::sync::mpsc::channel();
@@ -363,6 +414,19 @@ impl App {
             s.voice.engine_api = s.transcribe.engine_api();
         }
         changed |= s.voice.poll();
+        // The Voices tab uses the same engine client.
+        if matches!(s.transcribe.engine_state(), crate::services::engine::EngineState::Ready(_)) {
+            s.voices.engine_api = s.transcribe.engine_api();
+            if s.voices.has_pending() {
+                match s.voices.take_pending() {
+                    Some((_, Some(name))) => s.voices_listen(&name),
+                    Some((more, None)) => s.voices_try(more),
+                    None => {}
+                }
+                changed = true;
+            }
+        }
+        changed |= s.voices.poll(s.transcribe.player_mut());
         // A Generate pressed while the engine started now continues.
         if s.voice.pending_generate && matches!(s.transcribe.engine_state(), crate::services::engine::EngineState::Ready(_)) {
             s.voice.pending_generate = false;

@@ -74,6 +74,11 @@ impl PresetEditor {
         }
     }
 
+    /// Use `engine` for the next tries (the real engine, once it runs).
+    pub fn set_engine(&mut self, engine: Arc<dyn EngineApi>) {
+        self.engine = engine;
+    }
+
     /// Check a dropped clip: 3-10 s, then Whisper text for the user to check.
     /// Blocks (decode + Whisper): call on a worker.
     pub fn check_clip(&mut self, path: &Path, language: &str) {

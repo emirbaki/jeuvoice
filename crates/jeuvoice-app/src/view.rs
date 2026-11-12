@@ -95,6 +95,8 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         Tab::Train if !s.setup.ready() => ("page-train", crate::setup::view::waiting_hint()),
         Tab::Voice => ("page-voice", voice::view::view(s)),
         Tab::Settings => ("page-settings", settings_tab::view(s)),
+        // Task 5 of the Voices plan draws this page.
+        Tab::Voices => ("page-voices", col()),
         Tab::Train => ("page-train", train::view(s)),
     };
     let page = col()

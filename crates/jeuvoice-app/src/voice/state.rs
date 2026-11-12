@@ -327,6 +327,14 @@ impl VoiceTab {
                 self.sync_advanced_fields();
                 self.status = VoiceStatus::Ready;
                 self.notice = None;
+                if self.presets.iter().all(|p| p.name != self.preset_name) {
+                    // The project's voice was deleted: use Sami and say so.
+                    let gone = std::mem::replace(&mut self.preset_name, jeuvoice_core::preset::BUILTIN_PRESET.into());
+                    self.notice = Some(crate::i18n::trf!(
+                        "The voice {gone} is gone. This project uses Sami now.",
+                        "{gone} sesi artık yok. Bu proje artık Sami'yi kullanıyor."
+                    ));
+                }
             }
             Err(e) => self.notice = Some(crate::core_text::project_error(&e)),
         }

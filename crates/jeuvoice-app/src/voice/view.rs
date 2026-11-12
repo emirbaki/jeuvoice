@@ -201,7 +201,7 @@ fn main_column(s: &App) -> El {
         .child(text(title).key("voice-project").font(type_::TITLE).color(t.text).grow(1.0).truncate())
         .child(button("voice-open", tr!("Open…", "Aç…"), true, |s, tx| s.voice.open_dialog(tx)))
         .child(button("voice-new", tr!("New", "Yeni"), true, |s, _| s.voice.new_project()))
-        .child(crate::style::button_kind("voice-generate", tr!("Generate", "Üret"), crate::style::ButtonKind::Main, v.project.is_some() || !v.script_field.text.trim().is_empty(), |s, _| {
+        .child(crate::style::button_kind("voice-generate", tr!("Generate", "Üret"), crate::style::ButtonKind::Main, (v.project.is_some() || !v.script_field.text.trim().is_empty()) && !s.voices.is_busy(), |s, _| {
             s.generate_voice()
         }))
         .child(button("voice-export-wav", tr!("Export WAV", "WAV dışa aktar"), v.timeline.is_some(), |s, tx| s.voice.export_wav(tx)))
