@@ -1,212 +1,149 @@
 # JeuVoice
 
-## Build on Windows
+JeuVoice is a desktop app for Turkish speech. It does four things in one window:
 
-The `whisper-rs` crate builds whisper.cpp with CMake and CUDA. It needs Visual Studio with the C++ tools, the CUDA toolkit, and some environment settings. The script `scripts\cargo.cmd` sets them. Use it in place of `cargo`:
+- **Transcribe**: write down what people say in an audio or video file, with a time for each word.
+- **Voice**: read a script aloud in a trained voice, then fix single words or parts.
+- **Voices**: make new voices from a short clip or from a description, and save them.
+- **Train**: teach the voice model a new voice on Kaggle, without a terminal.
 
-```
-scripts\cargo.cmd build
-scripts\cargo.cmd test
-```
+The app is in Rust. The voice engine is a local Python process that runs [OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) with a Turkish LoRA adapter (tr2). The app shows English or Turkish text.
 
-The script sets the CMake generator to `Visual Studio 17 2022`. It sets `CMAKE_CUDA_ARCHITECTURES` to 86 (RTX 30 series) unless you set it first.
+![The Transcribe tab: files on the left, the colored wave with the words in the middle, the script check on the right](docs/images/transcribe.png)
 
-## Run
-
-Build the release app, then start it:
-
-```
-scripts\cargo.cmd build --release -p jeuvoice-app
-target\release\jeuvoice-app.exe
-```
-
-The first release build takes about 11 minutes. The first time you transcribe, JeuVoice downloads the speech model (about 1.6 GB).
+![The Voices tab in Turkish: the saved voices on the left, the voice maker with the voice settings on the right](docs/images/voices-tr.png)
 
 ## Status
 
-Plan 1 (Transcribe) is done.
+JeuVoice is an early version (0.0.1). It is tested on Windows 11 with an NVIDIA graphics card.
 
-### What works
+- The macOS build is not tested. The voice engine does not run on a Mac yet.
+- There is no download for the installer yet. Build it from the source (see [Make the installer](#make-the-installer)).
+- The tr2 adapter on Hugging Face (`emirbakid/jeuvoice-omnivoice-tr2`) is private at the moment. Without access, use one of these:
+  - Type a local checkpoint folder in **Settings → Voice model files**.
+  - Make a voice in the **Voices** tab with **Settings → Model → Base model**. The base model (`k2-fsa/OmniVoice`) is public, but it speaks Turkish less well.
 
-- Drop audio or video files (`.mp4`, `.ogg`, `.wav`, `.mp3` and more). JeuVoice reads the sound itself. It needs no ffmpeg.
-- A batch runs one file at a time. If one file is bad, the others still finish. The bad file shows a plain error.
-- Paths with Turkish letters and spaces work.
-- Words come with start and end times. You can play the take, click a word to jump to it, and fix a word.
-- You can paste or open a script. JeuVoice marks the words that differ from what it heard.
-- You can export SRT, VTT or plain text.
+## What you need
 
-### Measured speed
-
-Checked on 2026-11-09 with the release build. Model: `large-v3-turbo`. Language: Turkish.
-
-| File | Sound | Time | Speed |
-|---|---|---|---|
-| my_voice2.mp4 | 33.6 s | 2.3 s | 14.9 min per min |
-| my_voice.ogg | 27.0 s | 1.2 s | 22.1 min per min |
-| çekim 1.wav | 8.4 s | 0.8 s | 10.7 min per min |
-| All three | 69.0 s | 4.3 s | 16.2 min per min |
-
-"min per min" means minutes of sound for each minute of work. The model ran on the GPU (NVIDIA, CUDA). Short files look slower, because each file has a fixed start cost. The model load time is not in these numbers.
-
-The script check of one take against its own text gave 20 words the same and 0 different.
-
-To repeat the check:
-
-```
-scripts\cargo.cmd test -p jeuvoice-app --release --test real_check -- --ignored --nocapture
-```
-
-### Known limits
-
-- Word start times can be 0.1 to 0.3 seconds late.
-- The macOS build is not tested.
-- The RunPod, Voice and Train tabs are not in this plan.
-- A file that is not audio gives a message with a technical detail at the end.
-- An automatic check cannot see the screen or hear sound. The window opens and stays open for 10 seconds without a crash. The list below needs your eyes and ears.
-
-### Try it
-
-1. Start the app. Download the model when it asks.
-2. Drop an `.mp4`, an `.ogg`, and a file from a folder with Turkish letters.
-3. Wait until all three are done.
-4. Press play. Check that the sound and the cursor move together.
-5. Click a word. Check that playback jumps to that word.
-6. Fix one wrong word. Check that the new text stays.
-7. Paste a script. Check that the marked words are the real differences.
-8. Export SRT. Open it next to the video in a player. Check the timing.
-
-## Status (Plan 2, Voice)
-
-The Voice tab generates Turkish voice-overs with the OmniVoice model and the tr2 adapter, keeps projects in `Documents/JeuVoice`, and exports WAV + SRT.
-
-### First start: model files
-
-- The Hugging Face token lives in the OS keychain. Open Settings and paste a token with read permission, then Save. The token never lands in `settings.json`.
-- Without a token, point "Use a local adapter folder" at a tr2 checkpoint folder on disk (for example `tts_lab/outputs/omnivoice_tr2/checkpoint-6000`). The local folder wins over every Hugging Face adapter.
-- The default preset `ses_0007` installs on first start. It clones `ses_001_0007.wav` with the tr2 `checkpoint-6000` adapter.
-
-### How to use it
-
-1. Open the Voice tab. Pick a preset, paste a two-paragraph script, press **Generate**. The engine loads once ("Loading the voice model…"), then renders paragraph by paragraph.
-2. Press play. Click a word to play from it.
-3. Drag a region on the wave and press **Retake region**: three new takes appear. Press a take to hear it, then **Use this take** to splice it in. **+ Try 3 more** renders three more.
-4. Double-click a word to fix how it sounds ("Say it as"): the fix is stored as a respell and the paragraph renders again.
-5. A name in Latin letters gets an "Add to English terms?" hint next to the script check. Adding it puts the name in the project's English terms.
-6. **Undo** and **Redo** (or Ctrl+Z / Ctrl+Y) step through project changes. Every change saves `project.json` at once.
-7. **Export WAV** writes the 24 kHz timeline. **Export SRT** writes the timeline words.
-8. The **Advanced** panel (closed by default) holds guidance, base seed, pause, paragraph pause, the term lists and per-paragraph guidance and seed. **Apply** saves them into the project; the next render uses them.
-
-### Measured speed
-
-Measured on this machine (Windows, NVIDIA RTX 3050 Ti Laptop GPU, 4.29 GB VRAM; 16 GB RAM, no page file) with the release build. Default preset: base `k2-fsa/OmniVoice` + tr2 adapter `checkpoint-6000`, reference clip `ses_001_0007`, `guidance_scale = 2.5`, `num_step = 32`:
-
-| Step | Measured |
+| Part | Need |
 |---|---|
-| Engine start + voice model load on CUDA | 25.5 s (2.37 GB VRAM used) |
-| Render 2 paragraphs (5.6 s of audio) | 12.1 s (0.46 audio-sec per wall-sec) |
-| Whisper `large-v3-turbo` on the CPU next to the loaded engine | 52.6 s, no out-of-memory |
-| Retake one paragraph with a new seed + splice planning | 33.2 s |
-| Export | 140,640-sample WAV + non-empty SRT |
+| System | Windows 10 or 11, 64-bit |
+| Graphics card | NVIDIA with CUDA for the voice engine. 4 GB of video memory works (tested on an RTX 3050 Ti Laptop GPU). Transcribe also runs on the CPU, but slower. |
+| Disk | 8 GB of free space for the voice engine and the models |
+| Network | An internet connection on the first start (the engine setup takes 10 to 15 minutes) |
+| Training | A Kaggle account with free GPU time. The app sends the data and the notebook to Kaggle. |
 
-Whisper ran on the CPU while OmniVoice stayed on CUDA: no CUDA out-of-memory on the 4 GB card. VRAM stayed at about 2.4 GB of 4.3 GB through render and retake.
+## Features
 
-Run it yourself:
+### Transcribe
 
-```
-scripts\cargo.cmd test -p jeuvoice-app --release --test real_voice -- --ignored --nocapture
-```
+- Drop many audio or video files (`.mp4`, `.ogg`, `.wav`, `.mp3` and more). The app needs no ffmpeg.
+- The app uses Whisper `large-v3-turbo` (about 1.6 GB, downloaded on the first use).
+- Each word has a start and end time. Click a word to play from it. Double-click a word to fix it.
+- Paste or open a script. The app marks the words that are missing, added or changed.
+- Export SRT, VTT or plain text.
 
-### Known limits
+### Voice
 
-- Retakes render whole paragraphs; a retake never renders a lone sentence.
-- The term hint only flags Latin-letter words with inner capitals (`iPhone`, `NATO`).
-- The macOS build is not tested, and the voice engine has no Mac spike result yet: the Voice tab stays off there.
-- GPU cards under 8 GB run Whisper on the CPU while the voice model is loaded. Starting a Transcribe batch unloads the engine first; the next Voice job loads it again.
+- Pick a voice, paste a script and click **Generate**. The engine reads one paragraph at a time.
+- Drag over a part of the wave and click **Retake region** to get three new takes.
+- Double-click a word and type how it must sound (**Say it as**).
+- Undo and redo every change. The app saves the project after each change in `Documents/JeuVoice`.
+- Export WAV (24 kHz) and SRT.
 
-### Try it by ear
+### Voices
 
-1. Set the Hugging Face token or the local adapter folder in Settings.
-2. Paste your real script (two paragraphs to start). Press **Generate** and listen from start to end.
-3. Compare a paragraph with `tts_lab/outputs/omni_tr2_para_gs25_s4/full.wav`. They should sound like the same voice.
-4. Drag a region over one sentence and press **Retake region**. Use the take that sounds best.
-5. Open **Advanced**, set guidance to 3, and retake the word "damara". Keep the take that reads it cleanly.
+- **Clone**: drop a clip of 3 to 10 seconds. Whisper writes its text, and you check it.
+- **Describe**: pick the gender, age and pitch. Try three voices, listen, pick one, and try more.
+- **Settings**: model (tr2 or base), pitch shift in semitones, variety, speed, seed, guidance, quality steps and pauses.
+- **Sami** is the built-in voice. You cannot delete it.
 
-## Status (Plan 3, Train)
+### Train
 
-The Train tab takes clips to a Kaggle LoRA run: data (drop files or fetch Hugging Face datasets), start-from model, target (This PC, Kaggle, RunPod), and the run itself (script, start, progress, checkpoints). Each project lives in `Documents/JeuVoice/Training/<name>/` with `train_project.json` (sources, clips, settings, target) and `runs/<run>/` (manifests, bundle, notebook, `run.json`, outputs).
+- Add clips by drop or from a Hugging Face dataset. Check the text of each clip.
+- Start a LoRA run on Kaggle. The app shows the progress, the loss and the checkpoints.
+- Test a checkpoint with a fixed sentence. Use the best one in the Voice tab.
 
-### Credentials
+For step-by-step help, read the [user guide](docs/user-guide.md).
 
-- Open the Train tab, **Add Kaggle key** on the Kaggle card: the Kaggle user name plus the key from `kaggle.com/settings` → API → Create New Token (or **Import kaggle.json**). Both legacy keys and new `KGAT_...` tokens work: legacy keys go as HTTP Basic, `KGAT_` tokens as a bearer token, like the official client.
-- The key lives in the OS keychain (service `JeuVoice-Kaggle`), never in a file. If the app forgets the key between starts, type it in again.
+## Measured speed
 
-### What goes up to Kaggle
+Measured on Windows with an NVIDIA RTX 3050 Ti Laptop GPU (4 GB) and the release build.
 
-- One **private** dataset per run: `<run>.zip` with the `bundle_<run>.txt` marker, `config/train.json` (the tr2 template with your steps/LoRA settings), `config/data.json`, `manifests/train.jsonl` + `dev.jsonl` (relative `audio/…` paths), and `audio.pack` (a tar of the cleaned 24 kHz WAVs under another suffix, because Kaggle unpacks every `.tar`). Excluded clips never go up.
-- One **private** notebook running the shipped script: unpack, check every clip, extract audio tokens on Kaggle (`tokens/<split>/data.lst`), train with `accelerate launch -m omnivoice.cli.train` (older checkpoints pruned to `adapter_config.json` + `adapter_model.safetensors`), copy adapters plus `train.log` to `/kaggle/working/result`, print `JEUVOICE_RUN_DONE`.
-- The base model (`k2-fsa/OmniVoice`) is downloaded on Kaggle's own connection, not uploaded.
-
-### Time and cost
-
-Kaggle T4 ×2 is free within your GPU quota: about an hour per 1,000 steps (6,000 steps ≈ 6 hours). The card scales the estimate with your steps.
-
-Tiny real check on this machine (20 own-voice clips, steps 50, save every 25; release build):
-
-| Step | Measured |
+| Task | Result |
 |---|---|
-| Whisper text for 20 clips (CPU) | ~8 min |
-| Bundle (10.4 MB) | seconds |
-| Dataset upload | 4–12 s |
-| Kernel queue + pip + token extraction + 50 steps | 9–16 min |
-| Two checkpoints (`checkpoint-25`, `checkpoint-50`) download | seconds |
-| Test render with `checkpoint-50` (fixed sentence) | 3.9 s of audio |
+| Transcribe 69 s of Turkish speech (3 files) | 4.3 s, about 16 minutes of sound for each minute of work |
+| Start the engine and load the voice model | 25.5 s, 2.4 GB of video memory |
+| Read 2 paragraphs aloud (5.6 s of sound) | 12.1 s |
+| Kaggle training on 2 × T4 | about 1 hour for each 1,000 steps |
 
-Repeat it yourself (needs `KAGGLE_TEST_USER`/`KAGGLE_TEST_KEY` in the env, the engine venv, the Whisper model and Kaggle GPU quota; the tts_lab clips stay read-only):
+## Build from the source
+
+### Before you start
+
+Install these:
+
+1. [Rust](https://rustup.rs/) (stable).
+2. Visual Studio 2022 with the **Desktop development with C++** workload.
+3. The [CUDA toolkit](https://developer.nvidia.com/cuda-downloads) and [CMake](https://cmake.org/).
+4. LLVM (`libclang`), for `bindgen`.
+5. [uv](https://docs.astral.sh/uv/), only to work on the Python engine.
+
+### Build and run
+
+Use `scripts\cargo.cmd` in place of `cargo`. The script sets the Visual Studio, CMake and CUDA settings that `whisper-rs` needs.
 
 ```
-scripts\cargo.cmd test -p jeuvoice-app --release --test real_train -- --ignored --nocapture
+scripts\cargo.cmd build --release -p jeuvoice-app
 ```
 
-### How to resume
+```
+target\release\jeuvoice-app.exe
+```
 
-- A run keeps going on Kaggle when the app closes. Its `runs/<name>/run.json` holds the dataset, kernel, start time and state; Queued/Running runs resume polling on the next start.
-- On `Error` the tab shows the last 30 log lines and keeps the bundle: **Download bundle only** saves the zip plus the `.ipynb` for a manual run.
+The first release build takes about 11 minutes. The script builds CUDA code for Turing, Ampere and Ada cards (`CMAKE_CUDA_ARCHITECTURES=75;86;89`). Set `CMAKE_CUDA_ARCHITECTURES` first to change this.
 
-### Known limits
+On the first start, the app installs the voice engine (Python and the locked packages) in `%APPDATA%\Jeu\JeuVoice`.
 
-- Local training needs a 12 GB CUDA card; this PC's card turns This PC off with the reason. RunPod says "Coming later".
-- A kernel title may not repeat a dataset title: the app names the dataset `<project> <run> data`.
-- The client waits (up to 10 minutes) for a fresh dataset version to read `READY` before pushing.
-- The loss curve reads `Eval Loss:` lines, so runs shorter than `eval_steps` show no curve.
-- The macOS build is not tested.
+### Test
 
-## Status (Plan 4, Setup and installers)
+```
+scripts\cargo.cmd test --workspace
+```
 
-The user guide for teammates is in [docs/user-guide.md](docs/user-guide.md).
+To test the Python engine, make its environment once, then run `pytest`:
 
-### Done for the MVP
+```
+scripts\engine-dev.cmd
+```
 
-- Locked engine packages for Windows (CUDA 12.6) and macOS.
-- The app finds its files in dev mode, in the Windows install folder, and in a macOS `.app`.
-- First-start setup makes the engine environment with a progress screen. An interrupted setup cleans up and starts again. A changed lock file runs setup again. An unchanged lock file keeps the environment.
-- An engine from another JeuVoice version does not start. Settings shows **Repair**, which runs setup again.
-- With no NVIDIA card, Settings shows "No supported graphics card found. Speech will be slow." Transcribe runs on the CPU. The voice engine does not start and says why.
-- Windows installer: `scripts\make-installer.cmd` makes `dist\windows\jeuvoice-app_<version>_x64-setup.exe`. It installs per user with no admin rights. The uninstaller asks before it deletes the engine and the models. It never deletes `Documents\JeuVoice`.
-- macOS: `scripts/make-dmg.sh` makes the `.app` and the `.dmg` on an Apple Silicon Mac.
-- Tests: `scripts\cargo.cmd test --workspace` passes. The engine tests pass (`pytest`: 28 passed, 1 skipped. `-m gpu --gpu`: 1 passed).
+```
+engine\.venv\Scripts\python -m pytest engine/tests -q
+```
 
-### What you must still do
+Some tests need the real models, a GPU or a Kaggle key. They are marked `#[ignore]` (Rust) or `gpu` (Python), and a normal test run skips them.
 
-1. **Fresh-account test on Windows** (about 30 minutes): install on a second Windows user account or a VM. Fill in the test record in [packaging/windows/README.md](packaging/windows/README.md).
-2. **Signing on Windows** (about 10 minutes): run the `signtool` commands in [packaging/windows/README.md](packaging/windows/README.md) with your certificate.
-3. **Mac run** (about 1 hour): a teammate with an Apple Silicon Mac runs the Mac spike ([docs/mac-spike.md](docs/mac-spike.md)) and `scripts/make-dmg.sh`, then signs and notarizes ([packaging/macos/README.md](packaging/macos/README.md)).
-4. **Upload the tr2 adapter to Hugging Face**, so that teammates without a local checkpoint can use the Voice tab.
-5. **Checks by ear**: follow "Try it by ear" in the Plan 2 section.
+### Make the installer
 
-### Known gaps
+```
+scripts\make-installer.cmd
+```
 
-- The free-space check does not work on macOS. It never blocks setup there.
-- The macOS build is not tested.
+This makes `dist\windows\jeuvoice-app_<version>_x64-setup.exe`. The installer installs for one user and needs no admin rights. For signing and the macOS `.dmg`, read [packaging/windows/README.md](packaging/windows/README.md) and [packaging/macos/README.md](packaging/macos/README.md).
+
+## Project layout
+
+| Folder | What it holds |
+|---|---|
+| `crates/jeuvoice-app` | The desktop app: the tabs, the state and the views |
+| `crates/jeuvoice-core` | Audio decode, transcripts, presets, projects and the Kaggle bundle |
+| `crates/jeuvoice-whisper` | Whisper speech-to-text (whisper.cpp with CUDA) |
+| `crates/jeuvoice-engine-client` | The HTTP client for the voice engine, and the engine process |
+| `crates/jeuvoice-kaggle` | The Kaggle API client (datasets, notebooks, outputs) |
+| `engine` | The Python voice engine: OmniVoice, the render jobs and the data preparation |
+| `assets/presets` | The built-in voice Sami |
+| `packaging`, `scripts` | The installers and the build scripts |
+| `docs` | The [user guide](docs/user-guide.md), the [design](docs/design.md) and the [development log](docs/development-log.md) |
 
 ## License
 
