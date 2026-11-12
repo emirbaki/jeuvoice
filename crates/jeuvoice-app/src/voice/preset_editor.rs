@@ -12,11 +12,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use jeuvoice_core::audio;
-use jeuvoice_core::preset::{AdapterRef, ModelRef, Preset, PresetKind, list_presets, save_preset};
+use jeuvoice_core::preset::{ModelRef, Preset, PresetKind, list_presets, save_preset};
 use jeuvoice_engine_client::{EngineApi, JobState, Preset as WirePreset, RenderRequest};
 use jeuvoice_whisper::{TranscribeOptions, Transcriber};
 
-use crate::settings::default_terms;
+use crate::settings::{Settings, TokenStore, default_terms};
+use crate::voices::traits::VoiceTraits;
 
 /// The fixed test sentence every try renders.
 pub const TRY_SENTENCE: &str = "Bugün size kısa bir hikâye anlatacağım.";
@@ -43,7 +44,10 @@ pub struct PresetEditor {
     /// The clip's transcript, for the user to check.
     pub clip_text: String,
     pub name: String,
-    pub instruct: String,
+    /// The attributes for a described voice (OmniVoice voice design).
+    pub traits: VoiceTraits,
+    pub guidance: f32,
+    pub speed: f32,
     pub tries: Vec<TryVoice>,
     /// Which try the user picked.
     pub picked: Option<usize>,
@@ -61,7 +65,9 @@ impl PresetEditor {
             clip_error: None,
             clip_text: String::new(),
             name: String::new(),
-            instruct: String::new(),
+            traits: VoiceTraits::default(),
+            guidance: 2.5,
+            speed: 1.0,
             tries: Vec::new(),
             picked: None,
             status: None,
@@ -102,7 +108,7 @@ impl PresetEditor {
             self.status = Some(crate::i18n::tr!("Drop a voice clip first.", "Önce bir ses klibi bırakın.").into());
             return;
         };
-        let mut preset = WirePreset::default();
+        let mut preset = self.wire_preset();
         preset.ref_audio = Some(clip.to_string_lossy().into_owned());
         if !self.clip_text.trim().is_empty() {
             preset.ref_text = Some(self.clip_text.clone());
@@ -115,14 +121,57 @@ impl PresetEditor {
     pub fn try_three(&mut self, out_dir: &Path) {
         self.tries.clear();
         self.picked = None;
+        self.try_seeds(out_dir, self.base_seed);
+    }
+
+    /// Three more tries with the next three seeds. The tries so far stay.
+    /// Blocks: call on a worker.
+    pub fn try_more(&mut self, out_dir: &Path) {
+        let next = self.tries.iter().map(|t| t.seed + 1).max().unwrap_or(self.base_seed);
+        self.try_seeds(out_dir, next);
+    }
+
+    fn try_seeds(&mut self, out_dir: &Path, first: u64) {
         for k in 0..3 {
-            let mut preset = WirePreset::default();
-            let instruct = self.instruct.trim().to_string();
-            if !instruct.is_empty() {
-                preset.instruct = Some(instruct);
-            }
-            self.start_try(out_dir, self.base_seed + k as u64, preset, None);
+            let mut preset = self.wire_preset();
+            preset.instruct = self.traits.instruct();
+            self.start_try(out_dir, first + k, preset, None);
         }
+    }
+
+    /// The render settings every try shares.
+    fn wire_preset(&self) -> WirePreset {
+        WirePreset { guidance: self.guidance, speed: self.speed, ..WirePreset::default() }
+    }
+
+    /// Why `name` cannot be a new voice name, in plain words, or `None` when it can.
+    /// Refuses an empty name, a taken name in any letter case (`ses_0007` counts
+    /// as Sami), and names that Windows refuses as a folder name.
+    pub fn name_problem(name: &str, presets_dir: &Path) -> Option<String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Some(crate::i18n::tr!("Give the voice a name first.", "Önce sese bir ad verin.").into());
+        }
+        let bad_char = name.chars().any(|c| c.is_control() || r#"<>:"/\|?*"#.contains(c));
+        let bad_end = name.ends_with('.') || name.ends_with(' ');
+        let stem = trimmed.split('.').next().unwrap_or("").to_ascii_uppercase();
+        let reserved = ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
+            || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+                && stem.len() == 4
+                && stem.as_bytes()[3].is_ascii_digit()
+                && stem.as_bytes()[3] != b'0');
+        if bad_char || bad_end || reserved {
+            return Some(crate::i18n::tr!(
+                r#"Use letters, digits and spaces in the name. Do not use < > : " / \ | ? * and do not end it with a dot."#,
+                r#"Adda harf, rakam ve boşluk kullanın. < > : " / \ | ? * kullanmayın ve adı nokta ile bitirmeyin."#
+            )
+            .into());
+        }
+        let wanted = jeuvoice_core::preset::canonical_preset_name(trimmed).to_lowercase();
+        if list_presets(presets_dir).iter().any(|p| p.name.to_lowercase() == wanted) {
+            return Some(crate::i18n::trf!("A voice named {trimmed} exists. Pick another name.", "{trimmed} adında bir ses var. Başka bir ad seçin."));
+        }
+        None
     }
 
     fn start_try(&mut self, out_dir: &Path, seed: u64, preset: WirePreset, paragraphs: Option<Vec<usize>>) {
@@ -163,11 +212,11 @@ impl PresetEditor {
     }
 
     /// Save the preset: the picked seed (or the base seed), the clip for clones.
-    pub fn save(&mut self, presets_dir: &Path) -> Result<Preset, String> {
-        let name = self.name.trim().to_string();
-        if name.is_empty() {
-            return Err(crate::i18n::tr!("Give the preset a name first.", "Önce hazır ayara bir ad verin.").into());
+    pub fn save(&mut self, presets_dir: &Path, model: ModelRef) -> Result<Preset, String> {
+        if let Some(problem) = Self::name_problem(&self.name, presets_dir) {
+            return Err(problem);
         }
+        let name = self.name.trim().to_string();
         let seed = self.picked.and_then(|i| self.tries.get(i)).map(|t| t.seed).unwrap_or(self.base_seed);
         let (ref_audio, ref_wav) = match self.kind {
             PresetKind::Clone => {
@@ -180,10 +229,7 @@ impl PresetEditor {
             PresetKind::Seed => (None, None),
         };
         let instruct = match self.kind {
-            PresetKind::Seed => {
-                let s = self.instruct.trim().to_string();
-                (!s.is_empty()).then_some(s)
-            }
+            PresetKind::Seed => self.traits.instruct(),
             PresetKind::Clone => None,
         };
         let preset = Preset {
@@ -193,19 +239,28 @@ impl PresetEditor {
             ref_text: if self.kind == PresetKind::Clone { Some(self.clip_text.clone()) } else { None },
             seed,
             instruct,
-            model: ModelRef {
-                base: "k2-fsa/OmniVoice".into(),
-                adapter: AdapterRef::None,
-            },
-            guidance: 2.5,
+            model,
+            guidance: self.guidance,
             pause: 0.1,
             para_pause: 0.3,
             num_step: 32,
-            speed: 1.0,
+            speed: self.speed,
         };
         save_preset(presets_dir, &preset, ref_wav.as_deref()).map_err(|e| crate::i18n::trf!("The preset could not be saved: {e}", "Hazır ayar kaydedilemedi: {e}"))?;
         self.status = Some(crate::i18n::trf!("Saved preset {name}.", "{name} hazır ayarı kaydedildi."));
         Ok(preset)
+    }
+}
+
+/// Load `model` (base + adapter) in the engine and wait for it. Blocks: call on a worker.
+pub(crate) fn load_model(api: &Arc<dyn EngineApi>, model: &ModelRef, settings: &Settings, store: &dyn TokenStore) -> Result<(), String> {
+    let preset = Preset { model: model.clone(), ..jeuvoice_core::preset::default_preset() };
+    let adapter = crate::voice::state::resolved_adapter(api, &preset, settings, store)?;
+    let job = api.load(&model.base, adapter.as_deref(), "auto").map_err(|e| e.to_string())?;
+    if crate::voice::state::wait_job(api, &job, std::time::Duration::from_secs(600)) {
+        Ok(())
+    } else {
+        Err(crate::i18n::tr!("The voice model could not be loaded.", "Ses modeli yüklenemedi.").into())
     }
 }
 
@@ -217,6 +272,7 @@ pub fn saved_preset(presets_dir: &Path, name: &str) -> Option<Preset> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jeuvoice_core::preset::AdapterRef;
     use std::sync::Mutex;
 
     use jeuvoice_core::transcript::Word;
@@ -308,7 +364,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let spy = Arc::new(Spy { inner: FakeEngineApi::new(), seen: Mutex::new(vec![]) });
         let mut ed = editor(spy.clone());
-        ed.instruct = "warm".into();
+        ed.traits.whisper = true;
         ed.try_three(tmp.path());
         ed.poll();
         assert_eq!(ed.tries.len(), 3);
@@ -342,7 +398,7 @@ mod tests {
         let clip = wav(tmp.path(), "ses.wav", 5);
         ed.check_clip(&clip, "tr");
         ed.name = "benim".into();
-        let saved = ed.save(&presets).unwrap();
+        let saved = ed.save(&presets, sami_model()).unwrap();
         assert_eq!(saved.seed, 1);
         assert_eq!(saved.ref_audio.as_deref(), Some("ref.wav"));
         let back = saved_preset(&presets, "benim").expect("lists back");
@@ -352,13 +408,134 @@ mod tests {
         // A seed preset keeps the picked try's seed and the typed attributes.
         let mut ed = editor(Arc::new(Spy { inner: FakeEngineApi::new(), seen: Mutex::new(vec![]) }));
         ed.kind = PresetKind::Seed;
-        ed.instruct = "young".into();
+        ed.traits.age = Some(crate::voices::traits::Age::Teenager);
         ed.name = "tohum".into();
         ed.try_three(tmp.path());
         ed.poll();
         ed.picked = Some(2);
-        let saved = ed.save(&presets).unwrap();
-        assert_eq!((saved.seed, saved.instruct.as_deref()), (3, Some("young")));
+        let saved = ed.save(&presets, sami_model()).unwrap();
+        assert_eq!((saved.seed, saved.instruct.as_deref()), (3, Some("teenager")));
         assert_eq!(saved.ref_audio, None);
+    }
+
+    fn sami_model() -> ModelRef {
+        jeuvoice_core::preset::default_preset().model
+    }
+
+    fn spy() -> Arc<Spy> {
+        Arc::new(Spy { inner: FakeEngineApi::new(), seen: Mutex::new(vec![]) })
+    }
+
+    #[test]
+    fn save_stores_the_given_model_and_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ed = editor(spy());
+        ed.kind = PresetKind::Seed;
+        ed.guidance = 3.0;
+        ed.speed = 1.1;
+        ed.try_three(tmp.path());
+        ed.poll();
+        ed.picked = Some(1);
+        ed.name = "Ece".into();
+        let saved = ed.save(&tmp.path().join("presets"), sami_model()).unwrap();
+        assert_eq!(saved.model, sami_model());
+        assert_eq!((saved.guidance, saved.speed, saved.seed), (3.0, 1.1, ed.base_seed + 1));
+    }
+
+    #[test]
+    fn described_voice_saves_its_instruct() {
+        use crate::voices::traits::{Age, Gender};
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ed = editor(spy());
+        ed.kind = PresetKind::Seed;
+        ed.traits.gender = Some(Gender::Female);
+        ed.traits.age = Some(Age::Elderly);
+        ed.name = "Nine".into();
+        let saved = ed.save(&tmp.path().join("presets"), sami_model()).unwrap();
+        assert_eq!(saved.instruct.as_deref(), Some("female, elderly"));
+    }
+
+    #[test]
+    fn try_more_adds_the_next_seeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spy = spy();
+        let mut ed = editor(spy.clone());
+        ed.try_three(tmp.path());
+        ed.try_more(tmp.path());
+        ed.poll();
+        assert_eq!(ed.tries.iter().map(|t| t.seed).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(spy.seen.lock().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn names_windows_refuses_are_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let presets = tmp.path().join("presets");
+        for bad in ["a/b", "x:y", "CON", "com3", "Ece.", "", "   ", r"a\b", "lpt1"] {
+            assert!(PresetEditor::name_problem(bad, &presets).is_some(), "{bad:?} must be refused");
+        }
+        assert!(PresetEditor::name_problem("Ece Nur", &presets).is_none());
+        let mut ed = editor(spy());
+        ed.kind = PresetKind::Seed;
+        ed.name = "a/b".into();
+        assert!(ed.save(&presets, sami_model()).is_err());
+        assert!(list_presets(&presets).is_empty(), "nothing is written");
+    }
+
+    #[test]
+    fn a_taken_name_is_an_error_in_any_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let presets = tmp.path().join("presets");
+        jeuvoice_core::preset::save_preset(&presets, &jeuvoice_core::preset::default_preset(), None).unwrap();
+        assert!(PresetEditor::name_problem("sami", &presets).is_some());
+        assert!(PresetEditor::name_problem("ses_0007", &presets).is_some());
+        assert!(PresetEditor::name_problem("Ece", &presets).is_none());
+    }
+
+    /// Records the load calls.
+    struct LoadSpy {
+        inner: FakeEngineApi,
+        loads: Mutex<Vec<(String, Option<String>, String)>>,
+    }
+
+    impl EngineApi for LoadSpy {
+        fn health(&self) -> Result<jeuvoice_engine_client::Health, jeuvoice_engine_client::EngineError> {
+            self.inner.health()
+        }
+        fn load(&self, m: &str, a: Option<&str>, d: &str) -> Result<JobId, jeuvoice_engine_client::EngineError> {
+            self.loads.lock().unwrap().push((m.into(), a.map(String::from), d.into()));
+            self.inner.load(m, a, d)
+        }
+        fn unload(&self) -> Result<(), jeuvoice_engine_client::EngineError> {
+            self.inner.unload()
+        }
+        fn render(&self, req: &RenderRequest) -> Result<JobId, jeuvoice_engine_client::EngineError> {
+            self.inner.render(req)
+        }
+        fn job(&self, id: &JobId) -> Result<JobStatus, jeuvoice_engine_client::EngineError> {
+            self.inner.job(id)
+        }
+        fn cancel(&self, id: &JobId) -> Result<(), jeuvoice_engine_client::EngineError> {
+            self.inner.cancel(id)
+        }
+        fn fetch_adapter(&self, r: &str, s: Option<&str>, t: Option<&str>) -> Result<PathBuf, jeuvoice_engine_client::EngineError> {
+            self.inner.fetch_adapter(r, s, t)
+        }
+    }
+
+    #[test]
+    fn load_model_loads_base_and_adapter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("adapter");
+        std::fs::create_dir_all(&dir).unwrap();
+        let spy = Arc::new(LoadSpy { inner: FakeEngineApi::new(), loads: Mutex::new(vec![]) });
+        let api: Arc<dyn EngineApi> = spy.clone();
+        let model = ModelRef { base: "k2-fsa/OmniVoice".into(), adapter: AdapterRef::Local { dir: dir.to_string_lossy().into_owned() } };
+        let store = crate::settings::MemStore::default();
+        load_model(&api, &model, &crate::settings::Settings::default(), &store).unwrap();
+        assert_eq!(
+            spy.loads.lock().unwrap().clone(),
+            vec![("k2-fsa/OmniVoice".to_string(), Some(dir.to_string_lossy().into_owned()), "auto".to_string())]
+        );
     }
 }

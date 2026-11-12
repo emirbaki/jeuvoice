@@ -969,7 +969,7 @@ fn parse_opt<T: std::str::FromStr>(s: &str) -> Result<Option<T>, ()> {
 
 /// Resolve the preset's adapter to a folder. A remote adapter downloads here,
 /// on the worker: never on the UI thread.
-fn resolved_adapter(
+pub(crate) fn resolved_adapter(
     api: &Arc<dyn EngineApi>,
     preset: &Preset,
     settings: &Settings,
@@ -1251,7 +1251,7 @@ fn run_retakes(
 }
 
 /// Wait for an engine job. `false` when it fails or is cancelled.
-fn wait_job(api: &Arc<dyn EngineApi>, job: &JobId, timeout: Duration) -> bool {
+pub(crate) fn wait_job(api: &Arc<dyn EngineApi>, job: &JobId, timeout: Duration) -> bool {
     let start = std::time::Instant::now();
     let mut read_errors = 0;
     loop {
