@@ -207,3 +207,7 @@ The user guide for teammates is in [docs/user-guide.md](docs/user-guide.md).
 
 - The free-space check does not work on macOS. It never blocks setup there.
 - The macOS build is not tested.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

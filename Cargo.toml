@@ -5,7 +5,7 @@ members = ["crates/jeuvoice-core", "crates/jeuvoice-whisper", "crates/jeuvoice-a
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
-license = "MIT"
+license = "Apache-2.0"
 
 # Keep dev target/ small: line tables for our own crates (backtraces keep file
 # and line numbers), no debuginfo for third-party dependencies (the bulk of the
