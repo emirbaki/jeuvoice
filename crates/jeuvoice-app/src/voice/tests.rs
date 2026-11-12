@@ -594,3 +594,21 @@ fn word_fix_keeps_the_blur_budget() {
     assert!(blurred <= 4, "{blurred} blurred panels");
     assert!(rig.on_screen("glass-voice-editor"), "the editor is a blurred glass panel");
 }
+
+#[test]
+fn an_old_project_with_ses_0007_opens_with_sami() {
+    let mut rig = Rig::with_engine(Arc::new(FakeEngineApi::new()));
+    rig.paste_script("Birinci paragraf burada bitiyor.");
+    rig.tap("voice-generate");
+    rig.until("the timeline is ready", |s| s.voice.timeline.as_ref().is_some_and(|t| !t.words.is_empty()));
+    let presets = rig.dir().join("presets");
+    jeuvoice_core::preset::save_preset(&presets, &jeuvoice_core::preset::default_preset(), None).unwrap();
+    rig.rt.state.voice.refresh_presets();
+    let dir = rig.dir().join("projects").join("Untitled");
+    let path = dir.join("project.json");
+    let mut json: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    json["preset"] = serde_json::json!("ses_0007");
+    std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+    rig.rt.state.voice.open_project(&dir);
+    assert_eq!(rig.rt.state.voice.preset_name, "Sami");
+}

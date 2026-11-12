@@ -20,10 +20,10 @@ use crate::voice::state::VoiceTab;
 /// The sentence every checkpoint says.
 pub const TEST_TEXT: &str = "Bugün size kısa bir hikâye anlatacağım. Bu hikâye bir yolculukla başlıyor.";
 
-/// The voice the tests render with: `ses_0007` when the app knows it, else the
+/// The voice the tests render with: Sami when the app knows it, else the
 /// picked preset, else the built-in default.
 pub fn base_preset(voice: &VoiceTab) -> Preset {
-    voice.presets.iter().find(|p| p.name == "ses_0007").cloned()
+    voice.presets.iter().find(|p| p.name == jeuvoice_core::preset::BUILTIN_PRESET).cloned()
         .or_else(|| voice.presets.iter().find(|p| p.name == voice.preset_name).cloned())
         .unwrap_or_else(jeuvoice_core::preset::default_preset)
 }

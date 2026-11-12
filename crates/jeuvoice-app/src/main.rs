@@ -93,6 +93,9 @@ fn init() -> App {
     if let Some(presets) = jeuvoice_core::preset::default_presets_dir()
         && paths.assets.join("presets").is_dir()
     {
+        // An old install has ses_0007: rename it to Sami first, so the install
+        // below does not add a second copy of the built-in voice.
+        let _ = jeuvoice_core::preset::migrate_legacy_builtin(&presets);
         let _ = jeuvoice_core::preset::install_default_presets(&paths.assets, &presets);
     }
     let whisper = Arc::new(LazyWhisper::default());

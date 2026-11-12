@@ -1,7 +1,7 @@
 //! Voice presets: named voices (clone a clip or a seed-designed voice).
 //!
 //! A preset lives in `<presets>/<name>/preset.json` (+ `ref.wav` for clone presets).
-//! [`install_default_presets`] copies the built-in `ses_0007` preset on first start only:
+//! [`install_default_presets`] copies the built-in Sami preset on first start only:
 //! it never overwrites a user's edits.
 
 use std::path::{Path, PathBuf};
@@ -65,10 +65,59 @@ pub fn to_engine_json(preset: &Preset, ref_audio: Option<String>, ref_text: Opti
     })
 }
 
-/// The built-in preset: the user's chosen sound (base + tr2 adapter, reference clip).
+/// The name of the built-in voice. It cannot be deleted.
+pub const BUILTIN_PRESET: &str = "Sami";
+/// The name the built-in voice had before. Old projects and installs still use it.
+pub const LEGACY_BUILTIN_PRESET: &str = "ses_0007";
+
+/// The current name for a preset name: the old built-in name gives Sami.
+pub fn canonical_preset_name(name: &str) -> &str {
+    if name == LEGACY_BUILTIN_PRESET { BUILTIN_PRESET } else { name }
+}
+
+/// Rename an old install's `ses_0007` preset to Sami, folder and `name` field.
+/// Does nothing when Sami already exists, so no file is lost. True when it renamed.
+pub fn migrate_legacy_builtin(presets_dir: &Path) -> std::io::Result<bool> {
+    let old = presets_dir.join(LEGACY_BUILTIN_PRESET);
+    let new = presets_dir.join(BUILTIN_PRESET);
+    if !old.join("preset.json").is_file() || new.exists() {
+        return Ok(false);
+    }
+    std::fs::rename(&old, &new)?;
+    let path = new.join("preset.json");
+    let bytes = std::fs::read(&path)?;
+    let mut preset: Preset = serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+    preset.name = BUILTIN_PRESET.into();
+    std::fs::write(&path, serde_json::to_vec_pretty(&preset).map_err(std::io::Error::other)?)?;
+    Ok(true)
+}
+
+/// Why a preset could not be deleted.
+#[derive(Debug)]
+pub enum PresetDeleteError {
+    /// Sami, the built-in voice, cannot be deleted.
+    Builtin,
+    /// No preset has this name.
+    Missing,
+    Io(std::io::Error),
+}
+
+/// Delete `<presets_dir>/<name>/`. Sami cannot be deleted.
+pub fn delete_preset(presets_dir: &Path, name: &str) -> Result<(), PresetDeleteError> {
+    if canonical_preset_name(name) == BUILTIN_PRESET {
+        return Err(PresetDeleteError::Builtin);
+    }
+    let folder = presets_dir.join(name);
+    if !folder.join("preset.json").is_file() {
+        return Err(PresetDeleteError::Missing);
+    }
+    std::fs::remove_dir_all(&folder).map_err(PresetDeleteError::Io)
+}
+
+/// The built-in preset Sami: the user's chosen sound (base + tr2 adapter, reference clip).
 pub fn default_preset() -> Preset {
     Preset {
-        name: "ses_0007".into(),
+        name: BUILTIN_PRESET.into(),
         kind: PresetKind::Clone,
         ref_audio: Some("ref.wav".into()),
         ref_text: Some("Dünyanın öbür ucunda insanlar birbirine sarıldı. Şimdi bir an durup düşünelim. O bilgisayar, bugün cebinizdeki telefondan binlerce kat daha zayıftı.".into()),

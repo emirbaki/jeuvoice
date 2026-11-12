@@ -148,7 +148,7 @@ impl VoiceTab {
         let presets = list_presets(&deps.presets_dir);
         let preset_name = presets
             .iter()
-            .find(|p| p.name == "ses_0007")
+            .find(|p| p.name == jeuvoice_core::preset::BUILTIN_PRESET)
             .or(presets.first())
             .map(|p| p.name.clone())
             .unwrap_or_default();
@@ -319,7 +319,7 @@ impl VoiceTab {
             Ok(project) => {
                 self.script_field = TextEdit::new(project.script.clone());
                 self.name_field = TextEdit::new(project.name.clone());
-                self.preset_name = project.preset.clone();
+                self.preset_name = jeuvoice_core::preset::canonical_preset_name(&project.preset).to_string();
                 self.refresh_presets();
                 self.project = Some(project);
                 self.history = History::default();
@@ -462,7 +462,8 @@ impl VoiceTab {
             self.notice = Some(crate::i18n::tr!("Generate first.", "Önce üretin.").into());
             return;
         };
-        let Some(preset) = self.presets.iter().find(|p| p.name == project.preset).cloned().or_else(|| {
+        let wanted = jeuvoice_core::preset::canonical_preset_name(&project.preset);
+        let Some(preset) = self.presets.iter().find(|p| p.name == wanted).cloned().or_else(|| {
             self.presets.iter().find(|p| p.name == self.preset_name).cloned()
         }) else {
             self.status = VoiceStatus::Failed(crate::i18n::tr!("Choose a preset first.", "Önce bir hazır ayar seçin.").into());

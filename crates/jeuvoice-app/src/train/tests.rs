@@ -768,9 +768,9 @@ fn use_as_preset_writes_a_preset_and_opens_voice() {
     rig.open_tile("train-tile-run");
     rig.tap("train-use-preset-checkpoint-3000");
     assert_eq!(rig.rt.state.tab, crate::state::Tab::Voice, "the Voice tab opens");
-    assert_eq!(rig.rt.state.voice.preset_name, "ses_0007 checkpoint-3000");
+    assert_eq!(rig.rt.state.voice.preset_name, "Sami checkpoint-3000");
     let preset: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(rig.tmp.path().join("presets").join("ses_0007 checkpoint-3000").join("preset.json")).unwrap(),
+        &std::fs::read_to_string(rig.tmp.path().join("presets").join("Sami checkpoint-3000").join("preset.json")).unwrap(),
     )
     .unwrap();
     let adapter = preset["model"]["adapter"]["Local"]["dir"].as_str().unwrap();
