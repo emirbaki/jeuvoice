@@ -148,13 +148,10 @@ impl VoicesTab {
     }
 
     /// Point the tab at other folders (tests).
+    #[cfg(test)]
     pub(crate) fn set_dirs(&mut self, presets_dir: PathBuf, tries_dir: PathBuf) {
         self.presets_dir = presets_dir;
         self.tries_dir = tries_dir;
-    }
-
-    pub fn presets_dir(&self) -> &Path {
-        &self.presets_dir
     }
 
     /// The saved voices, Sami first.

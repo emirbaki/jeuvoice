@@ -10,10 +10,11 @@ use rune::{Cx, El, col, el, row, text};
 /// same height to `rune::Titlebar`, so the window's buttons sit over it.
 pub const TITLEBAR_HEIGHT: f32 = 44.0;
 
-fn tab_list() -> [(Tab, &'static str, &'static str); 4] {
+fn tab_list() -> [(Tab, &'static str, &'static str); 5] {
     use crate::i18n::tr;
     [
         (Tab::Voice, "tab-voice", tr!("Voice", "Ses")),
+        (Tab::Voices, "tab-voices", tr!("Voices", "Sesler")),
         (Tab::Transcribe, "tab-transcribe", tr!("Transcribe", "Yazıya dök")),
         (Tab::Train, "tab-train", tr!("Train", "Eğitim")),
         (Tab::Settings, "tab-settings", tr!("Settings", "Ayarlar")),
@@ -95,8 +96,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
         Tab::Train if !s.setup.ready() => ("page-train", crate::setup::view::waiting_hint()),
         Tab::Voice => ("page-voice", voice::view::view(s)),
         Tab::Settings => ("page-settings", settings_tab::view(s)),
-        // Task 5 of the Voices plan draws this page.
-        Tab::Voices => ("page-voices", col()),
+        Tab::Voices => ("page-voices", crate::voices::view::view(s)),
         Tab::Train => ("page-train", train::view(s)),
     };
     let page = col()

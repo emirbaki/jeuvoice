@@ -112,6 +112,21 @@ impl Rig {
         self.rt.frame(1.0 / 60.0);
     }
 
+    fn tap(&mut self, key: &str) {
+        let (x, y) = self.rt.find(key).unwrap_or_else(|| panic!("{key} is on screen"));
+        self.rt.pointer_move(x, y);
+        self.rt.pointer_down(x, y);
+        self.rt.frame(1.0 / 120.0);
+        self.rt.pointer_up(x, y);
+        for _ in 0..3 {
+            self.rt.frame(1.0 / 60.0);
+        }
+    }
+
+    fn on_screen(&self, key: &str) -> bool {
+        self.rt.elements().iter().any(|e| e.key.as_deref() == Some(key) && !e.exiting)
+    }
+
     fn focusable(&self, key: &str) -> bool {
         self.rt
             .elements()
@@ -248,4 +263,84 @@ fn a_project_with_a_deleted_voice_opens_with_sami() {
     assert_eq!(rig.rt.state.voice.preset_name, BUILTIN_PRESET);
     let notice = rig.rt.state.voice.notice.clone().unwrap_or_default();
     assert!(notice.contains("Ece"), "{notice}");
+}
+
+// -- the view --
+
+#[test]
+fn the_voices_tab_lists_sami_without_delete() {
+    let mut rig = Rig::new(Gate::new(true));
+    save_preset(&rig.presets(), &Preset { name: "Ece".into(), ..default_preset() }, None).unwrap();
+    rig.tap("tab-voices");
+    assert_eq!(rig.rt.state.tab, Tab::Voices);
+    assert!(rig.on_screen("voices-item-Sami"));
+    assert!(!rig.on_screen("voices-delete-Sami"), "Sami has no delete button");
+    assert!(rig.on_screen("voices-delete-Ece"));
+}
+
+#[test]
+fn chips_build_the_instruct() {
+    let mut rig = Rig::new(Gate::new(true));
+    rig.tap("tab-voices");
+    rig.tap("voices-mode-describe");
+    rig.tap("voices-chip-gender-female");
+    rig.tap("voices-chip-pitch-high");
+    assert_eq!(rig.rt.state.voices.editor.traits.instruct().as_deref(), Some("female, high pitch"));
+    rig.tap("voices-chip-pitch-high");
+    assert_eq!(rig.rt.state.voices.editor.traits.instruct().as_deref(), Some("female"), "a second tap clears the chip");
+}
+
+#[test]
+fn try_is_the_main_button() {
+    let mut rig = Rig::new(Gate::new(true));
+    rig.tap("tab-voices");
+    rig.tap("voices-mode-describe");
+    let _ = crate::style::take_main_keys();
+    rig.rt.update(|s, _| s.voices.notice = Some("redraw".into()));
+    rig.rt.frame(1.0 / 60.0);
+    assert_eq!(crate::style::take_main_keys(), vec!["voices-try".to_string()]);
+}
+
+#[test]
+fn the_voices_page_keeps_the_blur_budget() {
+    let mut rig = Rig::new(Gate::new(true));
+    save_preset(&rig.presets(), &Preset { name: "Ece".into(), ..default_preset() }, None).unwrap();
+    rig.tap("tab-voices");
+    rig.tap("voices-delete-Ece");
+    assert!(rig.on_screen("voices-delete-yes"), "the delete question shows");
+    let blurred = rig
+        .rt
+        .elements()
+        .iter()
+        .filter(|e| e.opacity > 0.01 && e.key.as_deref().is_some_and(|k| k.starts_with("glass-")))
+        .count();
+    assert!(blurred <= 4, "{blurred} blurred panels");
+}
+
+/// Renders the tab in Turkish, describe mode, three tries, one picked:
+/// `scripts\cargo.cmd test -p jeuvoice-app snap_voices -- --ignored` writes `target/voices.png`.
+#[test]
+#[ignore]
+fn snap_voices() {
+    fn fixture() -> App {
+        let mut rig = Rig::new(Gate::new(true));
+        crate::i18n::set_lang(crate::i18n::Lang::Tr);
+        save_preset(&rig.presets(), &Preset { name: "Ece".into(), kind: PresetKind::Seed, ..default_preset() }, None).unwrap();
+        rig.three_tries();
+        rig.rt.update(|s, _| {
+            s.voices.editor.picked = Some(1);
+            s.voices.editor.traits.pitch = Some(crate::voices::traits::Pitch::High);
+            s.voices.name_field = rune::TextEdit::new("Ece 2");
+            s.voices.selected = Some("Sami".into());
+            s.tab = Tab::Voices;
+        });
+        let tmp = std::mem::replace(&mut rig.tmp, tempfile::tempdir().unwrap());
+        std::mem::forget(tmp);
+        let Rig { rt, .. } = rig;
+        rt.state
+    }
+    let out = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/voices.png");
+    let spec = rune::AppSpec::new("Voices", (1100.0, 720.0), fixture, view);
+    rune::App::new(spec).args(["--snap".to_string(), out.to_string()]).run();
+    println!("wrote {out}");
 }

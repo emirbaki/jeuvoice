@@ -53,7 +53,7 @@ pub fn palette() -> Palette {
         glow: white(0.08),
         glass: white(0.055),
         glass_border: white(0.09),
-        highlight: white(0.16),
+        highlight: white(0.22),
         text: hex("#e9e9ec"),
         text_secondary: hex("#8d8e96"),
         accent: hex("#ff9f5a"),
@@ -284,5 +284,10 @@ mod tests {
         let rect = |k: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(k)).unwrap().target;
         let (pill, row) = (rect("long-pill"), rect("narrow"));
         assert!(pill[0] + pill[2] <= row[0] + row[2] + 0.5, "pill {pill:?} inside row {row:?}");
+    }
+
+    #[test]
+    fn the_top_light_is_brighter() {
+        assert_eq!(palette().highlight, white(0.22));
     }
 }
