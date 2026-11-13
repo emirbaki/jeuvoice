@@ -1,4 +1,4 @@
-use jeuvoice_core::script_diff::{DiffOp, script_diff};
+use jeuvoice_core::script_diff::{DiffOp, script_diff, script_word_for};
 use jeuvoice_core::transcript::{Transcript, Word};
 use jeuvoice_core::turkish::{normalize, number_to_words, tr_lower};
 
@@ -145,4 +145,23 @@ fn an_edited_heard_word_with_a_space_still_looks_ahead() {
     t.words[1].text = "3 3.".into();
     let ops = script_diff("Skor 3 3. Sonra", &t);
     assert!(ops.iter().all(|o| matches!(o, DiffOp::Same { .. } )), "{ops:?}");
+}
+
+#[test]
+fn a_misheard_word_gives_the_script_word() {
+    let t = heard("Dün invinciblada yeni bir sezon başladı");
+    let script = "Dün Invincible'da yeni bir sezon başladı.";
+    assert_eq!(script_word_for(script, &t, 1).as_deref(), Some("Invincible'da"));
+}
+
+#[test]
+fn a_right_word_gives_the_script_word_without_punctuation() {
+    let t = heard("sezon başladı");
+    assert_eq!(script_word_for("Sezon başladı.", &t, 1).as_deref(), Some("başladı"));
+}
+
+#[test]
+fn an_added_word_gives_none() {
+    let t = heard("yeni şey bir sezon");
+    assert_eq!(script_word_for("yeni bir sezon", &t, 1), None);
 }

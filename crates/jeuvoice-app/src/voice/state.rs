@@ -14,7 +14,7 @@ use jeuvoice_core::audio::{self, Audio};
 use jeuvoice_core::peaks::{PEAKS_PER_SECOND, Peaks, peaks};
 use jeuvoice_core::preset::{AdapterRef, Preset, list_presets};
 use jeuvoice_core::project::{History, Paragraph, Project, RenderSettings, Take, save as save_project};
-use jeuvoice_core::script_diff::{DiffOp, script_diff};
+use jeuvoice_core::script_diff::{DiffOp, script_diff, script_word_for};
 use jeuvoice_core::splice::{plan_splice, timeline};
 use jeuvoice_core::subtitles::to_srt;
 use jeuvoice_core::transcript::{Transcript, Word};
@@ -563,10 +563,12 @@ impl VoiceTab {
         self.status = VoiceStatus::Ready;
     }
 
-    /// Open the "say it as" field for timeline word `i`.
+    /// Open the "say it as" field for timeline word `i`. The field shows the script
+    /// word, because the fix must name the word as the script writes it.
     pub fn fix_word(&mut self, i: usize) {
         let Some(w) = self.timeline.as_ref().and_then(|t| t.words.get(i)).cloned() else { return };
-        let mut field = TextEdit::new(w.text.clone());
+        let shown = self.project.as_ref().and_then(|p| script_word_at(p, i)).unwrap_or(w.text.clone());
+        let mut field = TextEdit::new(shown);
         (field.anchor, field.focus) = (0, field.text.len());
         field.focused = true;
         self.fix_word = Some(FixWord { index: i, field });
@@ -591,8 +593,12 @@ impl VoiceTab {
         if new_text.is_empty() {
             return;
         }
+        // Key the fix on the script word. Whisper writes what it heard, and a misheard
+        // word ("invinciblada") is not in the script, so a fix keyed on it does nothing.
+        // The engine cleans both words like the script text (case, apostrophes).
+        let key = script_word_at(&project, fix.index).unwrap_or_else(|| word.text.clone());
         let mut project = project;
-        project.terms.respell.push((word.text.to_lowercase(), new_text.to_lowercase()));
+        project.terms.respell.push((key, new_text));
         self.adv_respell = TextEdit::new(
             project.terms.respell.iter().map(|(o, n)| format!("{o}={n}")).collect::<Vec<_>>().join(", "),
         );
@@ -942,6 +948,19 @@ fn paragraphs_of(script: &str) -> Vec<String> {
     out
 }
 
+/// The script word for timeline word `i`, or `None` when it has none (an added word).
+/// The timeline lists each paragraph's words in order.
+fn script_word_at(project: &Project, mut i: usize) -> Option<String> {
+    for para in &project.paragraphs {
+        if i < para.words.len() {
+            let heard = Transcript { language: String::new(), words: para.words.clone() };
+            return script_word_for(&para.text, &heard, i);
+        }
+        i -= para.words.len();
+    }
+    None
+}
+
 /// Timeline words of a project with paragraph `starts` (seconds), like [`timeline`].
 fn timeline_words(project: &Project, starts: &[(usize, f64)]) -> Vec<Word> {
     let mut words = Vec::new();
@@ -957,11 +976,13 @@ fn split_list(s: &str) -> Vec<String> {
     s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()
 }
 
+/// The respell pairs of the Advanced field. The words stay as typed: the engine cleans
+/// them like the script text (Rust lowercase would turn "İ" into "i̇", not "i").
 fn split_respell(s: &str) -> Vec<(String, String)> {
     s.split(',')
         .filter_map(|pair| {
             let (o, n) = pair.split_once('=')?;
-            let (o, n) = (o.trim().to_lowercase(), n.trim().to_lowercase());
+            let (o, n) = (o.trim().to_string(), n.trim().to_string());
             (!o.is_empty() && !n.is_empty()).then_some((o, n))
         })
         .collect()

@@ -54,6 +54,17 @@ def clean(text: str, lang: str, quote_terms: tuple[str, ...] = ()) -> str:
     return text
 
 
+def apply_respell(text: str, old: str, new: str, lang: str) -> str:
+    """Say `old` as `new` in cleaned `text`. Both words get the same cleaning as the
+    text (the app sends the script word as written: "Invincible'da"). Only whole
+    words change: "bir" never changes inside "birlikte"."""
+    key = clean(old, lang).strip(" .,;:!?\"'")
+    if not key:
+        return text
+    value = clean(new, lang).strip()
+    return re.sub(rf"(?<!\w){re.escape(key)}(?!\w)", lambda _: value, text)
+
+
 def plan_parts(
     script: str,
     en_terms: list[str],
@@ -67,7 +78,7 @@ def plan_parts(
         for lang, text in split_by_language(group, en_terms):
             text = clean(text, lang, tuple(quote_terms))
             for old, new in respell:
-                text = text.replace(old, new)
+                text = apply_respell(text, old, new, lang)
             parts.append(Part(index=index, paragraph=para, language=lang, text=text))
             index += 1
     return parts

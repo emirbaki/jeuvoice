@@ -152,3 +152,16 @@ pub fn script_diff(script: &str, t: &Transcript) -> Vec<DiffOp> {
     }
     ops
 }
+
+/// The script word that heard word `heard` stands for, without the punctuation at its
+/// ends (an inner apostrophe stays: `Invincible'da`). `None` when the heard word has no
+/// script word (an added word).
+pub fn script_word_for(script: &str, t: &Transcript, heard: usize) -> Option<String> {
+    let index = script_diff(script, t).into_iter().find_map(|op| match op {
+        DiffOp::Same { script, heard: h } | DiffOp::Changed { script, heard: h } if h == heard => Some(script),
+        _ => None,
+    })?;
+    let word = script.split_whitespace().nth(index)?;
+    let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+    (!word.is_empty()).then(|| word.to_string())
+}

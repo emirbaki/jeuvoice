@@ -536,6 +536,29 @@ fn fix_word_sends_a_respell() {
 }
 
 #[test]
+fn fix_word_uses_the_script_word_not_the_heard_word() {
+    // Whisper writes what it heard ("invinciblada"). That text is not in the script, so
+    // a fix keyed on it changes nothing. The fix must key on the script word.
+    let spy = Arc::new(Spy { inner: FakeEngineApi::new(), seen: Mutex::new(vec![]) });
+    let mut rig = Rig::with_all(spy.clone(), Arc::new(FakeTranscriber(heard("Dün invinciblada yeni sezon"))));
+    rig.paste_script("Dün Invincible'da yeni sezon.");
+    rig.tap("voice-generate");
+    rig.until("the timeline is ready", |s| s.voice.timeline.as_ref().is_some_and(|t| !t.words.is_empty()));
+    rig.rt.state.voice.fix_word(1);
+    assert_eq!(rig.rt.state.voice.fix_word.as_ref().unwrap().field.text, "Invincible'da", "the field shows the script word");
+    rig.rt.update(|s, _| s.voice.fix_word.as_mut().unwrap().field = rune::TextEdit::new("invinsıbılda"));
+    rig.rt.update(|s, _| {
+        let (settings, store) = (s.settings.clone(), s.token_store());
+        let (engine, voice) = (&mut s.transcribe, &mut s.voice);
+        voice.retake_word(engine.engine_mut(), &settings, store, false);
+    });
+    rig.until("retakes land", |s| s.voice.project.as_ref().is_some_and(|p| p.paragraphs[0].takes.len() == 4));
+    let fix = ("Invincible'da".to_string(), "invinsıbılda".to_string());
+    let seen: Vec<_> = spy.seen.lock().unwrap().iter().map(|r| r.respell.clone()).collect();
+    assert!(seen.iter().any(|r| r.contains(&fix)), "the retake render keys the fix on the script word: {seen:?}");
+}
+
+#[test]
 fn advanced_guidance_reaches_the_next_render() {
     let spy = Arc::new(Spy { inner: FakeEngineApi::new(), seen: Mutex::new(vec![]) });
     let mut rig = Rig::with_all(spy.clone(), Arc::new(Spanning));

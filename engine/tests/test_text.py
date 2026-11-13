@@ -86,3 +86,21 @@ def test_quote_term_stays_quoted_in_en_part():
 
 def test_turkish_dotted_capitals():
     assert clean("İSTANBUL IŞIK", "tr") == "istanbul ışık"
+
+
+def test_respell_key_is_cleaned_like_the_text():
+    # The app sends the script word as written. The text is lowercase and has no
+    # apostrophe inside a word, so the key must get the same cleaning.
+    parts = plan_parts("Dün Invincible'da yeni sezon.", [], [], [("Invincible'da", "invinsıbılda")])
+    assert "invinsıbılda" in parts[0].text
+    assert "invincible" not in parts[0].text
+
+
+def test_respell_key_with_turkish_capitals():
+    parts = plan_parts("İstanbul çok güzel.", [], [], [("İstanbul", "istambul")])
+    assert parts[0].text.startswith("istambul")
+
+
+def test_respell_changes_whole_words_only():
+    parts = plan_parts("Bir gün birlikte gittik.", [], [], [("bir", "bi")])
+    assert parts[0].text == "bi gün birlikte gittik."
