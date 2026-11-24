@@ -67,3 +67,5 @@ cuda-device = { git = "https://github.com/NVIDIA/cuda-rust", rev = "5e5c77b19a4b
 cuda-host = { git = "https://github.com/NVIDIA/cuda-rust", rev = "5e5c77b19a4b3204d6542bab2f0fde2a4eed824b" }
 half = "2"
 libloading = "0.8"
+safetensors = "0.6"
+libm = "0.2"

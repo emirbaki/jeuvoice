@@ -20,3 +20,8 @@ cuda-device.workspace = true
 cuda-host.workspace = true
 half.workspace = true
 libloading.workspace = true
+libm.workspace = true
+safetensors.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

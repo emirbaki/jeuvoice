@@ -13,6 +13,7 @@ mod device;
 mod error;
 pub mod kernels;
 pub mod ops;
+pub mod reference;
 mod tensor;
 
 pub use device::{DeviceInfo, Gpu};
