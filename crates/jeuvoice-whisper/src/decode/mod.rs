@@ -3,5 +3,6 @@
 
 pub mod rules;
 pub mod sample;
+pub mod token_times;
 pub mod vocab;
 pub mod window;

@@ -9,6 +9,7 @@
 
 use super::rules::{log_softmax, process_logits, RuleInput};
 use super::sample::{sample_token, sequence_score, Rng, TokenData};
+use super::token_times::{signal_energy, token_level_times, TokenTimeState};
 use super::vocab::{lang_code, lang_id, Vocab, N_LANGUAGES};
 use crate::WhisperError;
 
@@ -34,6 +35,8 @@ pub struct DecodeParams {
     pub logprob_thold: f64,
     pub no_speech_thold: f32,
     pub length_penalty: f32,
+    /// Gives each token `t0` and `t1` (`token_level_times`). The app sets it.
+    pub token_timestamps: bool,
 }
 
 impl Default for DecodeParams {
@@ -46,6 +49,7 @@ impl Default for DecodeParams {
             logprob_thold: -1.0,
             no_speech_thold: 0.6,
             length_penalty: -1.0,
+            token_timestamps: true,
         }
     }
 }
@@ -112,11 +116,12 @@ struct Decoder {
     completed: bool,
 }
 
-/// Transcribes `n_samples` of audio with `model`, as `whisper_full` does.
+/// Transcribes the 16 kHz `samples` with `model`, as `whisper_full` does. The model holds
+/// the mel of the same samples.
 pub fn transcribe_tokens(
     model: &mut dyn WhisperModel,
     vocab: &Vocab,
-    n_samples: usize,
+    samples: &[f32],
     params: &DecodeParams,
     progress: &mut dyn FnMut(f32),
 ) -> Result<Transcription, WhisperError> {
@@ -128,7 +133,7 @@ pub fn transcribe_tokens(
             Err(WhisperError::Transcribe(format!("the model gave {} logits, not n_vocab = {n_vocab}", logits.len())))
         }
     };
-    let seek_end = n_len_org(n_samples);
+    let seek_end = n_len_org(samples.len());
 
     // W1: whisper.cpp reads the no-speech prob from row 0 of its logits buffer. Only a
     // 1-token decode fills that row. So it holds the logits of the last 1-token decode, or
@@ -147,6 +152,13 @@ pub fn transcribe_tokens(
         row0 = Some(logits);
     }
     let lang = lang_id(&language).ok_or_else(|| WhisperError::Transcribe(format!("unknown language {language:?}")))?;
+
+    // The token times keep a state across segments, and read the energy of the whole audio.
+    let mut times = TokenTimes {
+        on: params.token_timestamps,
+        state: TokenTimeState::default(),
+        energy: if params.token_timestamps { signal_energy(samples, 32) } else { Vec::new() },
+    };
 
     let mut out = Transcription { language, segments: Vec::new(), windows: Vec::new() };
     if seek_end < DELTA_MIN {
@@ -260,7 +272,7 @@ pub fn transcribe_tokens(
         prompt_past = past;
 
         if !tokens.is_empty() && !is_no_speech {
-            make_segments(&mut out.segments, vocab, tokens, seek, dec.seek_delta, no_speech_prob);
+            make_segments(&mut out.segments, vocab, tokens, seek, dec.seek_delta, no_speech_prob, &mut times);
         }
 
         let mut seek_delta = dec.seek_delta;
@@ -311,8 +323,26 @@ fn step(dec: &mut Decoder, vocab: &Vocab, tok: TokenData, i: usize, seek: i64, s
     }
 }
 
+/// The token-time step of the segments: on or off, its state and the signal energy.
+struct TokenTimes {
+    on: bool,
+    state: TokenTimeState,
+    energy: Vec<f32>,
+}
+
+impl TokenTimes {
+    /// Pushes a segment and, when on, gives its tokens `t0` and `t1` at once, as
+    /// whisper.cpp does after each segment.
+    fn push(&mut self, out: &mut Vec<Segment>, vocab: &Vocab, mut seg: Segment) {
+        if self.on {
+            token_level_times(vocab, &mut self.state, &self.energy, seg.t0, seg.t1, &mut seg.tokens);
+        }
+        out.push(seg);
+    }
+}
+
 /// Splits the tokens of a window into segments at the timestamp tokens (line 7605).
-fn make_segments(out: &mut Vec<Segment>, vocab: &Vocab, tokens: &[TokenData], seek: i64, seek_delta: i64, nsp: f32) {
+fn make_segments(out: &mut Vec<Segment>, vocab: &Vocab, tokens: &[TokenData], seek: i64, seek_delta: i64, nsp: f32, times: &mut TokenTimes) {
     let beg = vocab.beg;
     let time = |tid: u32| seek + 2 * (tid as i64 - beg as i64);
     let mut i0 = 0;
@@ -327,7 +357,8 @@ fn make_segments(out: &mut Vec<Segment>, vocab: &Vocab, tokens: &[TokenData], se
         if id > beg {
             let t1 = time(tokens[i].tid);
             if !text.is_empty() {
-                out.push(Segment { t0, t1, text: std::mem::take(&mut text), no_speech_prob: nsp, tokens: tokens[i0..=i].to_vec() });
+                let seg = Segment { t0, t1, text: std::mem::take(&mut text), no_speech_prob: nsp, tokens: tokens[i0..=i].to_vec() };
+                times.push(out, vocab, seg);
             }
             text.clear();
             // Skip the rest of a run of timestamps.
@@ -341,7 +372,8 @@ fn make_segments(out: &mut Vec<Segment>, vocab: &Vocab, tokens: &[TokenData], se
         i += 1;
     }
     if !text.is_empty() {
-        out.push(Segment { t0, t1: seek + seek_delta, text, no_speech_prob: nsp, tokens: tokens[i0..].to_vec() });
+        let seg = Segment { t0, t1: seek + seek_delta, text, no_speech_prob: nsp, tokens: tokens[i0..].to_vec() };
+        times.push(out, vocab, seg);
     }
 }
 

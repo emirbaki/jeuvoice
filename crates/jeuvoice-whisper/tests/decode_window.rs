@@ -112,7 +112,8 @@ fn params(language: &str) -> DecodeParams {
 fn run(m: &mut Scripted, n_samples: usize, language: &str) -> (Transcription, Vec<f32>) {
     let v = vocab();
     let mut progress = Vec::new();
-    let t = transcribe_tokens(m, &v, n_samples, &params(language), &mut |p| progress.push(p)).unwrap();
+    let samples = vec![0.0; n_samples];
+    let t = transcribe_tokens(m, &v, &samples, &params(language), &mut |p| progress.push(p)).unwrap();
     (t, progress)
 }
 
@@ -151,6 +152,10 @@ fn three_windows_with_segments_past_prompt_and_progress() {
         ]
     );
     assert_eq!(t.segments[0].text, b"w10w11");
+    // The token times ran on each segment: the first token of the window starts at seek.
+    assert_eq!(t.segments[0].tokens[0].t0, 0);
+    assert_eq!(t.segments[2].tokens[0].t0, 2800);
+    assert!(t.segments.iter().flat_map(|s| &s.tokens).all(|t| t.t0 >= 0 && t.t1 >= 0));
     let seeks: Vec<usize> = t.windows.iter().map(|w| w.seek).collect();
     assert_eq!(seeks, vec![0, 2800, 3800]);
     assert!(t.windows.iter().all(|w| w.attempts == 1 && w.temperature == 0.0));
@@ -302,13 +307,13 @@ fn short_input_gives_an_empty_transcript() {
     assert!(t.segments.is_empty());
     // No samples at all: whisper.cpp cannot detect a language.
     let mut m = Scripted::new(&v);
-    assert!(transcribe_tokens(&mut m, &v, 0, &params("auto"), &mut |_| {}).is_err());
+    assert!(transcribe_tokens(&mut m, &v, &[], &params("auto"), &mut |_| {}).is_err());
 }
 
 #[test]
 fn unknown_language_is_an_error() {
     let v = vocab();
     let mut m = Scripted::new(&v);
-    let e = transcribe_tokens(&mut m, &v, N8, &params("xx"), &mut |_| {}).unwrap_err();
+    let e = transcribe_tokens(&mut m, &v, &vec![0.0; N8], &params("xx"), &mut |_| {}).unwrap_err();
     assert!(format!("{e:?}").contains("xx"), "{e:?}");
 }

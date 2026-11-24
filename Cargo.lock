@@ -2075,6 +2075,7 @@ dependencies = [
  "jeuvoice-core",
  "jeuvoice-gpu",
  "safetensors",
+ "serde_json",
  "tempfile",
  "ureq",
  "whisper-rs",
