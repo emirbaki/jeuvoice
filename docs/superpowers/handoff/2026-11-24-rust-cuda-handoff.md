@@ -8,7 +8,7 @@ Date: 2026-11-24. Written by the previous agent for the next agent. Read `AGENTS
 2. Run the GPU tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-gpu`. Expected: 62 tests pass on `rust-cuda-tensor-cores`, 58 on `main`.
 3. Run the plain tests: `scripts\cargo.cmd test`. Expected: 348 tests pass, with no failures.
 4. Run the Whisper GPU tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-whisper --features cuda-kernels -- --include-ignored --test-threads 1`. Expected: all pass. The first run builds whisper.cpp with CUDA (about 20 minutes).
-5. **Plan 1a is complete and reviewed.** The branch is not merged to `main` yet: the user decides. Continue with section 4.
+5. **Plan 1a is merged to `main`. The tensor-core task is complete and reviewed** on `rust-cuda-tensor-cores`: the user decides about the merge. Continue with section 4.
 
 ## 2. The goal and why
 
