@@ -37,6 +37,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Logits rows: the decoder output times the token table, f32 out. One row is one decoder
+    // step: it reads the whole 133 MB table, so it shows the memory limit of a step.
+    if "gemm_f16_f32out".contains(&filter) {
+        for m in [1, 7] {
+            rows.push(bench_gemm_f32out(&gpu, m, 51866, 1280)?);
+        }
+    }
+
     // RMSNorm rows: [4096, 1024], about the token count of one OmniVoice pass.
     for (name, dtype, naive) in [
         ("rmsnorm_naive_f32", DType::F32, true),
@@ -399,6 +407,28 @@ fn bench_conv1d(gpu: &Gpu, name: &str, kind: ConvKind, c_in: usize, c_out: usize
         t,
         rate: (flops as f64 / (t.us * 1e-6) / 1e12, "TF/s"),
         pct: pct_of_tensor_limit(flops, &t, gpu.info()),
+    })
+}
+
+fn bench_gemm_f32out(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, GpuError> {
+    let blas = Blas::load(gpu)?;
+    let mut plan = ArenaPlan::new();
+    let x = plan.add(DType::F16, &[m, k]);
+    let w = plan.add(DType::F16, &[n, k]);
+    let y = plan.add(DType::F32, &[m, n]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &x, &vec![f16::from_f32(0.01); m * k])?;
+    arena.upload(gpu, &w, &vec![f16::from_f32(0.02); n * k])?;
+    let (xs, ws, ys) = (arena.slice(&x), arena.slice(&w), arena.slice(&y));
+    let t = time_on_stream(gpu, 3, 20, || blas.gemm_f16_f32out(gpu, &xs, Op::N, &ws, Op::T, &ys, m, n, k, 1.0, 0.0))?;
+    // A few rows: the table read sets the time, so the limit is the memory.
+    let bytes = (n * k * 2 + m * k * 2 + m * n * 4) as u64;
+    Ok(Row {
+        name: "gemm_f16_f32out".into(),
+        size: format!("{m}x{n}x{k}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
     })
 }
 

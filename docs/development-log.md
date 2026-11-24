@@ -410,3 +410,14 @@ The upload and its wait cost more than the kernel. A decoder step uses `embed_on
 | 224 x 1500 with probs (DTW) | 12.6 ms | 3.47 ms | 3.6x |
 
 The product uses `Split`. It needs a scratch tensor of `decode_split_scratch(heads, nq, nk)` f32. The multi-row cases are limited by the scalar math on shared memory. A tensor-core version is lesson 8 exercise 4.
+
+### The logits GEMM (Task 9, 2026-11-25)
+
+`Blas::gemm_f16_f32out`: f16 A and B, f32 C and f32 math, for the decoder logits `x · W_tokᵀ` (`W_tok` is `[51866, 1280]`). Measured (3 runs, all the same):
+
+| Size | Time | Rate | % of the 192 GB/s limit |
+|---|---|---|---|
+| 1 x 51866 x 1280 | 718 µs | 185 GB/s | 96% |
+| 7 x 51866 x 1280 | 736 µs | 182 GB/s | 95% |
+
+One decoder step reads the whole 133 MB table, so this is the largest single cost of a step. cuBLAS is at the limit, so there is no kernel work to do here.
