@@ -93,7 +93,7 @@ pub fn log10_max(gpu: &Gpu, arena: &Arena, x: &Tensor, partial: &Tensor, max: &T
 /// One window of the normalized mel, as Whisper reads it: `out[b][t] =
 /// (max(mel_t[start + t][b], m − 8) + 4) / 4` with `m = max[0]`. `mel_t` is `[n_len, n_mel]`
 /// `F32` (frames as rows) and `max` is `[1]` `F32`, both in `src`. `out` is `[n_mel, w]`
-/// `F16` in `dst` (the encoder input). Frames past `n_len` get the floor value.
+/// `F16` in `dst` (the encoder input). Frames past `n_len` get 0.0, as in whisper.cpp.
 pub fn mel_window(gpu: &Gpu, src: &Arena, mel_t: &Tensor, max: &Tensor, start: usize, dst: &Arena, out: &Tensor) -> Result<(), GpuError> {
     f32_tensor("mel_t", mel_t);
     f32_tensor("max", max);

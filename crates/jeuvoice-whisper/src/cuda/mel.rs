@@ -109,7 +109,7 @@ impl GpuMel {
     }
 
     /// Writes the normalized window that starts at `start_frame` into `out` (`[128, w]` `F16`
-    /// in `arena`). Frames past the end get the floor value, as the whisper.cpp padding does.
+    /// in `arena`). Frames past the end get 0.0, as whisper.cpp writes them.
     ///
     /// # Panics
     /// If `compute` did not run first.

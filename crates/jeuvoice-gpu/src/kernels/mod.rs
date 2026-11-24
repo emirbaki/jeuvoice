@@ -1799,7 +1799,7 @@ pub mod device {
     }
 
     /// One window of the normalized mel: `out[b][t] = (max(mel_t[start + t][b], m - 8) + 4) / 4`
-    /// with `m = max[0]`, as f16. A frame past `n_len` gets the floor value `(m - 8 + 4) / 4`.
+    /// with `m = max[0]`, as f16. A frame past `n_len` gets 0.0, as in whisper.cpp.
     /// `mel_t` has frames as rows. `out` has bands as rows (the Whisper layout).
     ///
     /// # Safety
@@ -1811,11 +1811,17 @@ pub mod device {
             return;
         }
         let (b, t) = (i / w, i % w);
-        // SAFETY: `max` has one value. In the branch that reads `mel_t`, start + t < n_len
-        // and b < n_mel.
+        // A frame past the end of the mel gets 0.0, the normalized value that whisper.cpp
+        // writes there (it clears the encoder input and copies only the frames below n_len).
+        // SAFETY: `out` has n_mel * w values and i < n_mel * w. `max` has one value. In the
+        // branch that reads `mel_t`, start + t < n_len and b < n_mel.
         unsafe {
+            if start + t >= n_len {
+                *out.add(i) = 0.0 as f16;
+                return;
+            }
             let floor = *max - 8.0;
-            let v = if start + t < n_len { *mel_t.add((start + t) * n_mel + b) } else { floor };
+            let v = *mel_t.add((start + t) * n_mel + b);
             let v = if v > floor { v } else { floor };
             *out.add(i) = ((v + 4.0) / 4.0) as f16;
         }

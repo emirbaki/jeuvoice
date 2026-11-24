@@ -51,13 +51,14 @@ fn gpu_windows(samples: &[f32], filters: &[f32], starts: &[usize]) -> (usize, Ve
     (n_len, windows)
 }
 
-/// The CPU window at `start`, with the floor value past the end (as the GPU does).
+/// The CPU window at `start`. Frames past the end are 0.0, as whisper.cpp writes them
+/// (`whisper_encode_internal` clears the encoder input with `memset` and copies only the
+/// frames below `n_len`).
 fn cpu_window(mel: &[f32], n_len: usize, start: usize) -> Vec<f32> {
-    let floor = mel.iter().copied().fold(f32::MAX, f32::min);
     (0..N_MEL * WINDOW)
         .map(|i| {
             let (b, t) = (i / WINDOW, i % WINDOW);
-            if start + t < n_len { mel[b * n_len + start + t] } else { floor }
+            if start + t < n_len { mel[b * n_len + start + t] } else { 0.0 }
         })
         .collect()
 }
@@ -74,6 +75,24 @@ fn gpu_mel_matches_cpu() {
     for (w, start) in windows.iter().zip([0, 2000]) {
         assert_close(&format!("gpu mel window at {start}"), w, &cpu_window(&cpu, n_len, start), Tol { abs: 2e-2, rel: 2e-2 });
     }
+}
+
+#[test]
+fn frames_past_the_end_are_zero() {
+    // The window starts 1000 frames before the end of the mel. The first 1000 frames hold
+    // the mel (the floor value of the 30 s tail), and the last 2000 frames must be 0.0, not
+    // the floor value (-1.5 for silence).
+    let samples = rnd(16_000 * 5, 52, 0.3);
+    let filters = triangle_filters();
+    let (cpu, n_len) = log_mel(&samples, &filters);
+    let start = n_len - 1000;
+    let (_, windows) = gpu_windows(&samples, &filters, &[start]);
+    let w = &windows[0];
+    for b in [0, N_MEL - 1] {
+        assert!(w[b * WINDOW + 999] < -0.5, "band {b}: the last mel frame must hold the floor value");
+        assert!(w[b * WINDOW + 1000..(b + 1) * WINDOW].iter().all(|&v| v == 0.0), "band {b}: frames past the end are not 0.0");
+    }
+    assert_close("window past the end", w, &cpu_window(&cpu, n_len, start), Tol { abs: 2e-2, rel: 2e-2 });
 }
 
 #[test]
