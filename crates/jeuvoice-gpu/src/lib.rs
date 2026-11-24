@@ -6,7 +6,9 @@
 #![feature(f16)]
 
 mod arena;
+pub mod bench;
 pub mod blas;
+pub mod check;
 mod device;
 mod error;
 pub mod kernels;
