@@ -43,7 +43,12 @@ The ggml file stores fewer words than `n_vocab`. whisper.cpp names the extra ids
 
 **The app's parameters** (`crates/jeuvoice-whisper/src/lib.rs` and `whisper_full_default_params`, line 5906): greedy, `best_of 1`, `token_timestamps true`, `no_context true`, `temperature 0.0` with steps of `0.2` up to `1.0`, `entropy_thold 2.4`, `logprob_thold −1.0`, `no_speech_thold 0.6`, `suppress_blank true`, `max_initial_ts 1.0`, `length_penalty −1`, `thold_pt 0.01`, `thold_ptsum 0.01`, `max_len 0`, `suppress_nst false`, DTW preset large-v3-turbo with `medfilt_width 7`.
 
-**The prompt** (line 6955): `[SOT, lang, transcribe]`. `no_context` is true, so there are no past tokens. The NOT token is not in the prompt, because timestamps are on.
+**The prompt** (line 6955 and line 7090): `prompt_init = [SOT, lang, transcribe]`. The NOT token is not in it, because timestamps are on. `no_context = true` clears only the context of an earlier `whisper_full` call. Inside one call, whisper.cpp keeps the tokens of the earlier windows in `prompt_past1`:
+
+- At a temperature below 0.5, the prompt is `[PREV]` plus the last `min(223, len)` tokens of `prompt_past1`, then `prompt_init`. At 0.5 and above it is `prompt_init` only.
+- After each window: `prompt_past1` becomes the past part of that window's last prompt (`prompt[1 .. len − 3]` when it starts with PREV), plus the ids of the first `result_len` tokens when the window is not no-speech.
+- When `seek > 0 && seek + 500 >= seek_end` (less than 5 s left), `prompt_past1` is cleared.
+- The random generator is `mt19937(0)`, seeded once for the state (line 3470), not once per window.
 
 **The token rules** (`whisper_process_logits`, line 6142), in this order:
 
