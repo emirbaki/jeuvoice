@@ -11,7 +11,7 @@ Kernel'ler Rust ile yazılır ve NVIDIA'nın **cuda-oxide** derleyicisi onları 
 | 0 | [GPU temelleri ve araç zinciri (RMSNorm)](00-gpu-temelleri.md) | hazır |
 | 1 | [Eleman eleman kernel'ler: bias, GELU, residual](01-eleman-eleman.md) | hazır |
 | 2 | [LayerNorm](02-layernorm.md) | hazır |
-| 3 | Softmax ve "online softmax" | Faz 1 |
+| 3 | [Softmax ve "online softmax"](03-softmax.md) | hazır |
 | 4 | GEMM: önce cuBLAS, sonra kendi `mma.sync` GEMM'imiz | Faz 1 |
 | 5 | Attention ve flash attention | Faz 1 |
 | 6 | conv1d | Faz 1 |

@@ -117,8 +117,32 @@ pub mod device {
         total
     }
 
-    /// Test only: two `block_sum` calls in one kernel. Thread t adds t, then 2t.
+    /// The largest of `v` over all `ROW_BLOCK` threads of the block. Every thread gets it.
+    /// As `block_sum`, but with `warp::reduce_max_f32` and its own shared slots.
     ///
+    /// The block must have exactly `ROW_BLOCK` threads.
+    #[device]
+    pub fn block_max(v: f32) -> f32 {
+        static mut WARP_MAX: SharedArray<f32, ROW_WARPS> = SharedArray::UNINIT;
+        let tid = thread::threadIdx_x() as usize;
+        let warp_max = warp::reduce_max_f32(v);
+        if warp::lane_id() == 0 {
+            // SAFETY: only lane 0 of warp k writes slot k, and tid / 32 < ROW_WARPS.
+            unsafe { WARP_MAX[tid / 32] = warp_max };
+        }
+        thread::sync_threads();
+        let mut best = f32::NEG_INFINITY;
+        let mut i = 0;
+        while i < ROW_WARPS {
+            // SAFETY: the barrier above separates these reads from the writes.
+            best = best.max(unsafe { WARP_MAX[i] });
+            i += 1;
+        }
+        thread::sync_threads();
+        best
+    }
+
+    /// Test only: two `block_sum` calls in one kernel. Thread t adds t, then 2t.    ///
     /// # Safety
     /// One block of `ROW_BLOCK` threads. `out` is valid for 2 elements.
     #[kernel]
@@ -554,6 +578,155 @@ pub mod device {
                     let o0 = (v[2 * j] - mean) * inv * g[0] as f32 + b[0] as f32;
                     let o1 = (v[2 * j + 1] - mean) * inv * g[1] as f32 + b[1] as f32;
                     *y.add(base + c) = [o0 as f16, o1 as f16];
+                }
+            }
+            j += 1;
+        }
+    }
+
+    // ---- Softmax (lesson 3: docs/cuda-lessons/03-softmax.md) ----
+    // In place y = exp(scale*x - max) / sum(exp(scale*x - max)) per row. All math in f32.
+    // `causal >= 0` keeps only columns `j <= row + causal`; those entries become 0.
+
+    /// In place softmax with three passes over the row: the max, the sum, then the write.
+    ///
+    /// # Safety
+    /// `x` is valid for `rows * n`, and `n > 0`. The grid has one block per row and
+    /// `ROW_BLOCK` threads.
+    #[kernel]
+    pub unsafe fn softmax_3pass_f16(x: *mut f16, n: usize, scale: f32, causal: i32) {
+        let row = thread::blockIdx_x() as usize;
+        let base = row * n;
+        let tid = thread::threadIdx_x() as usize;
+        let step = ROW_BLOCK as usize;
+        let limit = if causal >= 0 { row as i64 + causal as i64 } else { i64::MAX };
+        // Pass 1: the maximum. Masked entries stay at -inf and never become the max.
+        let mut m = f32::NEG_INFINITY;
+        let mut c = tid;
+        while c < n {
+            if (c as i64) <= limit {
+                // SAFETY: c < n, one block per row.
+                m = m.max(unsafe { *x.add(base + c) } as f32 * scale);
+            }
+            c += step;
+        }
+        let m = block_max(m);
+        // Pass 2: the sum of the exponents. The row is still in the L1 cache.
+        let mut s = 0.0f32;
+        let mut c = tid;
+        while c < n {
+            if (c as i64) <= limit {
+                // SAFETY: as above.
+                s += libm::expf(unsafe { *x.add(base + c) } as f32 * scale - m);
+            }
+            c += step;
+        }
+        let inv = 1.0 / block_sum(s);
+        // Pass 3: write.
+        let mut c = tid;
+        while c < n {
+            // SAFETY: each (row, c) belongs to one thread.
+            unsafe {
+                let o = if (c as i64) <= limit { libm::expf(*x.add(base + c) as f32 * scale - m) * inv } else { 0.0 };
+                *x.add(base + c) = o as f16;
+            }
+            c += step;
+        }
+    }
+
+    /// In place softmax with online rescaling: one pass over the row that keeps a running max
+    /// and a running sum, then the block max, then the write. Two reads of the row instead of
+    /// three, but one extra `exp` per element makes it slower here (lesson 3).
+    ///
+    /// # Safety
+    /// As `softmax_3pass_f16`.
+    #[kernel]
+    pub unsafe fn softmax_online_f16(x: *mut f16, n: usize, scale: f32, causal: i32) {
+        let row = thread::blockIdx_x() as usize;
+        let base = row * n;
+        let tid = thread::threadIdx_x() as usize;
+        let step = ROW_BLOCK as usize;
+        let limit = if causal >= 0 { row as i64 + causal as i64 } else { i64::MAX };
+        // Pass 1: max and sum together. When a larger value arrives, the old sum is rescaled.
+        let mut m = f32::NEG_INFINITY;
+        let mut d = 0.0f32;
+        let mut c = tid;
+        while c < n {
+            if (c as i64) <= limit {
+                // SAFETY: c < n, one block per row.
+                let v = unsafe { *x.add(base + c) } as f32 * scale;
+                let m_new = m.max(v);
+                d = d * libm::expf(m - m_new) + libm::expf(v - m_new);
+                m = m_new;
+            }
+            c += step;
+        }
+        // Join the threads: the block max, then every thread's sum moved to that max.
+        let m_block = block_max(m);
+        let inv = 1.0 / block_sum(d * libm::expf(m - m_block));
+        // Pass 2: write.
+        let mut c = tid;
+        while c < n {
+            // SAFETY: each (row, c) belongs to one thread.
+            unsafe {
+                let o = if (c as i64) <= limit { libm::expf(*x.add(base + c) as f32 * scale - m_block) * inv } else { 0.0 };
+                *x.add(base + c) = o as f16;
+            }
+            c += step;
+        }
+    }
+
+    /// In place softmax with the row in registers: one read of the row, the max and the sum
+    /// from the registers, then the write. One `exp` per element instead of two.
+    ///
+    /// # Safety
+    /// As `softmax_3pass_f16`, and `n <= ROW_BLOCK * MAX_COLS_PER_THREAD`.
+    #[kernel]
+    pub unsafe fn softmax_regs_f16(x: *mut f16, n: usize, scale: f32, causal: i32) {
+        let row = thread::blockIdx_x() as usize;
+        let base = row * n;
+        let tid = thread::threadIdx_x() as usize;
+        let step = ROW_BLOCK as usize;
+        let limit = if causal >= 0 { row as i64 + causal as i64 } else { i64::MAX };
+        // Load the row once, scaled. A slot past the row end or past the mask stays -inf, so
+        // it never wins the max and its exponent is 0.
+        let mut v = [f32::NEG_INFINITY; MAX_COLS_PER_THREAD];
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            let c = tid + j * step;
+            if c < n && (c as i64) <= limit {
+                // SAFETY: c < n, one block per row.
+                v[j] = unsafe { *x.add(base + c) } as f32 * scale;
+            }
+            j += 1;
+        }
+        let mut m = f32::NEG_INFINITY;
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            m = m.max(v[j]);
+            j += 1;
+        }
+        let m = block_max(m);
+        // Exponentiate in place in the registers and add the same values into the sum.
+        let mut s = 0.0f32;
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            let c = tid + j * step;
+            if c < n && (c as i64) <= limit {
+                v[j] = libm::expf(v[j] - m);
+                s += v[j];
+            }
+            j += 1;
+        }
+        let inv = 1.0 / block_sum(s);
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            let c = tid + j * step;
+            if c < n {
+                // SAFETY: each (row, c) belongs to one thread.
+                unsafe {
+                    let o = if (c as i64) <= limit { v[j] * inv } else { 0.0 };
+                    *x.add(base + c) = o as f16;
                 }
             }
             j += 1;

@@ -5,7 +5,7 @@
 use half::f16;
 use jeuvoice_gpu::bench::{Timing, pct_of_memory_limit, pct_of_tensor_limit, time_on_stream};
 use jeuvoice_gpu::blas::{Blas, Op};
-use jeuvoice_gpu::ops::{LayerNormKind, Width, bias_gelu_with, layernorm_with, rmsnorm, rmsnorm_naive};
+use jeuvoice_gpu::ops::{LayerNormKind, SoftmaxKind, Width, bias_gelu_with, layernorm_with, rmsnorm, rmsnorm_naive, softmax_rows_with};
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
 
 /// One row of the table.
@@ -64,6 +64,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // The x4 row is 4 times the rows of one window: the launch cost fades there.
             let n_rows = if name.ends_with("x4") { 6000 } else { 1500 };
             rows.push(bench_layernorm(&gpu, name, dtype, kind, n_rows, 1280)?);
+        }
+    }
+
+    // Softmax rows: the attention scores of one encoder layer, [20 heads * 1500, 1500].
+    for (name, kind) in [
+        ("softmax_3pass_f16", SoftmaxKind::ThreePass),
+        ("softmax_online_f16", SoftmaxKind::Online),
+        ("softmax_regs_f16", SoftmaxKind::Registers),
+    ] {
+        if name.contains(&filter) {
+            rows.push(bench_softmax(&gpu, name, kind, 20 * 1500, 1500)?);
         }
     }
 
@@ -159,8 +170,24 @@ fn bench_layernorm(gpu: &Gpu, name: &str, dtype: DType, kind: LayerNormKind, row
     })
 }
 
-fn bench_gemm(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, GpuError> {
-    let blas = Blas::load(gpu)?;
+/// Softmax works in place: read x, write x.
+fn bench_softmax(gpu: &Gpu, name: &str, kind: SoftmaxKind, rows: usize, n: usize) -> Result<Row, GpuError> {
+    let mut plan = ArenaPlan::new();
+    let x = plan.add(DType::F16, &[rows, n]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &x, &vec![f16::from_f32(0.25); rows * n])?;
+    let t = time_on_stream(gpu, 3, 50, || softmax_rows_with(gpu, &arena, &x, 0.125, None, kind))?;
+    let bytes = (2 * rows * n * 2) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{rows}x{n}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+fn bench_gemm(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, GpuError> {    let blas = Blas::load(gpu)?;
     let mut plan = ArenaPlan::new();
     let x = plan.add(DType::F16, &[m, k]);
     let w = plan.add(DType::F16, &[n, k]);
