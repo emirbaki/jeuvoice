@@ -4,10 +4,10 @@ Date: 2026-11-24. Written by the previous agent for the next agent. Read `AGENTS
 
 ## 1. Start here
 
-1. Check out the branch: `git switch rust-cuda-phase1a`. The last commit is `4fa9b03 feat(gpu): add the two-pass LayerNorm kernels`.
-2. Run the GPU tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-gpu`. Expected: 34 tests pass.
-3. Run the plain tests: `scripts\cargo.cmd test`. Expected: 340 or more tests pass, with no failures.
-4. Continue with **plan 1a, Task 5, Step 3** (section 4 below).
+1. Check out the branch: `git switch rust-cuda-phase1a`. The last commit is `0947f50 feat(gpu): add attention and lesson 5`.
+2. Run the GPU tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-gpu`. Expected: 46 tests pass.
+3. Run the plain tests: `scripts\cargo.cmd test`. Expected: 343 tests pass, with no failures.
+4. Continue with **plan 1a, Task 8** (conv1d, lesson 6). Tasks 1-7 are done.
 
 ## 2. The goal and why
 
@@ -26,7 +26,7 @@ The full design: `docs/superpowers/specs/2026-11-24-rust-cuda-inference-design.m
 | Phase | Content | State |
 |---|---|---|
 | 0. GPU base | toolchain, `jeuvoice-gpu`, cuBLAS, arena, test and bench helpers, RMSNorm, lesson 0 | **done**, merged to `main`, pushed |
-| 1a. Whisper encoder | plan `docs/superpowers/plans/2026-11-24-rust-cuda-phase1a-encoder.md`, 10 tasks | **in progress** on `rust-cuda-phase1a`, Tasks 1–4 done, Task 5 half done |
+| 1a. Whisper encoder | plan `docs/superpowers/plans/2026-11-24-rust-cuda-phase1a-encoder.md`, 10 tasks | **in progress** on `rust-cuda-phase1a`, Tasks 1-7 done |
 | 1b. Whisper decoder | decoder, decoding rules, DTW, `CudaWhisper` in the app, packaging, speed | no plan yet |
 | 2. OmniVoice main model | Qwen3-0.6B backbone, masked iterative decoding, LoRA merge | not started |
 | 3. Audio decoder | DAC decoder of the Higgs Audio v2 tokenizer | not started |
@@ -41,9 +41,9 @@ The full design: `docs/superpowers/specs/2026-11-24-rust-cuda-inference-design.m
 | 2. ggml model reader | done | `84f9152` |
 | 3. Reference tensors | done | `48208ff` |
 | 4. Element-wise kernels, lesson 1 | done | `ed30802` |
-| 5. LayerNorm, lesson 2 | **steps 1–2 done** (kernels and tests pass). Steps 3–5 open | `4fa9b03` |
-| 6. Softmax, lesson 3 | open | — |
-| 7. GEMM lesson kernels and attention, lessons 4–5 | open | — |
+| 5. LayerNorm, lesson 2 | done | `4344d52` |
+| 6. Softmax, lesson 3 | done | `0c885a1` |
+| 7. GEMM lessons and attention, lessons 4-5 | done, tensor-core kernel deferred (see 7) | `d45ca6e`, `0947f50` |
 | 8. conv1d, lesson 6 | open | — |
 | 9. Log-mel, lesson 7 | open | — |
 | 10. The encoder | open | — |
@@ -51,12 +51,11 @@ The full design: `docs/superpowers/specs/2026-11-24-rust-cuda-inference-design.m
 
 ## 4. The next steps, in order
 
-1. **Task 5, Step 3:** add a `layernorm_f16 1500x1280` row to `crates/jeuvoice-gpu/src/bin/gpu-bench.rs`. Copy the pattern of `bench_rmsnorm`. Bytes = read x + write y. Target: 80% or more of the memory limit.
-2. **Task 5, Step 4:** write lesson 2, `docs/cuda-lessons/02-layernorm.md`, in Turkish. Use the 7 parts of lesson 0 (see `AGENTS.md`). Explain why the two-pass form is needed (`layernorm_large_offset` test). Add it to `docs/cuda-lessons/README.md`.
-3. **Task 5, Step 5:** commit `feat(gpu): add LayerNorm and lesson 2`.
-4. **Tasks 6–10** as the plan says. Each task: tests first (watch them fail), then code, then the bench row, then the lesson, then one commit.
-5. **Final review** of the branch, then fix the Critical and Important findings with a test each, then merge to `main` only when the user says so.
-6. **Write the Phase 1b plan.** The spec, Phase 1 section, lists what it must cover. Section 8 below lists the facts for it.
+1. **Task 8: conv1d and lesson 6.** Tests first, then `ConvKind::Direct` and `ConvKind::Im2col`, the bench rows, the lesson, one commit.
+2. **Task 9: log-mel and lesson 7.** The CPU port in `jeuvoice-whisper` is the test oracle. It also adds the `cuda-kernels` feature to `jeuvoice-whisper` (the `oxide test -- -p jeuvoice-whisper --features cuda-kernels` command starts to work here).
+3. **Task 10: the encoder.** `cuda::weights`, `cuda::encoder`, the tap comparison against the reference tensors, the timing test. Attention uses `AttnKind::Naive` (see the ruling in section 5).
+4. **Final review** of the branch, then fix the Critical and Important findings with a test each, then merge to `main` only when the user says so.
+5. **Write the Phase 1b plan.** The spec, Phase 1 section, lists what it must cover. Section 8 below lists the facts for it.
 
 ## 5. Rulings made so far (decisions not in the plans)
 
@@ -74,18 +73,39 @@ Phase 1a:
 
 - Task 4: `bias_gelu` has three widths. A `[f16; 2]` load compiles to two 2-byte loads, and it is the fastest (178.1 µs, 90%). A real 4-byte `u32` load was slower (190.8 µs, 84%) because of the pack and unpack instructions. The product uses `[f16; 2]`. The `u32` kernel stays for lesson 1 (`Width::TwoPacked`).
 - Task 3: the `libm` dependency went into the Task 3 commit.
+- Task 5: the three-pass LayerNorm measured 63% at `[1500, 1280]`, under the plan's 80% target. Two more kernels: `layernorm_regs_*` (row in registers, 78%) and `layernorm_regs_f16x2` (pairs, 84%). The product uses the pair kernel for F16, and `ops::layernorm_with(..., LayerNormKind)` falls back above 2048 columns.
+- Task 6: the online softmax lost to the three-pass kernel (1.32 vs 1.08 ms): it costs one extra `exp` per element and has a serial chain, while the extra reads already hit L1. A register kernel won at 993 µs (94%) and is the product default.
+- Task 6: `libm::expf` compiles to two `fma` plus `ex2.approx.ftz.f32`. `exp` is cheap on this card.
+- Task 7: `gemm_lesson` takes the shapes from the tensors, not as `m`, `n`, `k` arguments.
+- Task 7: the tensor-core GEMM is not written yet. `ptx_asm!` does not build in the test profile on rev `5e5c77b` (the template reaches the MIR importer as a temporary, `Move(_3)`), and the ready-made `mma` wrappers in `cuda_device` need `sm_80` shapes. A direct marker call does build. Lesson 4 uses cuBLAS as the tensor-core row. Details in `docs/development-log.md`.
+- Task 7: attention uses `AttnKind::Naive` (2.48 ms). Flash attention measured 26.2 ms at `20 x 1500 x 64`, because two-warp blocks with 20 KB of shared memory reach about 20% occupancy and the math is scalar FMA. Raising the query block from 1 to 8 rows changed nothing: one head of K and V (384 KB) already fits in the 4 MB L2.
 
 ## 6. Measurements so far (RTX 3050 Ti Laptop, 192 GB/s, 15.2 TFLOP/s fp16)
 
 | Kernel | Size | Time | % of limit |
 |---|---|---|---|
-| cuBLAS `gemm_f16` | 1500x1280x1280 | 364 µs | 89% |
-| cuBLAS `gemm_f16` | 4096x1024x1024 | 611 µs | 92% |
+| cuBLAS `gemm_f16` | 1500x1280x1280 | 287-364 µs | 89-113% |
+| cuBLAS `gemm_f16` | 4096x1024x1024 | 449-594 µs | 95-126% |
+| `gemm_naive_f16` (lesson 4) | 1500x1280x1280 | 9.3-10.9 ms | 3% |
+| `gemm_tiled_f16` (lesson 4) | 1500x1280x1280 | 6.7-7.2 ms | 4-5% |
+| `gemm_regtile_f16` (lesson 4) | 1500x1280x1280 | 2.5 ms | 13% |
 | `rmsnorm_naive_f32` | 4096x1024 | 938 µs | 19% |
 | `rmsnorm_f32` | 4096x1024 | 200 µs | 88% |
 | `rmsnorm_f16` | 4096x1024 | 99 µs | 89% |
 | `bias_gelu` one per thread | 1500x5120 | 285 µs | 56% |
 | `bias_gelu` `[f16; 2]` | 1500x5120 | 178 µs | 90% |
+| `layernorm_3pass_f16` | 1500x1280 | 63.7 µs | 63% |
+| `layernorm_f16_regs` | 1500x1280 | 51.1 µs | 78% |
+| `layernorm_f16` (pairs) | 1500x1280 | 47.4 µs | 84% |
+| `layernorm_f16` (pairs, 4x rows) | 6000x1280 | 175.5 µs | 91% |
+| `layernorm_f32` | 1500x1280 | 89.6 µs | 89% |
+| `softmax_3pass_f16` | 30000x1500 | 1.08 ms | 87% |
+| `softmax_online_f16` | 30000x1500 | 1.32 ms | 71% |
+| `softmax_regs_f16` | 30000x1500 | 993 µs | 94% |
+| `attention_naive_f16` | 20x1500x64 | 2.48 ms | 31% |
+| `attention_flash_f16` | 20x1500x64 | 26.2 ms | 3% |
+
+The % column for cuBLAS can pass 100. `DeviceInfo` reports 15.2 TFLOP/s fp16, and the card boosts above that. A first run on an idle GPU reads one step low. Run the table twice.
 
 whisper.cpp baseline (the Phase 1b target): 69 s of Turkish audio in 3 files transcribes in 4.3 s.
 
@@ -97,6 +117,11 @@ Deferred review findings (from the Phase 0 review):
 - M7: `scripts\cargo.cmd` picks the CUDA folder by name order (v13.4 before v13.10), drops `!` from PATH entries, and fails with a PATH near 8 KB.
 - M8: `cargo test --workspace` and `cargo clippy --workspace` include `jeuvoice-gpu`, which builds only with `cargo oxide`.
 - M10: `check::compare` ignores NaN in `max_rel` (`assert_close` still fails on NaN).
+
+Found in Phase 1a, Task 7:
+
+- `ptx_asm!` does not build in the test profile on the pinned cuda-oxide rev. `cargo oxide build` works, `cargo oxide test` fails with `ptx_asm template must be a byte string literal, got MIR operand Move(_3)`. A direct call to the marker function builds in both. The tensor-core GEMM waits for one of these: a wrapper macro over the marker call, a fix in cuda-oxide, or a patched fork. See `docs/development-log.md`, "Inline PTX (`ptx_asm!`) does not build in the test profile".
+- `DeviceInfo::fp16_tensor_tflops` (15.2) is below what cuBLAS reaches (up to 19). The bench percent for a compute kernel can read over 100.
 
 ## 8. Facts for the Phase 1b plan
 
