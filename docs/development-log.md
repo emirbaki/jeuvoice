@@ -276,3 +276,28 @@ Plan: `docs/superpowers/plans/2026-11-24-rust-cuda-phase1a-encoder.md`.
 | `encoder.ln_post.weight` / `.bias` | f32 | `[1280]` |
 
 The decoder blocks have the same names under `decoder.blocks.N`, plus `cross_attn.*` and `cross_attn_ln.*`.
+
+### Kernels written so far (Phase 1a)
+
+| Kernel | Lesson | Result on this card |
+|---|---|---|
+| `bias_gelu` (`[f16; 2]`), `bias_add`, `add_into`, `add_rows` | 1 | 178 us, 90% of the memory limit at `[1500, 5120]` |
+| `layernorm` (register pair kernel) | 2 | 47.4 us, 84% at `[1500, 1280]`; 91% at 4x rows |
+| `softmax_rows` (register kernel) | 3 | 993 us, 94% at `[30000, 1500]` |
+| `gemm_naive/tiled/regtile` | 4 | 9.3 / 6.7 / 2.5 ms at `1500x1280x1280`; cuBLAS 0.29-0.36 ms |
+
+### Inline PTX (`ptx_asm!`) does not build in the test profile
+
+`cuda_device::ptx_asm!` works in a `cargo oxide build` (dev) or release build, and fails in `cargo oxide test`:
+
+```text
+Unsupported construct: ptx_asm template must be a byte string literal, got MIR operand Move(_3)
+```
+
+The macro passes the template through a temporary, and the test profile keeps that temporary in the MIR. The cuda-oxide MIR importer accepts only a constant operand, so the device codegen stops with `invalid input program`. Reproduced with a 15-line crate on the pinned rev `5e5c77b`.
+
+Consequences:
+
+- `gemm_tc_f16` (the tensor-core lesson kernel, `mma.sync.aligned.m16n8k8`) is deferred. The ready-made `cuda_device::wmma` mma wrappers need `sm_80` shapes (`m16n8k16`), and the PTX target is `sm_75`. The product path uses cuBLAS, so no product code depends on this.
+- A direct call to the marker (`cuda_device::ptx::__ptx_asm_out_0::<u32, 21, 2, 0>(b"...", b"=r", b"")`) does build in the test profile. A small wrapper macro in `jeuvoice-gpu` is the next thing to try.
+- Watch the cuda-oxide repository for a fix. Patching a fork is the last resort (AGENTS.md rule 1).

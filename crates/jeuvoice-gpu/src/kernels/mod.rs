@@ -1,4 +1,4 @@
-//! All device kernels. `#[cuda_module]` makes cuda-oxide compile the module to PTX, put the
+﻿//! All device kernels. `#[cuda_module]` makes cuda-oxide compile the module to PTX, put the
 //! PTX into this crate, and make a host-side `device::load(&ctx)` with one typed launch
 //! method for each `#[kernel]`.
 
@@ -11,6 +11,10 @@ pub const ROW_BLOCK: u32 = 256;
 pub const MAX_COLS_PER_THREAD: usize = 8;
 /// The same for the pair kernel: it covers `2 * ROW_BLOCK * MAX_PAIRS_PER_THREAD` (2048) columns.
 pub const MAX_PAIRS_PER_THREAD: usize = 4;
+/// The tile of the shared-memory GEMM (lesson 4): one output element per thread.
+pub const GEMM_TILE: usize = 16;
+/// The tile of the register-tile GEMM: each thread computes a 4x4 block of outputs.
+pub const GEMM_RT_TILE: usize = 64;
 const ROW_WARPS: usize = (ROW_BLOCK / 32) as usize;
 
 #[cuda_module]
@@ -337,7 +341,7 @@ pub mod device {
     // ---- LayerNorm (lesson 2: docs/cuda-lessons/02-layernorm.md) ----
     // y = (x - mean) / sqrt(var + eps) * gamma + beta, one block of ROW_BLOCK threads per row.
     // Two-pass: first the mean, then the variance of (x - mean). The one-pass form
-    // E[x²] - E[x]² loses all digits when the mean is large next to the spread.
+    // E[xÂ²] - E[x]Â² loses all digits when the mean is large next to the spread.
 
     /// # Safety
     /// `x` and `y` are valid for `rows * d`, `gamma` and `beta` for `d`. `y` overlaps none of
@@ -673,6 +677,149 @@ pub mod device {
                 *x.add(base + c) = o as f16;
             }
             c += step;
+        }
+    }
+
+
+    // ---- Lesson GEMM (lesson 4: docs/cuda-lessons/04-gemm.md) ----
+    // Row-major C = AÂ·B, f16 in and out, f32 accumulate. The product uses cuBLAS.
+
+    /// One thread per output element, one k step at a time. The first version of lesson 4.
+    ///
+    /// # Safety
+    /// `a` is `[m, k]`, `b` is `[k, n]`, `c` is `[m, n]`, all f16. `c` overlaps neither input.
+    #[kernel]
+    pub unsafe fn gemm_naive_f16(m: u32, n: u32, k: u32, a: *const f16, b: *const f16, c: *mut f16) {
+        let col = thread::blockIdx_x() * thread::blockDim_x() + thread::threadIdx_x();
+        let row = thread::blockIdx_y() * thread::blockDim_y() + thread::threadIdx_y();
+        if row >= m || col >= n {
+            return;
+        }
+        let mut sum = 0.0f32;
+        let mut p = 0u32;
+        while p < k {
+            // SAFETY: row < m, col < n, p < k.
+            unsafe {
+                sum += (*a.add((row * k + p) as usize)) as f32 * (*b.add((p * n + col) as usize)) as f32;
+            }
+            p += 1;
+        }
+        // SAFETY: row < m and col < n.
+        unsafe { *c.add((row * n + col) as usize) = sum as f16 };
+    }
+
+    /// Tiled GEMM: the block loads a `GEMM_TILE` x `GEMM_TILE` piece of A and B into shared
+    /// memory once, and every thread reuses it. One output element per thread.
+    ///
+    /// # Safety
+    /// As `gemm_naive_f16`. The block is `GEMM_TILE` x `GEMM_TILE` threads.
+    #[kernel]
+    pub unsafe fn gemm_tiled_f16(m: u32, n: u32, k: u32, a: *const f16, b: *const f16, c: *mut f16) {
+        static mut TA: SharedArray<f16, { GEMM_TILE * GEMM_TILE }> = SharedArray::UNINIT;
+        static mut TB: SharedArray<f16, { GEMM_TILE * GEMM_TILE }> = SharedArray::UNINIT;
+        let (m, n, k) = (m as usize, n as usize, k as usize);
+        let tx = thread::threadIdx_x() as usize;
+        let ty = thread::threadIdx_y() as usize;
+        let row = thread::blockIdx_y() as usize * GEMM_TILE + ty;
+        let col = thread::blockIdx_x() as usize * GEMM_TILE + tx;
+        let mut sum = 0.0f32;
+        let mut p0 = 0usize;
+        while p0 < k {
+            // Load the tiles. An element past the edge becomes 0, so the sum stays right.
+            // SAFETY: the guards keep every read inside a, b, and the tile indices in range.
+            unsafe {
+                TA[ty * GEMM_TILE + tx] = if row < m && p0 + tx < k { *a.add(row * k + p0 + tx) } else { 0.0f32 as f16 };
+                TB[ty * GEMM_TILE + tx] = if p0 + ty < k && col < n { *b.add((p0 + ty) * n + col) } else { 0.0f32 as f16 };
+            }
+            thread::sync_threads();
+            let mut pp = 0;
+            while pp < GEMM_TILE {
+                // SAFETY: pp < GEMM_TILE and the tile slots hold loaded values.
+                sum += unsafe { TA[ty * GEMM_TILE + pp] } as f32 * unsafe { TB[pp * GEMM_TILE + tx] } as f32;
+                pp += 1;
+            }
+            thread::sync_threads();
+            p0 += GEMM_TILE;
+        }
+        if row < m && col < n {
+            // SAFETY: row < m and col < n.
+            unsafe { *c.add(row * n + col) = sum as f16 };
+        }
+    }
+
+    /// Register-tile GEMM: a 64 x 64 tile in shared memory, and each thread computes a 4 x 4
+    /// block of outputs in 16 registers.
+    ///
+    /// # Safety
+    /// As `gemm_naive_f16`. The block is 16 x 16 threads.
+    #[kernel]
+    pub unsafe fn gemm_regtile_f16(m: u32, n: u32, k: u32, a: *const f16, b: *const f16, c: *mut f16) {
+        static mut RA: SharedArray<f16, { GEMM_RT_TILE * GEMM_RT_TILE }> = SharedArray::UNINIT;
+        static mut RB: SharedArray<f16, { GEMM_RT_TILE * GEMM_RT_TILE }> = SharedArray::UNINIT;
+        let (m, n, k) = (m as usize, n as usize, k as usize);
+        let tx = thread::threadIdx_x() as usize;
+        let ty = thread::threadIdx_y() as usize;
+        let tid = ty * 16 + tx;
+        let row0 = thread::blockIdx_y() as usize * GEMM_RT_TILE;
+        let col0 = thread::blockIdx_x() as usize * GEMM_RT_TILE;
+        let mut acc = [[0.0f32; 4]; 4];
+        let mut p0 = 0usize;
+        while p0 < k {
+            // 4096 tile elements, 256 threads: 16 each, consecutive within a row.
+            let mut i = tid;
+            while i < GEMM_RT_TILE * GEMM_RT_TILE {
+                let r = i / GEMM_RT_TILE;
+                let cc = i % GEMM_RT_TILE;
+                // SAFETY: the guards keep every read inside a and b.
+                unsafe {
+                    RA[i] = if row0 + r < m && p0 + cc < k { *a.add((row0 + r) * k + p0 + cc) } else { 0.0f32 as f16 };
+                    RB[i] = if p0 + r < k && col0 + cc < n { *b.add((p0 + r) * n + col0 + cc) } else { 0.0f32 as f16 };
+                }
+                i += 256;
+            }
+            thread::sync_threads();
+            let mut pp = 0;
+            while pp < GEMM_RT_TILE {
+                // SAFETY: the tile slots hold loaded values.
+                unsafe {
+                    let bv = [
+                        RB[pp * GEMM_RT_TILE + tx * 4] as f32,
+                        RB[pp * GEMM_RT_TILE + tx * 4 + 1] as f32,
+                        RB[pp * GEMM_RT_TILE + tx * 4 + 2] as f32,
+                        RB[pp * GEMM_RT_TILE + tx * 4 + 3] as f32,
+                    ];
+                    let mut r = 0;
+                    while r < 4 {
+                        let av = RA[(ty * 4 + r) * GEMM_RT_TILE + pp] as f32;
+                        acc[r][0] += av * bv[0];
+                        acc[r][1] += av * bv[1];
+                        acc[r][2] += av * bv[2];
+                        acc[r][3] += av * bv[3];
+                        r += 1;
+                    }
+                }
+                pp += 1;
+            }
+            thread::sync_threads();
+            p0 += GEMM_RT_TILE;
+        }
+        // SAFETY: every (row, col) pair below is checked against the matrix edges.
+        unsafe {
+            let mut r = 0;
+            while r < 4 {
+                let row = row0 + ty * 4 + r;
+                if row < m {
+                    let mut j = 0;
+                    while j < 4 {
+                        let col = col0 + tx * 4 + j;
+                        if col < n {
+                            *c.add(row * n + col) = acc[r][j] as f16;
+                        }
+                        j += 1;
+                    }
+                }
+                r += 1;
+            }
         }
     }
 

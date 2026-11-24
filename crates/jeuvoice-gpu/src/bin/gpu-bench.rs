@@ -5,7 +5,9 @@
 use half::f16;
 use jeuvoice_gpu::bench::{Timing, pct_of_memory_limit, pct_of_tensor_limit, time_on_stream};
 use jeuvoice_gpu::blas::{Blas, Op};
-use jeuvoice_gpu::ops::{LayerNormKind, SoftmaxKind, Width, bias_gelu_with, layernorm_with, rmsnorm, rmsnorm_naive, softmax_rows_with};
+use jeuvoice_gpu::ops::{
+    GemmKind, LayerNormKind, SoftmaxKind, Width, bias_gelu_with, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive, softmax_rows_with,
+};
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
 
 /// One row of the table.
@@ -75,6 +77,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ] {
         if name.contains(&filter) {
             rows.push(bench_softmax(&gpu, name, kind, 20 * 1500, 1500)?);
+        }
+    }
+
+    // GEMM lesson rows: the same shape as the cuBLAS row above, for lesson 4.
+    for (name, kind) in [("gemm_naive_f16", GemmKind::Naive), ("gemm_tiled_f16", GemmKind::Tiled), ("gemm_regtile_f16", GemmKind::RegTile)] {
+        if name.contains(&filter) {
+            rows.push(bench_gemm_lesson(&gpu, name, kind, 1500, 1280, 1280)?);
         }
     }
 
@@ -187,7 +196,28 @@ fn bench_softmax(gpu: &Gpu, name: &str, kind: SoftmaxKind, rows: usize, n: usize
     })
 }
 
-fn bench_gemm(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, GpuError> {    let blas = Blas::load(gpu)?;
+/// A lesson GEMM (lesson 4) on the encoder's projection shape.
+fn bench_gemm_lesson(gpu: &Gpu, name: &str, kind: GemmKind, m: usize, n: usize, k: usize) -> Result<Row, GpuError> {
+    let mut plan = ArenaPlan::new();
+    let a = plan.add(DType::F16, &[m, k]);
+    let b = plan.add(DType::F16, &[k, n]);
+    let c = plan.add(DType::F16, &[m, n]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &a, &vec![f16::from_f32(0.01); m * k])?;
+    arena.upload(gpu, &b, &vec![f16::from_f32(0.02); k * n])?;
+    let t = time_on_stream(gpu, 3, 10, || gemm_lesson(gpu, &arena, kind, &a, &b, &c))?;
+    let flops = 2 * (m * n * k) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{m}x{n}x{k}"),
+        t,
+        rate: (flops as f64 / (t.us * 1e-6) / 1e12, "TF/s"),
+        pct: pct_of_tensor_limit(flops, &t, gpu.info()),
+    })
+}
+
+fn bench_gemm(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, GpuError> {
+    let blas = Blas::load(gpu)?;
     let mut plan = ArenaPlan::new();
     let x = plan.add(DType::F16, &[m, k]);
     let w = plan.add(DType::F16, &[n, k]);
