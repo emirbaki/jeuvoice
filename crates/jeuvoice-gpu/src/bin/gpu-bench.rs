@@ -5,7 +5,7 @@
 use half::f16;
 use jeuvoice_gpu::bench::{Timing, pct_of_memory_limit, pct_of_tensor_limit, time_on_stream};
 use jeuvoice_gpu::blas::{Blas, Op};
-use jeuvoice_gpu::ops::{rmsnorm, rmsnorm_naive};
+use jeuvoice_gpu::ops::{Width, bias_gelu_with, rmsnorm, rmsnorm_naive};
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
 
 /// One row of the table.
@@ -45,11 +45,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Element-wise rows: the MLP hidden layer of the encoder, [1500, 5120].
+    for (name, width) in [("bias_gelu_x1", Width::One), ("bias_gelu_x2", Width::Two), ("bias_gelu_x2_b32", Width::TwoPacked)] {
+        if name.contains(&filter) {
+            rows.push(bench_bias_gelu(&gpu, name, width, 1500, 5120)?);
+        }
+    }
+
     println!("{:<20} {:>16} {:>10} {:>14} {:>8}", "kernel", "size", "us", "rate", "% limit");
     for r in &rows {
         println!("{:<20} {:>16} {:>10.1} {:>9.1} {:<4} {:>7.0}%", r.name, r.size, r.t.us, r.rate.0, r.rate.1, r.pct);
     }
     Ok(())
+}
+
+fn bench_bias_gelu(gpu: &Gpu, name: &str, width: Width, rows: usize, d: usize) -> Result<Row, GpuError> {
+    let mut plan = ArenaPlan::new();
+    let x = plan.add(DType::F16, &[rows, d]);
+    let b = plan.add(DType::F16, &[d]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &x, &vec![f16::from_f32(0.25); rows * d])?;
+    arena.upload(gpu, &b, &vec![f16::from_f32(0.0); d])?;
+    let t = time_on_stream(gpu, 3, 50, || bias_gelu_with(gpu, &arena, &x, &b, width))?;
+    // In place: read x once, write x once.
+    let bytes = (2 * rows * d * 2) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{rows}x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
 }
 
 fn bench_rmsnorm(gpu: &Gpu, name: &str, dtype: DType, naive: bool, rows: usize, d: usize) -> Result<Row, GpuError> {

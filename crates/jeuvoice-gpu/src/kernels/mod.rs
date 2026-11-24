@@ -184,4 +184,124 @@ pub mod device {
             c += ROW_BLOCK as usize;
         }
     }
+
+    // ---- Element-wise kernels (lesson 1: docs/cuda-lessons/01-eleman-eleman.md) ----
+
+    /// Exact GELU: `0.5 v (1 + erf(v / sqrt 2))`, as `torch.nn.GELU()` in Whisper.
+    #[device]
+    pub fn gelu(v: f32) -> f32 {
+        0.5 * v * (1.0 + libm::erff(v * core::f32::consts::FRAC_1_SQRT_2))
+    }
+
+    /// In place `x[i] = act(x[i] + bias[i % d])` with one element per thread.
+    /// `act` is GELU when `use_gelu != 0`, else nothing.
+    ///
+    /// # Safety
+    /// `x` is valid for `n` elements and `bias` for `d`. `d > 0`.
+    #[kernel]
+    pub unsafe fn bias_act_f16(x: *mut f16, bias: *const f16, n: usize, d: usize, use_gelu: u32) {
+        let i = thread::index_1d().get();
+        if i >= n {
+            return;
+        }
+        // SAFETY: i < n, and i % d < d.
+        unsafe {
+            let v = *x.add(i) as f32 + *bias.add(i % d) as f32;
+            *x.add(i) = (if use_gelu != 0 { gelu(v) } else { v }) as f16;
+        }
+    }
+
+    /// As `bias_act_f16`, but each thread does two neighbor elements as one `[f16; 2]`.
+    /// This compiles to two 2-byte loads, and the L1 cache merges them with the neighbor
+    /// threads' loads. It is the fastest form here (lesson 1). `n2` and `d2` count pairs.
+    ///
+    /// # Safety
+    /// `x` is valid for `n2` pairs and `bias` for `d2` pairs, both 4-byte aligned. `d2 > 0`.
+    #[kernel]
+    pub unsafe fn bias_act_f16x2(x: *mut [f16; 2], bias: *const [f16; 2], n2: usize, d2: usize, use_gelu: u32) {
+        let i = thread::index_1d().get();
+        if i >= n2 {
+            return;
+        }
+        // SAFETY: i < n2, and i % d2 < d2.
+        unsafe {
+            let p = *x.add(i);
+            let b = *bias.add(i % d2);
+            let mut v0 = p[0] as f32 + b[0] as f32;
+            let mut v1 = p[1] as f32 + b[1] as f32;
+            if use_gelu != 0 {
+                v0 = gelu(v0);
+                v1 = gelu(v1);
+            }
+            *x.add(i) = [v0 as f16, v1 as f16];
+        }
+    }
+
+    /// Lesson variant of `bias_act_f16x2`: the pair is read as one `u32` and split into two
+    /// `f16` values, so the load is one 4-byte `ld.global.b32`. Measured slower than the
+    /// `[f16; 2]` form (lesson 1 explains why). `n2` and `d2` count pairs.
+    ///
+    /// # Safety
+    /// `x` is valid for `n2` pairs and `bias` for `d2` pairs, both 4-byte aligned. `d2 > 0`.
+    #[kernel]
+    pub unsafe fn bias_act_f16x2_b32(x: *mut u32, bias: *const u32, n2: usize, d2: usize, use_gelu: u32) {
+        let i = thread::index_1d().get();
+        if i >= n2 {
+            return;
+        }
+        // SAFETY: i < n2, and i % d2 < d2.
+        unsafe {
+            let (p0, p1) = unpack_f16x2(*x.add(i));
+            let (b0, b1) = unpack_f16x2(*bias.add(i % d2));
+            let mut v0 = p0 + b0;
+            let mut v1 = p1 + b1;
+            if use_gelu != 0 {
+                v0 = gelu(v0);
+                v1 = gelu(v1);
+            }
+            *x.add(i) = pack_f16x2(v0, v1);
+        }
+    }
+
+    /// Two fp16 values in one `u32` (the low 16 bits are the first value) as two f32.
+    #[device]
+    pub fn unpack_f16x2(w: u32) -> (f32, f32) {
+        (f16::from_bits(w as u16) as f32, f16::from_bits((w >> 16) as u16) as f32)
+    }
+
+    /// Two f32 values rounded to fp16 and packed into one `u32` (the first in the low bits).
+    #[device]
+    pub fn pack_f16x2(a: f32, b: f32) -> u32 {
+        (a as f16).to_bits() as u32 | (((b as f16).to_bits() as u32) << 16)
+    }
+
+    /// In place `acc[i] += x[i]`, one element per thread.
+    ///
+    /// # Safety
+    /// Both are valid for `n` elements and do not overlap.
+    #[kernel]
+    pub unsafe fn add_f16(acc: *mut f16, x: *const f16, n: usize) {
+        let i = thread::index_1d().get();
+        if i < n {
+            // SAFETY: i < n.
+            unsafe { *acc.add(i) = (*acc.add(i) as f32 + *x.add(i) as f32) as f16 };
+        }
+    }
+
+    /// In place `acc[i] += x[i]`, two elements per thread with 4-byte loads.
+    ///
+    /// # Safety
+    /// Both are valid for `n2` pairs, 4-byte aligned, and do not overlap.
+    #[kernel]
+    pub unsafe fn add_f16x2(acc: *mut u32, x: *const u32, n2: usize) {
+        let i = thread::index_1d().get();
+        if i < n2 {
+            // SAFETY: i < n2.
+            unsafe {
+                let (a0, a1) = unpack_f16x2(*acc.add(i));
+                let (b0, b1) = unpack_f16x2(*x.add(i));
+                *acc.add(i) = pack_f16x2(a0 + b0, a1 + b1);
+            }
+        }
+    }
 }

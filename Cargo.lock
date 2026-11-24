@@ -2049,6 +2049,7 @@ dependencies = [
  "cuda-host",
  "half",
  "libloading",
+ "libm",
  "safetensors",
  "tempfile",
 ]

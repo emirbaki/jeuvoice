@@ -3,7 +3,9 @@
 
 use cuda_core::LaunchConfig;
 
+mod elementwise;
 mod rmsnorm;
+pub use elementwise::{Width, add_into, add_rows, bias_add, bias_gelu, bias_gelu_with};
 pub use rmsnorm::{rmsnorm, rmsnorm_naive};
 
 use crate::{Arena, DType, Gpu, GpuError, Tensor};
