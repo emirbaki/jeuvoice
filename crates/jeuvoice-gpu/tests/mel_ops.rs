@@ -137,7 +137,8 @@ fn log10_max_floors_and_finds_the_max() {
 #[test]
 fn mel_window_clamps_normalizes_and_transposes() {
     // mel_t [n_len, n_mel] (frames are rows). The window is [n_mel, w] (bands are rows),
-    // with value ((max(v, max - 8)) + 4) / 4. Frames past n_len get the floor value.
+    // with value ((max(v, max - 8)) + 4) / 4. Frames past n_len get 0.0, as whisper.cpp
+    // writes them (it clears the encoder input and copies only the frames below n_len).
     let gpu = Gpu::open(0).unwrap();
     let (n_len, n_mel, w, start) = (50, 4, 20, 40);
     let mel_t: Vec<f32> = (0..n_len * n_mel).map(|i| -12.0 + (i % 17) as f32).collect();
@@ -154,7 +155,10 @@ fn mel_window_clamps_normalizes_and_transposes() {
     let want: Vec<f32> = (0..n_mel * w)
         .map(|i| {
             let (b, t) = (i / w, i % w);
-            let v = if start + t < n_len { mel_t[(start + t) * n_mel + b] } else { floor };
+            if start + t >= n_len {
+                return 0.0;
+            }
+            let v = mel_t[(start + t) * n_mel + b];
             f16::from_f32((v.max(floor) + 4.0) / 4.0).to_f32()
         })
         .collect();
