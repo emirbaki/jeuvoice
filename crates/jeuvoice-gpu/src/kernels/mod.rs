@@ -1195,6 +1195,27 @@ pub mod device {
         unsafe { *col.add(i) = v };
     }
 
+    /// As `im2col_k3_f16`, but `x` is time first: `[t_in, c_in]`, so
+    /// `col[ci * 3 + k][t] = x[t * stride + k - 1][ci]`. The Whisper conv2 reads conv1's
+    /// output in this layout.
+    ///
+    /// # Safety
+    /// As `im2col_k3_f16`.
+    #[kernel]
+    pub unsafe fn im2col_k3_tc_f16(x: *const f16, col: *mut f16, c_in: usize, t_in: usize, t_out: usize, stride: usize) {
+        let i = thread::index_1d().get();
+        if i >= c_in * 3 * t_out {
+            return;
+        }
+        let (r, t) = (i / t_out, i % t_out);
+        let (ci, k) = (r / 3, r % 3);
+        let p = t * stride + k;
+        // SAFETY: ci < c_in, and p - 1 < t_in in the branch that reads.
+        let v = if p >= 1 && p <= t_in { unsafe { *x.add((p - 1) * c_in + ci) } } else { 0.0 as f16 };
+        // SAFETY: i < c_in * 3 * t_out, one thread for each element.
+        unsafe { *col.add(i) = v };
+    }
+
     // ---- The log-mel spectrogram (lesson 7: docs/cuda-lessons/07-mel.md) ----
     // The steps: frames with a Hann window, the DFT as an f32 GEMM (cuBLAS), the power,
     // the mel projection as a second f32 GEMM (cuBLAS), then log10 and the max over the

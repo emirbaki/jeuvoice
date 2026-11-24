@@ -1,7 +1,9 @@
 //! The Whisper GPU path on Rust kernels (`jeuvoice-gpu`). Only with the `cuda-kernels`
 //! feature. Plan 1a builds the encoder. Plan 1b adds the decoder and `CudaWhisper`.
 
+pub mod encoder;
 pub mod mel;
+pub mod weights;
 
 use crate::WhisperError;
 

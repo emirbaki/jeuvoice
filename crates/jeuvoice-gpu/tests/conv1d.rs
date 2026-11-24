@@ -1,7 +1,7 @@
 use half::f16;
 use jeuvoice_gpu::blas::Blas;
 use jeuvoice_gpu::check::{Tol, assert_close};
-use jeuvoice_gpu::ops::{ConvKind, conv1d};
+use jeuvoice_gpu::ops::{ConvKind, Layout, conv1d, conv1d_with_layout};
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu};
 
 fn rnd(n: usize, seed: u32, scale: f32) -> Vec<f32> {
@@ -114,4 +114,52 @@ fn conv1d_whisper_conv1_shape() {
 #[test]
 fn conv1d_whisper_conv2_shape() {
     check_shape(1280, 1280, 3000, 2);
+}
+
+/// Runs `conv1d_with_layout` (Im2col) and returns y in the requested layout.
+#[allow(clippy::too_many_arguments)]
+fn run_layout(gpu: &Gpu, blas: &Blas, x_ct: &[f32], w: &[f32], c_in: usize, c_out: usize, t_in: usize, stride: usize, x_layout: Layout, y_layout: Layout) -> Vec<f32> {
+    let to = t_out(t_in, stride);
+    // The input in the requested layout.
+    let x: Vec<f32> = match x_layout {
+        Layout::ChannelsFirst => x_ct.to_vec(),
+        Layout::TimeFirst => (0..c_in * t_in).map(|i| x_ct[(i % c_in) * t_in + i / c_in]).collect(),
+    };
+    let mut plan = ArenaPlan::new();
+    let tx = plan.add(DType::F16, &match x_layout { Layout::ChannelsFirst => [c_in, t_in], Layout::TimeFirst => [t_in, c_in] });
+    let tw = plan.add(DType::F16, &[c_out, c_in, 3]);
+    let ty = plan.add(DType::F16, &match y_layout { Layout::ChannelsFirst => [c_out, to], Layout::TimeFirst => [to, c_out] });
+    let ts = plan.add(DType::F16, &[c_in * 3, to]);
+    let arena = Arena::new(gpu, &plan).unwrap();
+    arena.upload(gpu, &tx, &h(&x)).unwrap();
+    arena.upload(gpu, &tw, &h(w)).unwrap();
+    conv1d_with_layout(gpu, &arena, blas, &tx, x_layout, &tw, &ty, y_layout, stride, &ts).unwrap();
+    arena.download::<f16>(gpu, &ty).unwrap().iter().map(|v| v.to_f32()).collect()
+}
+
+#[test]
+fn conv1d_layouts_agree() {
+    // The encoder: conv1 reads the mel channels first and writes time first, conv2 reads
+    // and writes time first. Every layout pair gives the same numbers as the CPU.
+    let gpu = Gpu::open(0).unwrap();
+    let blas = Blas::load(&gpu).unwrap();
+    let (c_in, c_out, t_in) = (16, 24, 51);
+    let x = r16(&rnd(c_in * t_in, 43, 1.0));
+    let w = r16(&rnd(c_out * c_in * 3, 44, 0.2));
+    for stride in [1, 2] {
+        let to = t_out(t_in, stride);
+        for x_layout in [Layout::ChannelsFirst, Layout::TimeFirst] {
+            for y_layout in [Layout::ChannelsFirst, Layout::TimeFirst] {
+                let y = run_layout(&gpu, &blas, &x, &w, c_in, c_out, t_in, stride, x_layout, y_layout);
+                let (got, want): (Vec<f32>, Vec<f32>) = (0..c_out * to)
+                    .map(|i| {
+                        let (co, t) = (i / to, i % to);
+                        let g = match y_layout { Layout::ChannelsFirst => y[co * to + t], Layout::TimeFirst => y[t * c_out + co] };
+                        (g, cpu_at(&x, &w, c_in, t_in, stride, co, t))
+                    })
+                    .unzip();
+                assert_close(&format!("conv1d s={stride} {x_layout:?}->{y_layout:?}"), &got, &want, Tol { abs: 1e-2, rel: 1e-2 });
+            }
+        }
+    }
 }

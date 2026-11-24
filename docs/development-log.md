@@ -301,3 +301,28 @@ Consequences:
 - `gemm_tc_f16` (the tensor-core lesson kernel, `mma.sync.aligned.m16n8k8`) is deferred. The ready-made `cuda_device::wmma` mma wrappers need `sm_80` shapes (`m16n8k16`), and the PTX target is `sm_75`. The product path uses cuBLAS, so no product code depends on this.
 - A direct call to the marker (`cuda_device::ptx::__ptx_asm_out_0::<u32, 21, 2, 0>(b"...", b"=r", b"")`) does build in the test profile. A small wrapper macro in `jeuvoice-gpu` is the next thing to try.
 - Watch the cuda-oxide repository for a fix. Patching a fork is the last resort (AGENTS.md rule 1).
+
+### The encoder (plan 1a, Task 10)
+
+`jeuvoice_whisper::cuda::encoder::Encoder` runs the large-v3-turbo encoder on our kernels and cuBLAS. Checked on 2026-11-24 against PyTorch fp32, on the 3 test clips, with the reference mel as input:
+
+| Tap | Max difference | Mean difference | Values out of tolerance |
+|---|---|---|---|
+| conv1, conv2, embed | 0.0020–0.0032 | 0.00002–0.00014 | 0 |
+| block_00, block_15 | 0.0031–0.0113 | 0.00024–0.00035 | 0 |
+| block_31 | 3.09–8.46 | 0.0019–0.0031 | 0.53–0.65% |
+| ln_post | 1.33–2.24 | 0.0030–0.0069 | 0.75–2.06% |
+
+The deep taps are as far from fp32 as **PyTorch itself in fp16** (0.56–0.75% at block_31, 0.75–2.04% at ln_post), with the bad values in the same rows. So the kernels are right, and the difference is fp16 activations through 32 blocks. whisper.cpp keeps activations in f32. If plan 1b misses the word error target, an f32 residual stream is the first thing to try.
+
+| Number | Value |
+|---|---|
+| One 30 s window | 252 ms (about 140 ms of GEMM at cuBLAS speed, about 80 ms of attention) |
+| Weights (f16) | 1214 MB |
+| Activations | 165 MB |
+
+Decisions in this task:
+
+- The weights and the activations share **one arena**, because each op takes one arena for all its tensors. The decoder in plan 1b can join the same arena.
+- The encoder activations are **time first** (`[1500, 1280]`), so each bias runs along the last dimension. `conv1d_with_layout` reads the mel channels first and writes time first. The GEMM computes `colᵀ · wᵀ`, so no transpose kernel runs.
+- Attention uses `AttnKind::Naive` (cuBLAS). `Encoder::set_attention` can choose `Flash` for tests and lessons.
