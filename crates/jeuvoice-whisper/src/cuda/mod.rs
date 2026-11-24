@@ -5,6 +5,7 @@ pub mod decoder;
 pub mod encoder;
 pub mod mel;
 pub mod model;
+pub mod transcriber;
 pub mod weights;
 
 use crate::WhisperError;

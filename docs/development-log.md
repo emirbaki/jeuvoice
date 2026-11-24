@@ -436,3 +436,17 @@ One decoder step reads the whole 133 MB table, so this is the largest single cos
 - Memory: decoder weights 328 MB, decoder activations and caches 53 MB. Encoder and decoder together: 1676 MB. The load and one run use 1714 MB (without the CUDA context).
 - Speed (release, median): one decoder step 2.49 ms (p90 2.6 ms), the cross K/V 3.1 ms per window.
 - The whole model with the window loop on ses_001_0007: all 52 tokens equal whisper-rs (same position and id).
+
+### CudaWhisper (Task 11, 2026-11-25)
+
+`cuda::transcriber::CudaWhisper` is `Send + Sync`: one worker thread owns the GPU objects (`Blas` is not `Send`), and the caller gets the progress and the result over a channel. Every load failure gives `WhisperError::ModelLoad`, also with no GPU (`CUDA_VISIBLE_DEVICES=-1`).
+
+Against the whisper-rs fixtures (release, `--test-threads 1`):
+
+| Clip | Windows (fallbacks) | Tokens same / all | t0, t1 equal | t_dtw difference: median, max | Words ours / whisper-rs |
+|---|---|---|---|---|---|
+| my_voice | 1 (0) | 138 / 138 | all | 0 cs, 2 cs | 43 / 43 |
+| my_voice2 | 2 (0) | 187 / 189 | all of the same | 0 cs, 2 cs | 69 / 70 |
+| ses_001_0007 | 1 (0) | 52 / 52 | all | 0 cs, 2 cs | 20 / 20 |
+
+The 2 different tokens of my_voice2 are one near tie: whisper-rs takes "u" (p 0.517), we take "uy" (p 0.511), and the next token joins the two again ("uyla" against "u ile"). fp16 rounding decides such a tie.
