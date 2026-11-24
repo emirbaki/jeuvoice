@@ -7,3 +7,7 @@ engine/.venv/
 __pycache__/
 .engine-pytest/
 graphify-out/
+# cuda-oxide build outputs (scripts\cargo.cmd oxide puts the PTX in target\oxide-ptx).
+.oxide-artifacts/
+*.ptx
+*.ll

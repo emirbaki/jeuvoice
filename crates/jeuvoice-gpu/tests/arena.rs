@@ -2,6 +2,17 @@ use half::f16;
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
 
 #[test]
+fn offsets_are_256_byte_aligned() {
+    let mut p = ArenaPlan::new();
+    let a = p.add(DType::F16, &[3]); // 6 bytes
+    let b = p.add(DType::F32, &[5, 7]); // 140 bytes
+    assert_eq!(a.offset, 0);
+    assert_eq!(b.offset, 256);
+    assert_eq!(b.strides, vec![7, 1]);
+    assert_eq!(p.total_bytes(), 512);
+}
+
+#[test]
 fn round_trip_f16_f32_i32() {
     let gpu = Gpu::open(0).unwrap();
     let mut plan = ArenaPlan::new();

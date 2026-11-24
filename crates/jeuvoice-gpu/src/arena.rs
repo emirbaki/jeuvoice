@@ -102,20 +102,3 @@ impl Arena {
 fn check(code: sys::CUresult) -> Result<(), cuda_core::DriverError> {
     if code == sys::cudaError_enum_CUDA_SUCCESS { Ok(()) } else { Err(cuda_core::DriverError(code)) }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::DType;
-
-    #[test]
-    fn offsets_are_256_byte_aligned() {
-        let mut p = ArenaPlan::new();
-        let a = p.add(DType::F16, &[3]); // 6 bytes
-        let b = p.add(DType::F32, &[5, 7]); // 140 bytes
-        assert_eq!(a.offset, 0);
-        assert_eq!(b.offset, 256);
-        assert_eq!(b.strides, vec![7, 1]);
-        assert_eq!(p.total_bytes(), 512);
-    }
-}

@@ -7,6 +7,13 @@ description = "GPU base for JeuVoice inference: Rust CUDA kernels (cuda-oxide), 
 
 # Build and test only through the cuda-oxide backend:
 #   scripts\cargo.cmd oxide test -- -p jeuvoice-gpu
+[lib]
+# No unit-test build of the library. cuda-oxide writes the device PTX of a crate to one
+# file per crate name. Cargo builds the lib and the lib test at the same time, so the two
+# builds wrote and read the same file and one failed ("embedded artifact payload is
+# empty"). All tests are in tests/ and use the one library build.
+test = false
+
 [dependencies]
 cuda-core.workspace = true
 cuda-device.workspace = true

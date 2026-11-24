@@ -34,4 +34,16 @@ pub mod device {
             *o = unsafe { *a.add(i) + *b.add(i) };
         }
     }
+
+    /// `out[i] = v` for `n` fp16 elements. `v` comes in as f32 and is rounded to fp16.
+    ///
+    /// # Safety
+    /// `out` is valid for `n` elements.
+    #[kernel]
+    pub unsafe fn fill_f16(out: *mut f16, n: usize, v: f32) {
+        let mut out: DisjointSlice<f16> = unsafe { DisjointSlice::from_raw_parts(out, n) };
+        if let Some(o) = out.get_mut(thread::index_1d()) {
+            *o = v as f16;
+        }
+    }
 }

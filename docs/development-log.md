@@ -220,4 +220,6 @@ Checked on 2026-11-24. With `rust-toolchain.toml` on 1.99.1, `cargo oxide build 
 - **vcvars64.bat sets `VCPKG_ROOT`** to the Visual Studio copy of vcpkg, which has no libffi. The script looks for `ffi.lib` in the usual folders instead.
 - **The backend needs the exact toolchain.** With `channel = "stable"`, cargo-oxide stops with "the cuda-oxide main clone needs Rust 1.99.1".
 - **Arena kernels take raw device pointers.** The synchronous cuda-oxide launch accepts `&DeviceBuffer<T>`, `&mut DeviceBuffer<T>` or raw pointers. An arena tensor is a part of one buffer, so kernels take `*const T` / `*mut T` and a length, and build a `DisjointSlice` inside with `from_raw_parts`.
-- **Known issue:** one test run failed with "embedded artifact payload is empty", and the next runs passed with no change. The likely cause is that cargo builds the lib and the lib test of `jeuvoice-gpu` at the same time. If it comes back, run the command again.
+- **Fixed: "embedded artifact payload is empty".** cuda-oxide writes the PTX of a crate to one file per crate name. Cargo built the `jeuvoice-gpu` lib and its lib test at the same time, so one build read the file while the other rewrote it. `jeuvoice-gpu` now has `[lib] test = false`, and all its tests are in `tests/`.
+- **The PTX folder.** cuda-oxide writes `<crate>.ptx` and `.ll` files to the current folder. `scripts\cargo.cmd oxide` sets `CUDA_OXIDE_PTX_DIR` to `target\oxide-ptx`.
+- **fp16 in kernels** uses the built-in `f16` type with `#![feature(f16)]`, as in the cuda-oxide examples.

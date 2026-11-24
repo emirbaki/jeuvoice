@@ -1,7 +1,12 @@
 //! GPU base for JeuVoice inference. The kernels are Rust, compiled to PTX by cuda-oxide.
 //! Lessons for each kernel are in `docs/cuda-lessons/` (Turkish).
 
+// The built-in `f16` type for device code. It is not stable yet. This crate builds only
+// through `cargo oxide`, as the cuda-oxide f16 examples do.
+#![feature(f16)]
+
 mod arena;
+pub mod blas;
 mod device;
 mod error;
 pub mod kernels;

@@ -85,5 +85,7 @@ if errorlevel 1 (
     echo cargo-oxide was not found. Install it: cargo +1.99.1 install --git https://github.com/NVIDIA/cuda-rust.git cargo-oxide
     exit /b 1
 )
+rem cuda-oxide writes the device PTX and LLVM IR to the current folder unless this is set.
+if not defined CUDA_OXIDE_PTX_DIR set "CUDA_OXIDE_PTX_DIR=%~dp0..\target\oxide-ptx"
 set "PATH=%CUDA_PATH%\bin\x64;%CUDA_PATH%\bin;%LIBCLANG_PATH%;%VCPKG_ROOT%\installed\x64-windows\bin;%PATH%"
 exit /b 0
