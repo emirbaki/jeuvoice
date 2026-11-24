@@ -21,7 +21,8 @@ pub enum SoftmaxKind {
     Registers,
 }
 
-/// In place softmax over the columns of `x` (`[rows, n]`, `F16`).
+/// In place softmax over the last dimension of `x` (`F16`). The leading dimensions flatten
+/// into rows, so `[heads, seq, seq]` works as `heads * seq` rows of `seq`.
 /// `causal_offset = Some(o)` keeps only columns `j <= row + o` and sets the rest to 0.
 pub fn softmax_rows(gpu: &Gpu, arena: &Arena, x: &Tensor, scale: f32, causal_offset: Option<usize>) -> Result<(), GpuError> {
     softmax_rows_with(gpu, arena, x, scale, causal_offset, SoftmaxKind::Registers)
@@ -36,9 +37,10 @@ pub fn softmax_rows_with(
     causal_offset: Option<usize>,
     kind: SoftmaxKind,
 ) -> Result<(), GpuError> {
-    assert_eq!(x.shape().len(), 2, "softmax_rows: x must be [rows, n]");
+    assert!(x.shape().len() >= 2, "softmax_rows: x must be [.., n] with at least two dimensions");
     assert_eq!(x.dtype(), DType::F16, "softmax_rows takes an F16 tensor");
-    let (rows, n) = (x.shape()[0], x.shape()[1]);
+    let n = *x.shape().last().expect("softmax_rows needs at least one dimension");
+    let rows = x.numel() / n;
     if rows == 0 || n == 0 {
         return Ok(());
     }

@@ -13,7 +13,7 @@ Kernel'ler Rust ile yazılır ve NVIDIA'nın **cuda-oxide** derleyicisi onları 
 | 2 | [LayerNorm](02-layernorm.md) | hazır |
 | 3 | [Softmax ve "online softmax"](03-softmax.md) | hazır |
 | 4 | [GEMM: önce cuBLAS, sonra kendi tel döşememiz](04-gemm.md) | hazır |
-| 5 | Attention ve flash attention | Faz 1 |
+| 5 | [Attention ve flash attention](05-attention.md) | hazır |
 | 6 | conv1d | Faz 1 |
 | 7 | Log-mel spektrogram (matris çarpımı olarak STFT) | Faz 1 |
 | 8 | Decoder döngüsü: KV cache, argmax, CUDA Graphs | Faz 1 |

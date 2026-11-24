@@ -1,4 +1,4 @@
-//! The kernel benchmark table. Build and run (release):
+﻿//! The kernel benchmark table. Build and run (release):
 //!   scripts\cargo.cmd oxide build -- -p jeuvoice-gpu --bin gpu-bench --release
 //!   target\release\gpu-bench.exe [name filter]
 
@@ -6,7 +6,8 @@ use half::f16;
 use jeuvoice_gpu::bench::{Timing, pct_of_memory_limit, pct_of_tensor_limit, time_on_stream};
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
-    GemmKind, LayerNormKind, SoftmaxKind, Width, bias_gelu_with, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive, softmax_rows_with,
+    AttnKind, GemmKind, LayerNormKind, SoftmaxKind, Width, attention, bias_gelu_with, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive,
+    softmax_rows_with,
 };
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
 
@@ -84,6 +85,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, kind) in [("gemm_naive_f16", GemmKind::Naive), ("gemm_tiled_f16", GemmKind::Tiled), ("gemm_regtile_f16", GemmKind::RegTile)] {
         if name.contains(&filter) {
             rows.push(bench_gemm_lesson(&gpu, name, kind, 1500, 1280, 1280)?);
+        }
+    }
+
+    // Attention rows: the encoder's attention, 20 heads of 1500 rows.
+    for (name, kind) in [("attention_naive_f16", AttnKind::Naive), ("attention_flash_f16", AttnKind::Flash)] {
+        if name.contains(&filter) {
+            rows.push(bench_attention(&gpu, name, kind, 20, 1500)?);
         }
     }
 
@@ -210,6 +218,31 @@ fn bench_gemm_lesson(gpu: &Gpu, name: &str, kind: GemmKind, m: usize, n: usize, 
     Ok(Row {
         name: name.into(),
         size: format!("{m}x{n}x{k}"),
+        t,
+        rate: (flops as f64 / (t.us * 1e-6) / 1e12, "TF/s"),
+        pct: pct_of_tensor_limit(flops, &t, gpu.info()),
+    })
+}
+
+/// One attention pass over the encoder's shapes: 20 heads of 1500 x 64.
+fn bench_attention(gpu: &Gpu, name: &str, kind: AttnKind, heads: usize, seq: usize) -> Result<Row, GpuError> {
+    let blas = Blas::load(gpu)?;
+    let mut plan = ArenaPlan::new();
+    let q = plan.add(DType::F16, &[heads, seq, 64]);
+    let k = plan.add(DType::F16, &[heads, seq, 64]);
+    let v = plan.add(DType::F16, &[heads, seq, 64]);
+    let out = plan.add(DType::F16, &[heads, seq, 64]);
+    let scratch = plan.add(DType::F16, &[heads, seq, seq]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &q, &vec![f16::from_f32(0.01); heads * seq * 64])?;
+    arena.upload(gpu, &k, &vec![f16::from_f32(0.01); heads * seq * 64])?;
+    arena.upload(gpu, &v, &vec![f16::from_f32(0.01); heads * seq * 64])?;
+    let t = time_on_stream(gpu, 3, 20, || attention(gpu, &arena, &blas, &q, &k, &v, &out, &scratch, kind))?;
+    // Two matrix multiplies: QÂ·K^T and probsÂ·V.
+    let flops = 4 * (heads * seq * seq * 64) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{heads}x{seq}x64"),
         t,
         rate: (flops as f64 / (t.us * 1e-6) / 1e12, "TF/s"),
         pct: pct_of_tensor_limit(flops, &t, gpu.info()),

@@ -15,6 +15,16 @@ pub const MAX_PAIRS_PER_THREAD: usize = 4;
 pub const GEMM_TILE: usize = 16;
 /// The tile of the register-tile GEMM: each thread computes a 4x4 block of outputs.
 pub const GEMM_RT_TILE: usize = 64;
+/// The head width of attention, and one row of the output: one thread per dimension.
+pub const FLASH_D: usize = 64;
+/// The query rows one flash-attention block owns. The K and V tiles are loaded once for all
+/// of them (lesson 5 shows the difference between 1 and 8).
+pub const FLASH_BR: usize = 8;
+/// The number of keys one flash-attention tile keeps in shared memory.
+pub const FLASH_BK: usize = 64;
+/// The shared-memory row stride of the K and V tiles. 66 f16 makes the 32 threads of a
+/// warp read 32 different banks (`t * 33 mod 32 = t`), so the score loop has no conflicts.
+pub const FLASH_LD: usize = FLASH_D + 2;
 const ROW_WARPS: usize = (ROW_BLOCK / 32) as usize;
 
 #[cuda_module]
@@ -878,5 +888,242 @@ pub mod device {
             }
             j += 1;
         }
+    }
+
+    /// The sum of `v` over 64 threads, for the `FLASH_BR` rows of a flash-attention block at
+    /// once: one barrier pair serves all the rows.
+    #[device]
+    pub fn pair_sum8(v: [f32; FLASH_BR]) -> [f32; FLASH_BR] {
+        static mut PAIR_S8: SharedArray<f32, { 2 * FLASH_BR }> = SharedArray::UNINIT;
+        let tid = thread::threadIdx_x() as usize;
+        let mut i = 0;
+        while i < FLASH_BR {
+            let w = warp::reduce_sum_f32(v[i]);
+            if warp::lane_id() == 0 {
+                // SAFETY: only lane 0 of warp 0 and 1 writes, and the slot is inside the array.
+                unsafe { PAIR_S8[(tid / 32) * FLASH_BR + i] = w };
+            }
+            i += 1;
+        }
+        thread::sync_threads();
+        let mut out = [0.0f32; FLASH_BR];
+        let mut i = 0;
+        while i < FLASH_BR {
+            // SAFETY: the barrier above separates these reads from the writes.
+            out[i] = unsafe { PAIR_S8[i] + PAIR_S8[FLASH_BR + i] };
+            i += 1;
+        }
+        thread::sync_threads();
+        out
+    }
+
+    /// The largest of `v` over 64 threads, for the `FLASH_BR` rows at once.
+    #[device]
+    pub fn pair_max8(v: [f32; FLASH_BR]) -> [f32; FLASH_BR] {
+        static mut PAIR_M8: SharedArray<f32, { 2 * FLASH_BR }> = SharedArray::UNINIT;
+        let tid = thread::threadIdx_x() as usize;
+        let mut i = 0;
+        while i < FLASH_BR {
+            let w = warp::reduce_max_f32(v[i]);
+            if warp::lane_id() == 0 {
+                // SAFETY: only lane 0 of warp 0 and 1 writes, and the slot is inside the array.
+                unsafe { PAIR_M8[(tid / 32) * FLASH_BR + i] = w };
+            }
+            i += 1;
+        }
+        thread::sync_threads();
+        let mut out = [f32::NEG_INFINITY; FLASH_BR];
+        let mut i = 0;
+        while i < FLASH_BR {
+            // SAFETY: the barrier above separates these reads from the writes.
+            out[i] = unsafe { PAIR_M8[i].max(PAIR_M8[FLASH_BR + i]) };
+            i += 1;
+        }
+        thread::sync_threads();
+        out
+    }
+
+    // ---- Attention (lesson 5: docs/cuda-lessons/05-attention.md) ----
+
+    /// Flash attention: online softmax, K and V tiles in shared memory, no score matrix in
+    /// DRAM. One block owns `FLASH_BR` query rows of one head. Thread `t` owns dimension `t`
+    /// of every row and key `t` of each score tile.
+    ///
+    /// # Safety
+    /// `q`, `k`, `v` and `out` are `[heads, seq, 64]` f16. The grid is
+    /// `(seq / FLASH_BR rounded up, heads)` and each block has 64 threads.
+    #[kernel]
+    pub unsafe fn flash_attn_f16(q: *const f16, k: *const f16, v: *const f16, out: *mut f16, seq: usize, scale: f32) {
+        static mut SQ: SharedArray<f16, { FLASH_BR * FLASH_D }> = SharedArray::UNINIT;
+        static mut SK: SharedArray<f16, { FLASH_BK * FLASH_LD }> = SharedArray::UNINIT;
+        static mut SV: SharedArray<f16, { FLASH_BK * FLASH_LD }> = SharedArray::UNINIT;
+        static mut SP: SharedArray<f32, { FLASH_BR * FLASH_BK }> = SharedArray::UNINIT;
+        let t = thread::threadIdx_x() as usize;
+        let head = thread::blockIdx_y() as usize;
+        let row0 = thread::blockIdx_x() as usize * FLASH_BR;
+        let head_base = head * seq * FLASH_D;
+        // The q rows of this block go to shared memory: every score needs all 64 dimensions.
+        let mut i = t;
+        while i < FLASH_BR * FLASH_D {
+            let r = i / FLASH_D;
+            let dd = i % FLASH_D;
+            // A row past the end of the sequence keeps q = 0, so its scores stay finite.
+            // SAFETY: the guard keeps the read inside q.
+            unsafe {
+                SQ[i] = if row0 + r < seq { *q.add(head_base + (row0 + r) * FLASH_D + dd) } else { 0.0f32 as f16 };
+            }
+            i += FLASH_D;
+        }
+        let mut acc = [0.0f32; FLASH_BR]; // this thread's dimension, one slot per row
+        let mut m = [f32::NEG_INFINITY; FLASH_BR]; // the running maximum of each row
+        let mut l = [0.0f32; FLASH_BR]; // the running sum of the exponents
+        thread::sync_threads();
+        let mut k0 = 0;
+        while k0 < seq {
+            let n = if seq - k0 < FLASH_BK { seq - k0 } else { FLASH_BK };
+            // Load the K and V tiles. Consecutive threads read consecutive elements.
+            let mut i = t;
+            while i < n * FLASH_D {
+                let jj = i / FLASH_D;
+                let dd = i % FLASH_D;
+                let src = head_base + (k0 + jj) * FLASH_D + dd;
+                // SAFETY: k0 + jj < seq and dd < 64, so both reads are inside the tensors.
+                unsafe {
+                    SK[jj * FLASH_LD + dd] = *k.add(src);
+                    SV[jj * FLASH_LD + dd] = *v.add(src);
+                }
+                i += FLASH_D;
+            }
+            thread::sync_threads();
+            // Thread `t` scores key `t` against all the rows of the block. A thread past the
+            // last key of this tile keeps -inf, so its exponent is 0 and it adds nothing.
+            let mut s = [f32::NEG_INFINITY; FLASH_BR];
+            if t < n {
+                let mut r = 0;
+                while r < FLASH_BR {
+                    // Four partial sums: one dependent chain of 64 adds would wait on every
+                    // shared-memory load (lesson 5 measures this).
+                    let mut dot0 = 0.0f32;
+                    let mut dot1 = 0.0f32;
+                    let mut dot2 = 0.0f32;
+                    let mut dot3 = 0.0f32;
+                    let mut dd = 0;
+                    while dd < FLASH_D {
+                        // SAFETY: r < FLASH_BR, dd + 3 < 64 and t < n, all inside the tiles.
+                        unsafe {
+                            dot0 += (SQ[r * FLASH_D + dd] as f32) * (SK[t * FLASH_LD + dd] as f32);
+                            dot1 += (SQ[r * FLASH_D + dd + 1] as f32) * (SK[t * FLASH_LD + dd + 1] as f32);
+                            dot2 += (SQ[r * FLASH_D + dd + 2] as f32) * (SK[t * FLASH_LD + dd + 2] as f32);
+                            dot3 += (SQ[r * FLASH_D + dd + 3] as f32) * (SK[t * FLASH_LD + dd + 3] as f32);
+                        }
+                        dd += 4;
+                    }
+                    s[r] = (dot0 + dot1 + dot2 + dot3) * scale;
+                    r += 1;
+                }
+            }
+            // Online softmax for every row: the new maximum, the rescale, the new terms.
+            let tile_max = pair_max8(s);
+            let mut m_new = [0.0f32; FLASH_BR];
+            let mut corr = [0.0f32; FLASH_BR];
+            let mut p = [0.0f32; FLASH_BR];
+            let mut r = 0;
+            while r < FLASH_BR {
+                m_new[r] = if tile_max[r] > m[r] { tile_max[r] } else { m[r] };
+                corr[r] = libm::expf(m[r] - m_new[r]);
+                p[r] = libm::expf(s[r] - m_new[r]);
+                r += 1;
+            }
+            let sums = pair_sum8(p);
+            r = 0;
+            while r < FLASH_BR {
+                l[r] = l[r] * corr[r] + sums[r];
+                m[r] = m_new[r];
+                r += 1;
+            }
+            if t < n {
+                let mut r = 0;
+                while r < FLASH_BR {
+                    // SAFETY: r < FLASH_BR and t < n, so the slot is inside SP.
+                    unsafe { SP[r * FLASH_BK + t] = p[r] };
+                    r += 1;
+                }
+            }
+            thread::sync_threads();
+            // Thread `t` owns dimension `t`: rescale the accumulator, then add the tile.
+            let mut r = 0;
+            while r < FLASH_BR {
+                // Four partial sums again, for the same reason.
+                let mut a0 = acc[r] * corr[r];
+                let mut a1 = 0.0f32;
+                let mut a2 = 0.0f32;
+                let mut a3 = 0.0f32;
+                let mut jj = 0;
+                while jj + 4 <= n {
+                    // SAFETY: r < FLASH_BR, jj + 3 < n and t < 64, all inside the tiles.
+                    unsafe {
+                        a0 += (SP[r * FLASH_BK + jj]) * (SV[jj * FLASH_LD + t] as f32);
+                        a1 += (SP[r * FLASH_BK + jj + 1]) * (SV[(jj + 1) * FLASH_LD + t] as f32);
+                        a2 += (SP[r * FLASH_BK + jj + 2]) * (SV[(jj + 2) * FLASH_LD + t] as f32);
+                        a3 += (SP[r * FLASH_BK + jj + 3]) * (SV[(jj + 3) * FLASH_LD + t] as f32);
+                    }
+                    jj += 4;
+                }
+                while jj < n {
+                    // The last tile of a short sequence leaves 0 to 3 keys for this loop.
+                    // SAFETY: jj < n and t < 64, inside the tiles.
+                    a0 += (unsafe { SP[r * FLASH_BK + jj] }) * (unsafe { SV[jj * FLASH_LD + t] } as f32);
+                    jj += 1;
+                }
+                acc[r] = a0 + a1 + a2 + a3;
+                r += 1;
+            }
+            thread::sync_threads();
+            k0 += FLASH_BK;
+        }
+        // Store the rows that exist.
+        let mut r = 0;
+        while r < FLASH_BR {
+            if row0 + r < seq {
+                let inv = 1.0 / l[r];
+                // SAFETY: row0 + r < seq and t < 64, so the write is inside `out`.
+                unsafe { *out.add(head_base + (row0 + r) * FLASH_D + t) = (acc[r] * inv) as f16 };
+            }
+            r += 1;
+        }
+    }
+
+    /// `[seq, heads * 64]` to `[heads, seq, 64]`: one element per thread.
+    ///
+    /// # Safety
+    /// `x` is `[seq, heads * 64]`, `y` is `[heads, seq, 64]`, and `n == seq * heads * 64`.
+    #[kernel]
+    pub unsafe fn split_heads_f16(x: *const f16, y: *mut f16, seq: usize, heads: usize, n: usize) {
+        let i = thread::index_1d().get();
+        if i >= n {
+            return;
+        }
+        let d = i % FLASH_D;
+        let s = (i / FLASH_D) % seq;
+        let h = i / (FLASH_D * seq);
+        // SAFETY: both indices are inside their tensors: i < n, and h, s, d come from i.
+        unsafe { *y.add(i) = *x.add(s * heads * FLASH_D + h * FLASH_D + d) };
+    }
+
+    /// `[heads, seq, 64]` to `[seq, heads * 64]`: the inverse of `split_heads_f16`.
+    ///
+    /// # Safety
+    /// As `split_heads_f16`, with the two tensors swapped.
+    #[kernel]
+    pub unsafe fn merge_heads_f16(y: *const f16, x: *mut f16, seq: usize, heads: usize, n: usize) {
+        let i = thread::index_1d().get();
+        if i >= n {
+            return;
+        }
+        let d = i % FLASH_D;
+        let s = (i / FLASH_D) % seq;
+        let h = i / (FLASH_D * seq);
+        // SAFETY: as in `split_heads_f16`.
+        unsafe { *x.add(s * heads * FLASH_D + h * FLASH_D + d) = *y.add(i) };
     }
 }

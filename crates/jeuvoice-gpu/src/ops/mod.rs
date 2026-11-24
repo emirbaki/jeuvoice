@@ -1,16 +1,18 @@
-//! Host functions that launch one kernel on arena tensors. Each checks shapes and types,
+﻿//! Host functions that launch one kernel on arena tensors. Each checks shapes and types,
 //! picks the launch size, and queues the kernel on the GPU stream (no sync).
 
 use cuda_core::LaunchConfig;
 
+mod attention;
 mod elementwise;
 mod gemm_lesson;
 mod layernorm;
 mod rmsnorm;
 mod softmax;
+pub use attention::{ATTN_SCALE, AttnKind, attention, merge_heads, split_heads};
+pub use elementwise::{Width, add_into, add_rows, bias_add, bias_gelu, bias_gelu_with};
 pub use gemm_lesson::{GemmKind, gemm_lesson};
 pub use layernorm::{LayerNormKind, layernorm, layernorm_with};
-pub use elementwise::{Width, add_into, add_rows, bias_add, bias_gelu, bias_gelu_with};
 pub use rmsnorm::{rmsnorm, rmsnorm_naive};
 pub use softmax::{SoftmaxKind, softmax_rows, softmax_rows_with};
 
