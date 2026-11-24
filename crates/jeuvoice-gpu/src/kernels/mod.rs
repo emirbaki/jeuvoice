@@ -304,4 +304,82 @@ pub mod device {
             }
         }
     }
+
+    // ---- LayerNorm (lesson 2: docs/cuda-lessons/02-layernorm.md) ----
+    // y = (x - mean) / sqrt(var + eps) * gamma + beta, one block of ROW_BLOCK threads per row.
+    // Two-pass: first the mean, then the variance of (x - mean). The one-pass form
+    // E[x²] - E[x]² loses all digits when the mean is large next to the spread.
+
+    /// # Safety
+    /// `x` and `y` are valid for `rows * d`, `gamma` and `beta` for `d`. `y` overlaps none of
+    /// them. The grid has one block per row and `ROW_BLOCK` threads.
+    #[kernel]
+    pub unsafe fn layernorm_f32(x: *const f32, gamma: *const f32, beta: *const f32, y: *mut f32, d: usize, eps: f32) {
+        let base = thread::blockIdx_x() as usize * d;
+        let tid = thread::threadIdx_x() as usize;
+        let step = ROW_BLOCK as usize;
+        // Pass 1: the mean.
+        let mut s = 0.0f32;
+        let mut c = tid;
+        while c < d {
+            // SAFETY: c < d, one block per row.
+            s += unsafe { *x.add(base + c) };
+            c += step;
+        }
+        let mean = block_sum(s) / d as f32;
+        // Pass 2: the variance around the mean. The row is still in the L1 cache.
+        let mut s = 0.0f32;
+        let mut c = tid;
+        while c < d {
+            // SAFETY: as above.
+            let v = unsafe { *x.add(base + c) } - mean;
+            s += v * v;
+            c += step;
+        }
+        let inv = 1.0 / (block_sum(s) / d as f32 + eps).sqrt();
+        // Pass 3: write.
+        let mut c = tid;
+        while c < d {
+            // SAFETY: each (row, c) belongs to one thread.
+            unsafe { *y.add(base + c) = (*x.add(base + c) - mean) * inv * *gamma.add(c) + *beta.add(c) };
+            c += step;
+        }
+    }
+
+    /// `layernorm_f32` for fp16 data: loads fp16, all math in f32, stores fp16.
+    ///
+    /// # Safety
+    /// As `layernorm_f32`.
+    #[kernel]
+    pub unsafe fn layernorm_f16(x: *const f16, gamma: *const f16, beta: *const f16, y: *mut f16, d: usize, eps: f32) {
+        let base = thread::blockIdx_x() as usize * d;
+        let tid = thread::threadIdx_x() as usize;
+        let step = ROW_BLOCK as usize;
+        let mut s = 0.0f32;
+        let mut c = tid;
+        while c < d {
+            // SAFETY: as in `layernorm_f32`.
+            s += unsafe { *x.add(base + c) } as f32;
+            c += step;
+        }
+        let mean = block_sum(s) / d as f32;
+        let mut s = 0.0f32;
+        let mut c = tid;
+        while c < d {
+            // SAFETY: as in `layernorm_f32`.
+            let v = unsafe { *x.add(base + c) } as f32 - mean;
+            s += v * v;
+            c += step;
+        }
+        let inv = 1.0 / (block_sum(s) / d as f32 + eps).sqrt();
+        let mut c = tid;
+        while c < d {
+            // SAFETY: as in `layernorm_f32`.
+            unsafe {
+                let v = (*x.add(base + c) as f32 - mean) * inv * *gamma.add(c) as f32 + *beta.add(c) as f32;
+                *y.add(base + c) = v as f16;
+            }
+            c += step;
+        }
+    }
 }

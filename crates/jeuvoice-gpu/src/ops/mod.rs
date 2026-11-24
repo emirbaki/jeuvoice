@@ -4,7 +4,9 @@
 use cuda_core::LaunchConfig;
 
 mod elementwise;
+mod layernorm;
 mod rmsnorm;
+pub use layernorm::layernorm;
 pub use elementwise::{Width, add_into, add_rows, bias_add, bias_gelu, bias_gelu_with};
 pub use rmsnorm::{rmsnorm, rmsnorm_naive};
 
