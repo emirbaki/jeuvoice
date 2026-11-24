@@ -49,6 +49,7 @@ type GemmStridedBatchedExFn = unsafe extern "C" fn(
 const CUBLAS_OP_N: i32 = 0;
 const CUBLAS_OP_T: i32 = 1;
 const CUDA_R_16F: i32 = 2;
+const CUDA_R_32F: i32 = 0;
 const CUBLAS_COMPUTE_32F: i32 = 68;
 const CUBLAS_GEMM_DEFAULT: i32 = -1;
 
@@ -150,6 +151,43 @@ impl Blas {
                 a.cu_deviceptr() as *const c_void, CUDA_R_16F, dim(lda),
                 (&beta as *const f32).cast(),
                 c.cu_deviceptr() as *mut c_void, CUDA_R_16F, dim(n),
+                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT,
+            )
+        })
+    }
+
+    /// As `gemm_f16`, but f32 in, f32 out and f32 math (no tensor cores on `sm_75`).
+    /// The mel spectrogram uses it: its 80 dB range does not fit the f16 noise floor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn gemm_f32(
+        &self,
+        gpu: &Gpu,
+        a: &DevSlice<'_, f32>,
+        op_a: Op,
+        b: &DevSlice<'_, f32>,
+        op_b: Op,
+        c: &DevSlice<'_, f32>,
+        m: usize,
+        n: usize,
+        k: usize,
+        alpha: f32,
+        beta: f32,
+    ) -> Result<(), GpuError> {
+        let size = |r: usize, c: usize| r.checked_mul(c).unwrap_or_else(|| panic!("gemm_f32: sizes overflow"));
+        assert!(a.len() >= size(m, k) && b.len() >= size(k, n) && c.len() >= size(m, n), "gemm_f32: a buffer is too small");
+        let (lda, ldb) = (stored_cols(op_a, m, k), stored_cols(op_b, k, n));
+        self.bind(gpu)?;
+        // SAFETY: as in `gemm_f16`, with CUDA_R_32F for all three matrices.
+        status("cublasGemmEx", unsafe {
+            (self.gemm_ex)(
+                self.handle,
+                cublas_op(op_b), cublas_op(op_a),
+                dim(n), dim(m), dim(k),
+                (&alpha as *const f32).cast(),
+                b.cu_deviceptr() as *const c_void, CUDA_R_32F, dim(ldb),
+                a.cu_deviceptr() as *const c_void, CUDA_R_32F, dim(lda),
+                (&beta as *const f32).cast(),
+                c.cu_deviceptr() as *mut c_void, CUDA_R_32F, dim(n),
                 CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT,
             )
         })

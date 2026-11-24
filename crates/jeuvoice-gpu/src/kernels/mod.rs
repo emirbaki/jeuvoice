@@ -16,6 +16,8 @@ pub const GEMM_TILE: usize = 16;
 /// The tile of the register-tile GEMM: each thread computes a 4x4 block of outputs.
 pub const GEMM_RT_TILE: usize = 64;
 /// The head width of attention, and one row of the output: one thread per dimension.
+/// Values for each block of `log10_max_f32`: 8 for each of the `ROW_BLOCK` threads.
+pub const LOG_MAX_CHUNK: usize = ROW_BLOCK as usize * 8;
 pub const FLASH_D: usize = 64;
 /// The query rows one flash-attention block owns. The K and V tiles are loaded once for all
 /// of them (lesson 5 shows the difference between 1 and 8).
@@ -156,7 +158,8 @@ pub mod device {
         best
     }
 
-    /// Test only: two `block_sum` calls in one kernel. Thread t adds t, then 2t.    ///
+    /// Test only: two `block_sum` calls in one kernel. Thread t adds t, then 2t.
+    ///
     /// # Safety
     /// One block of `ROW_BLOCK` threads. `out` is valid for 2 elements.
     #[kernel]
@@ -1190,5 +1193,116 @@ pub mod device {
         let v = if p >= 1 && p <= t_in { unsafe { *x.add(ci * t_in + p - 1) } } else { 0.0 as f16 };
         // SAFETY: i < c_in * 3 * t_out, one thread for each element.
         unsafe { *col.add(i) = v };
+    }
+
+    // ---- The log-mel spectrogram (lesson 7: docs/cuda-lessons/07-mel.md) ----
+    // The steps: frames with a Hann window, the DFT as an f32 GEMM (cuBLAS), the power,
+    // the mel projection as a second f32 GEMM (cuBLAS), then log10 and the max over the
+    // whole file, then one 3000-frame window clamped, normalized and transposed to f16.
+
+    /// `frames[i][j] = hann[j] * padded[i * hop + j]`, one thread for each frame value.
+    ///
+    /// # Safety
+    /// `frames` is valid for `n_frames * size`, `hann` for `size`, and `padded` for
+    /// `(n_frames - 1) * hop + size`. `frames` overlaps neither.
+    #[kernel]
+    pub unsafe fn mel_frames_f32(padded: *const f32, hann: *const f32, frames: *mut f32, n_frames: usize, size: usize, hop: usize) {
+        let i = thread::index_1d().get();
+        if i >= n_frames * size {
+            return;
+        }
+        let (f, j) = (i / size, i % size);
+        // SAFETY: f < n_frames and j < size, so f * hop + j is inside `padded`.
+        unsafe { *frames.add(i) = *hann.add(j) * *padded.add(f * hop + j) };
+    }
+
+    /// `power[r][k] = spec[r][k]² + spec[r][bins + k]²` (the real parts first, then the
+    /// imaginary parts, in each row of `spec`).
+    ///
+    /// # Safety
+    /// `spec` is valid for `n * 2 * bins`, `power` for `n * bins`, and they do not overlap.
+    #[kernel]
+    pub unsafe fn power_f32(spec: *const f32, power: *mut f32, n: usize, bins: usize) {
+        let i = thread::index_1d().get();
+        if i >= n * bins {
+            return;
+        }
+        let (r, k) = (i / bins, i % bins);
+        // SAFETY: r < n and k < bins.
+        unsafe {
+            let re = *spec.add(r * 2 * bins + k);
+            let im = *spec.add(r * 2 * bins + bins + k);
+            *power.add(i) = re * re + im * im;
+        }
+    }
+
+    /// Stage 1 of the max: each block takes `LOG_MAX_CHUNK` values, replaces each value
+    /// with `log10(max(v, 1e-10))`, and writes the largest result to `partial[block]`.
+    ///
+    /// # Safety
+    /// `x` is valid for `n`, `partial` for the number of blocks. `ROW_BLOCK` threads.
+    #[kernel]
+    pub unsafe fn log10_max_f32(x: *mut f32, partial: *mut f32, n: usize) {
+        let start = thread::blockIdx_x() as usize * LOG_MAX_CHUNK;
+        let end = if start + LOG_MAX_CHUNK < n { start + LOG_MAX_CHUNK } else { n };
+        let mut best = f32::NEG_INFINITY;
+        let mut i = start + thread::threadIdx_x() as usize;
+        while i < end {
+            // SAFETY: i < n, and one thread writes each value.
+            unsafe {
+                let v = libm::log10f(if *x.add(i) > 1e-10 { *x.add(i) } else { 1e-10 });
+                *x.add(i) = v;
+                best = best.max(v);
+            }
+            i += ROW_BLOCK as usize;
+        }
+        let best = block_max(best);
+        if thread::threadIdx_x() == 0 {
+            // SAFETY: one value for each block.
+            unsafe { *partial.add(thread::blockIdx_x() as usize) = best };
+        }
+    }
+
+    /// Stage 2 of the max: one block reduces `partial` to `out[0]`.
+    ///
+    /// # Safety
+    /// `partial` is valid for `n`, `out` for 1. One block of `ROW_BLOCK` threads.
+    #[kernel]
+    pub unsafe fn max_f32(partial: *const f32, out: *mut f32, n: usize) {
+        let mut best = f32::NEG_INFINITY;
+        let mut i = thread::threadIdx_x() as usize;
+        while i < n {
+            // SAFETY: i < n.
+            best = best.max(unsafe { *partial.add(i) });
+            i += ROW_BLOCK as usize;
+        }
+        let best = block_max(best);
+        if thread::threadIdx_x() == 0 {
+            // SAFETY: `out` has one value.
+            unsafe { *out = best };
+        }
+    }
+
+    /// One window of the normalized mel: `out[b][t] = (max(mel_t[start + t][b], m - 8) + 4) / 4`
+    /// with `m = max[0]`, as f16. A frame past `n_len` gets the floor value `(m - 8 + 4) / 4`.
+    /// `mel_t` has frames as rows. `out` has bands as rows (the Whisper layout).
+    ///
+    /// # Safety
+    /// `mel_t` is valid for `n_len * n_mel`, `max` for 1, `out` for `n_mel * w`.
+    #[kernel]
+    pub unsafe fn mel_window_f16(mel_t: *const f32, max: *const f32, out: *mut f16, n_len: usize, n_mel: usize, start: usize, w: usize) {
+        let i = thread::index_1d().get();
+        if i >= n_mel * w {
+            return;
+        }
+        let (b, t) = (i / w, i % w);
+        // SAFETY: `max` has one value. In the branch that reads `mel_t`, start + t < n_len
+        // and b < n_mel.
+        unsafe {
+            let floor = *max - 8.0;
+            let v = if start + t < n_len { *mel_t.add((start + t) * n_mel + b) } else { floor };
+            let v = if v > floor { v } else { floor };
+            *out.add(i) = ((v + 4.0) / 4.0) as f16;
+        }
     }
 }

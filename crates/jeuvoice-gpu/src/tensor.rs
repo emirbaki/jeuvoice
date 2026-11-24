@@ -134,6 +134,17 @@ impl<T> DevSlice<'_, T> {
         self.len == 0
     }
 
+    /// The `len` elements from element `start`: one part of a tensor, for example one
+    /// chunk of rows for a GEMM.
+    ///
+    /// # Panics
+    /// If the range passes the end of this slice.
+    pub fn range(&self, start: usize, len: usize) -> DevSlice<'_, T> {
+        let end = start.checked_add(len).unwrap_or_else(|| panic!("DevSlice::range: overflow"));
+        assert!(end <= self.len, "DevSlice::range: {start}..{end} passes the end ({})", self.len);
+        DevSlice { ptr: self.ptr + (start * std::mem::size_of::<T>()) as u64, len, _arena: PhantomData }
+    }
+
     /// For a kernel argument that the kernel only reads.
     pub fn as_ptr(&self) -> *const T {
         self.ptr as *const T

@@ -2073,6 +2073,8 @@ dependencies = [
  "directories",
  "half",
  "jeuvoice-core",
+ "jeuvoice-gpu",
+ "safetensors",
  "tempfile",
  "ureq",
  "whisper-rs",

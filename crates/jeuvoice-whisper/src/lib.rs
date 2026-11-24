@@ -1,6 +1,9 @@
 //! Whisper transcription for JeuVoice: a `Transcriber` trait over whisper.cpp
 //! (through `whisper-rs`) that returns words with times.
+#[cfg(feature = "cuda-kernels")]
+pub mod cuda;
 pub mod ggml;
+pub mod mel_cpu;
 mod model;
 mod words;
 

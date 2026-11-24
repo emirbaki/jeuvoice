@@ -10,9 +10,16 @@ whisper-rs.workspace = true
 ureq.workspace = true
 directories.workspace = true
 half.workspace = true
+jeuvoice-gpu = { path = "../jeuvoice-gpu", optional = true }
+
+[features]
+# The Whisper GPU path on Rust kernels (crates/jeuvoice-gpu). Build and test it only with
+# scripts\cargo.cmd oxide ... --features cuda-kernels
+cuda-kernels = ["dep:jeuvoice-gpu"]
 
 [dev-dependencies]
 tempfile.workspace = true
+safetensors.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 whisper-rs = { workspace = true, features = ["cuda"] }
