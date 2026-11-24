@@ -87,5 +87,8 @@ if errorlevel 1 (
 )
 rem cuda-oxide writes the device PTX and LLVM IR to the current folder unless this is set.
 if not defined CUDA_OXIDE_PTX_DIR set "CUDA_OXIDE_PTX_DIR=%~dp0..\target\oxide-ptx"
+rem The release runs on Turing (sm_75), Ampere and Ada cards. The driver compiles PTX only for
+rem its target or newer cards, and the cuda-oxide default is sm_80, so pin sm_75.
+if not defined CUDA_OXIDE_TARGET set "CUDA_OXIDE_TARGET=sm_75"
 set "PATH=%CUDA_PATH%\bin\x64;%CUDA_PATH%\bin;%LIBCLANG_PATH%;%VCPKG_ROOT%\installed\x64-windows\bin;%PATH%"
 exit /b 0

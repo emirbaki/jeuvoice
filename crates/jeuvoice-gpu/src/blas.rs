@@ -122,7 +122,8 @@ impl Blas {
         alpha: f32,
         beta: f32,
     ) -> Result<(), GpuError> {
-        assert!(a.len() >= m * k && b.len() >= k * n && c.len() >= m * n, "gemm_f16: a buffer is too small");
+        let size = |r: usize, c: usize| r.checked_mul(c).unwrap_or_else(|| panic!("gemm_f16: sizes overflow"));
+        assert!(a.len() >= size(m, k) && b.len() >= size(k, n) && c.len() >= size(m, n), "gemm_f16: a buffer is too small");
         let (lda, ldb) = (stored_cols(op_a, m, k), stored_cols(op_b, k, n));
         gpu.ctx().bind_to_thread()?;
         // SAFETY: the sizes are checked above, all three pointers are device memory of the
@@ -166,11 +167,22 @@ impl Blas {
         if batch == 0 {
             return Ok(());
         }
-        let last = batch - 1;
-        assert!(
-            a.len() >= last * stride_a + m * k && b.len() >= last * stride_b + k * n && c.len() >= last * stride_c + m * n,
-            "gemm_f16_batched: a buffer is too small"
+        // Checked math: with wrapping, a huge stride could pass the size check and make
+        // cuBLAS write outside C.
+        let extent = |stride: usize, rows: usize, cols: usize| {
+            (batch - 1).checked_mul(stride).and_then(|v| v.checked_add(rows.checked_mul(cols)?))
+        };
+        fn overflow<T>() -> T {
+            panic!("gemm_f16_batched: sizes overflow")
+        }
+        let (ea, eb, ec) = (
+            extent(stride_a, m, k).unwrap_or_else(overflow::<usize>),
+            extent(stride_b, k, n).unwrap_or_else(overflow::<usize>),
+            extent(stride_c, m, n).unwrap_or_else(overflow::<usize>),
         );
+        assert!(a.len() >= ea && b.len() >= eb && c.len() >= ec, "gemm_f16_batched: a buffer is too small");
+        let stride = |s: usize| i64::try_from(s).unwrap_or_else(|_| overflow());
+        let (stride_a, stride_b, stride_c) = (stride(stride_a), stride(stride_b), stride(stride_c));
         let (lda, ldb) = (stored_cols(op_a, m, k), stored_cols(op_b, k, n));
         gpu.ctx().bind_to_thread()?;
         // SAFETY: as in `gemm_f16`, with the batch extent checked above.
@@ -180,10 +192,10 @@ impl Blas {
                 cublas_op(op_b), cublas_op(op_a),
                 dim(n), dim(m), dim(k),
                 (&alpha as *const f32).cast(),
-                b.cu_deviceptr() as *const c_void, CUDA_R_16F, dim(ldb), stride_b as i64,
-                a.cu_deviceptr() as *const c_void, CUDA_R_16F, dim(lda), stride_a as i64,
+                b.cu_deviceptr() as *const c_void, CUDA_R_16F, dim(ldb), stride_b,
+                a.cu_deviceptr() as *const c_void, CUDA_R_16F, dim(lda), stride_a,
                 (&beta as *const f32).cast(),
-                c.cu_deviceptr() as *mut c_void, CUDA_R_16F, dim(n), stride_c as i64,
+                c.cu_deviceptr() as *mut c_void, CUDA_R_16F, dim(n), stride_c,
                 dim(batch), CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT,
             )
         })

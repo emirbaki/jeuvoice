@@ -240,3 +240,9 @@ Checked on 2026-11-24, release build, RTX 3050 Ti Laptop (limits: 192 GB/s memor
 ### Runs without the CUDA toolkit
 
 `gpu-bench.exe` ran from a folder with only `cublas64_13.dll` and `cublasLt64_13.dll` next to it, with `PATH` set to `C:\Windows\System32;C:\Windows` and no `CUDA_PATH`. All rows ran with the same speed. So the embedded PTX needs only the NVIDIA driver (the driver compiles the PTX for the card on first load), and `--materialize-cubin` is not needed. The installer for Phase 1 needs only the two cuBLAS DLLs, as today.
+
+### Fixes after the branch review
+
+- **PTX target sm_75.** The cuda-oxide default target is sm_80, and the driver compiles PTX only for its target or newer cards. So an RTX 20 or GTX 16 card would open but fail to load the kernels. `scripts\cargo.cmd oxide` now sets `CUDA_OXIDE_TARGET=sm_75`. The test `ptx_targets_turing` checks the built PTX. With sm_75 PTX on the sm_86 card: `rmsnorm_f32` 199.6 µs (88%), `rmsnorm_f16` 98.7 µs (89%).
+- **Checked sizes.** `Tensor` fields are private, and only `ArenaPlan::add` makes a `Tensor`. Sizes, offsets and the batched GEMM extents use checked math, so a huge shape or stride panics with a clear message instead of wrapping to a small size. `Element` is sealed to `half::f16`, `f32` and `i32`.
+- **Workspace-wide commands.** `cargo test --workspace` and `cargo clippy --workspace` include `jeuvoice-gpu`, which builds only through `scripts\cargo.cmd oxide`. Use the default members (`scripts\cargo.cmd test`) for a plain build. Every build also needs GitHub access once, to fetch the pinned `NVIDIA/cuda-rust` commit.

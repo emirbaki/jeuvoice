@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 use cuda_core::DeviceBuffer;
 use cuda_core::sys;
 
-use crate::tensor::{DevSlice, Element, Tensor, row_major_strides};
+use crate::tensor::{DevSlice, Element, Tensor};
 use crate::{DType, Gpu, GpuError};
 
 /// Every tensor starts on a 256-byte boundary, so vector loads and cuBLAS get aligned data.
@@ -27,15 +27,18 @@ impl ArenaPlan {
     }
 
     /// Reserve a row-major tensor and return its description.
+    ///
+    /// # Panics
+    /// "tensor is too large" if the sizes do not fit in `usize`.
     pub fn add(&mut self, dtype: DType, shape: &[usize]) -> Tensor {
-        let offset = self.end.next_multiple_of(ALIGN);
-        let t = Tensor { offset, dtype, shape: shape.to_vec(), strides: row_major_strides(shape) };
-        self.end = offset + t.bytes();
+        let offset = align_up(self.end);
+        let t = Tensor::new(offset, dtype, shape);
+        self.end = offset + t.bytes(); // checked in Tensor::new
         t
     }
 
     pub fn total_bytes(&self) -> usize {
-        self.end.next_multiple_of(ALIGN)
+        align_up(self.end)
     }
 }
 
@@ -63,6 +66,8 @@ impl Arena {
     /// programming errors.
     pub fn slice<T: Element>(&self, t: &Tensor) -> DevSlice<'_, T> {
         assert_eq!(T::DTYPE, t.dtype, "tensor type mismatch");
+        assert!(t.offset % ALIGN == 0, "tensor offset is not aligned");
+        // Tensor::new checked that offset + bytes does not overflow.
         assert!(t.offset + t.bytes() <= self.buf.len(), "tensor is outside this arena");
         DevSlice { ptr: self.buf.cu_deviceptr() + t.offset as u64, len: t.numel(), _arena: PhantomData }
     }
@@ -97,6 +102,14 @@ impl Arena {
         }
         Ok(out)
     }
+}
+
+/// The next multiple of ALIGN.
+///
+/// # Panics
+/// "tensor is too large" when it does not fit in `usize`.
+fn align_up(n: usize) -> usize {
+    n.checked_next_multiple_of(ALIGN).unwrap_or_else(|| panic!("tensor is too large: the arena passes usize::MAX"))
 }
 
 fn check(code: sys::CUresult) -> Result<(), cuda_core::DriverError> {

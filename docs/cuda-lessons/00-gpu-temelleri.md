@@ -60,7 +60,7 @@ RMSNorm gibi bir kernel'de asıl sınır global bellektir. Her değeri bir kez o
 
 GPU, Rust ya da C++ çalıştırmaz. Derleyici kernel'i önce **PTX**'e çevirir. PTX, NVIDIA GPU'ları için bir ara dildir (bir tür GPU assembly'si). Program ilk açıldığında NVIDIA sürücüsü PTX'i kartın kendi makine koduna (SASS) çevirir.
 
-cuda-oxide bu yolu izler: Rust → Rust MIR → Pliron IR → LLVM IR → PTX. `#[cuda_module]` ile işaretli modüldeki `#[kernel]` fonksiyonları PTX'e çevrilir ve PTX programın içine gömülür. Bizim PTX `sm_80` hedefiyle üretilir. Bizim kart `sm_86`'dır ve sürücü PTX'i onun için derler.
+cuda-oxide bu yolu izler: Rust → Rust MIR → Pliron IR → LLVM IR → PTX. `#[cuda_module]` ile işaretli modüldeki `#[kernel]` fonksiyonları PTX'e çevrilir ve PTX programın içine gömülür. Bizim PTX `sm_75` (Turing) hedefiyle üretilir. Sürücü bir PTX'i sadece onun hedefi ya da daha yeni kartlar için derleyebilir. cuda-oxide'ın varsayılanı `sm_80`'dir. O zaman bir RTX 20 serisi kart kernel'leri yükleyemezdi. Bu yüzden `scripts\cargo.cmd` hedefi `CUDA_OXIDE_TARGET=sm_75` ile sabitler. Bizim kart `sm_86`'dır ve sürücü `sm_75` PTX'ini onun için derler. Test `ptx_targets_turing` bunu kontrol eder.
 
 Bunu ölçtük: `gpu-bench.exe`, PATH'te CUDA toolkit olmadan da çalıştı. Kullanıcının bilgisayarında sadece NVIDIA sürücüsü yeterlidir.
 

@@ -6,9 +6,9 @@ fn offsets_are_256_byte_aligned() {
     let mut p = ArenaPlan::new();
     let a = p.add(DType::F16, &[3]); // 6 bytes
     let b = p.add(DType::F32, &[5, 7]); // 140 bytes
-    assert_eq!(a.offset, 0);
-    assert_eq!(b.offset, 256);
-    assert_eq!(b.strides, vec![7, 1]);
+    assert_eq!(a.offset(), 0);
+    assert_eq!(b.offset(), 256);
+    assert_eq!(b.strides(), &[7, 1]);
     assert_eq!(p.total_bytes(), 512);
 }
 
@@ -72,4 +72,12 @@ fn plan_overflow_is_an_error() {
         Err(e) => panic!("wrong error: {e:?}"),
         Ok(_) => panic!("an arena larger than the free memory must be an error"),
     }
+}
+
+#[test]
+#[should_panic(expected = "tensor is too large")]
+fn plan_rejects_a_tensor_too_large() {
+    // 2^62 * 4 elements * 4 bytes does not fit in usize. It must not wrap to a small size.
+    let mut plan = ArenaPlan::new();
+    plan.add(DType::F32, &[usize::MAX / 4, 4]);
 }

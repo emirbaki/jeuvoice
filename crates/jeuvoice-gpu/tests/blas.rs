@@ -179,3 +179,15 @@ fn missing_dll_is_an_error() {
     let r = Blas::load_from(&gpu, Path::new("C:/nope/cublas64_13.dll"));
     assert!(matches!(r, Err(GpuError::Blas(_))), "a missing DLL must be GpuError::Blas");
 }
+
+#[test]
+#[should_panic(expected = "gemm_f16_batched: sizes overflow")]
+fn batched_rejects_overflowing_strides() {
+    // batch 3 with stride 2^63: (batch - 1) * stride wraps. It must not pass the size check.
+    let cs = setup();
+    let mut plan = ArenaPlan::new();
+    let t = plan.add(DType::F16, &[64]);
+    let arena = Arena::new(&cs.gpu, &plan).unwrap();
+    let s = arena.slice(&t);
+    let _ = cs.blas.gemm_f16_batched(&cs.gpu, &s, Op::N, 0, &s, Op::N, 0, &s, 1 << 63, 2, 2, 2, 3, 1.0, 0.0);
+}
