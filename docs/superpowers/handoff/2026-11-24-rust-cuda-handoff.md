@@ -4,10 +4,11 @@ Date: 2026-11-24. Written by the previous agent for the next agent. Read `AGENTS
 
 ## 1. Start here
 
-1. Check out the branch: `git switch rust-cuda-phase1a`. The last commit is `0947f50 feat(gpu): add attention and lesson 5`.
-2. Run the GPU tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-gpu`. Expected: 46 tests pass.
-3. Run the plain tests: `scripts\cargo.cmd test`. Expected: 343 tests pass, with no failures.
-4. Continue with **plan 1a, Task 8** (conv1d, lesson 6). Tasks 1-7 are done.
+1. Check out the branch: `git switch rust-cuda-phase1a`. The last commit is `3e1cd12 fix: close the three Important findings of the Phase 1a review`.
+2. Run the GPU tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-gpu`. Expected: 58 tests pass.
+3. Run the plain tests: `scripts\cargo.cmd test`. Expected: 348 tests pass, with no failures.
+4. Run the Whisper GPU tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-whisper --features cuda-kernels -- --include-ignored --test-threads 1`. Expected: all pass. The first run builds whisper.cpp with CUDA (about 20 minutes).
+5. **Plan 1a is complete and reviewed.** The branch is not merged to `main` yet: the user decides. Continue with section 4.
 
 ## 2. The goal and why
 
@@ -26,7 +27,7 @@ The full design: `docs/superpowers/specs/2026-11-24-rust-cuda-inference-design.m
 | Phase | Content | State |
 |---|---|---|
 | 0. GPU base | toolchain, `jeuvoice-gpu`, cuBLAS, arena, test and bench helpers, RMSNorm, lesson 0 | **done**, merged to `main`, pushed |
-| 1a. Whisper encoder | plan `docs/superpowers/plans/2026-11-24-rust-cuda-phase1a-encoder.md`, 10 tasks | **in progress** on `rust-cuda-phase1a`, Tasks 1-7 done |
+| 1a. Whisper encoder | plan `docs/superpowers/plans/2026-11-24-rust-cuda-phase1a-encoder.md`, 10 tasks | **done and reviewed** on `rust-cuda-phase1a`, not merged |
 | 1b. Whisper decoder | decoder, decoding rules, DTW, `CudaWhisper` in the app, packaging, speed | no plan yet |
 | 2. OmniVoice main model | Qwen3-0.6B backbone, masked iterative decoding, LoRA merge | not started |
 | 3. Audio decoder | DAC decoder of the Higgs Audio v2 tokenizer | not started |
@@ -44,18 +45,17 @@ The full design: `docs/superpowers/specs/2026-11-24-rust-cuda-inference-design.m
 | 5. LayerNorm, lesson 2 | done | `4344d52` |
 | 6. Softmax, lesson 3 | done | `0c885a1` |
 | 7. GEMM lessons and attention, lessons 4-5 | done, tensor-core kernel deferred (see 7) | `d45ca6e`, `0947f50` |
-| 8. conv1d, lesson 6 | open | — |
-| 9. Log-mel, lesson 7 | open | — |
-| 10. The encoder | open | — |
-| Final review of the branch | open | — |
+| 8. conv1d, lesson 6 | done | `6ce1727` |
+| 9. Log-mel, lesson 7 | done | `b6ad128` |
+| 10. The encoder | done | `f714732` |
+| Encoding repair (double-encoded comments, BOMs) | done | `2045375` |
+| Final review of the branch | done: 3 Important fixed, 10 Minor deferred | `3e1cd12` |
 
 ## 4. The next steps, in order
 
-1. **Task 8: conv1d and lesson 6.** Tests first, then `ConvKind::Direct` and `ConvKind::Im2col`, the bench rows, the lesson, one commit.
-2. **Task 9: log-mel and lesson 7.** The CPU port in `jeuvoice-whisper` is the test oracle. It also adds the `cuda-kernels` feature to `jeuvoice-whisper` (the `oxide test -- -p jeuvoice-whisper --features cuda-kernels` command starts to work here).
-3. **Task 10: the encoder.** `cuda::weights`, `cuda::encoder`, the tap comparison against the reference tensors, the timing test. Attention uses `AttnKind::Naive` (see the ruling in section 5).
-4. **Final review** of the branch, then fix the Critical and Important findings with a test each, then merge to `main` only when the user says so.
-5. **Write the Phase 1b plan.** The spec, Phase 1 section, lists what it must cover. Section 8 below lists the facts for it.
+1. **Ask the user to merge `rust-cuda-phase1a` to `main`.** Merge and push only when the user says so.
+2. **Tensor-core task (not in a plan yet).** The user's main goal is learning CUDA, and tensor cores are central to it. Write a small plan for: (a) a `ptx_asm!` wrapper macro over the marker call, so inline PTX builds in the test profile, (b) `gemm_tc_f16` with `mma.sync.aligned.m16n8k8` (`sm_75` form) for lesson 4, (c) a tensor-core flash attention for lesson 5. Measure both against cuBLAS and the naive attention. The product keeps cuBLAS and `AttnKind::Naive` unless a measurement says otherwise.
+3. **Write the Phase 1b plan.** The spec, Phase 1 section, lists what it must cover. Section 8 below lists the facts for it. It must also handle the deferred findings M1 and M6 (section 7).
 
 ## 5. Rulings made so far (decisions not in the plans)
 
@@ -79,6 +79,17 @@ Phase 1a:
 - Task 7: `gemm_lesson` takes the shapes from the tensors, not as `m`, `n`, `k` arguments.
 - Task 7: the tensor-core GEMM is not written yet. `ptx_asm!` does not build in the test profile on rev `5e5c77b` (the template reaches the MIR importer as a temporary, `Move(_3)`), and the ready-made `mma` wrappers in `cuda_device` need `sm_80` shapes. A direct marker call does build. Lesson 4 uses cuBLAS as the tensor-core row. Details in `docs/development-log.md`.
 - Task 7: attention uses `AttnKind::Naive` (2.48 ms). Flash attention measured 26.2 ms at `20 x 1500 x 64`, because two-warp blocks with 20 KB of shared memory reach about 20% occupancy and the math is scalar FMA. Raising the query block from 1 to 8 rows changed nothing: one head of K and V (384 KB) already fits in the 4 MB L2.
+
+Phase 1a, Tasks 8-10 and the review (this agent):
+
+- Task 8: the conv tests compare 2000 random output positions with the CPU (a full CPU conv2 is 7.4 billion multiply-adds). Im2col + cuBLAS is 21-46 times faster than the direct kernel. The encoder uses it.
+- Task 9: the mel covers **the whole file**, as whisper.cpp does (the max for the clamp is over the whole file, not per 30 s window). `GpuMel::compute(samples)` makes the whole mel, and `window_into(start, arena, out)` copies one window into the encoder input.
+- Task 9: the DFT and the mel projection run as **f32** GEMMs (`Blas::gemm_f32`). A later measurement showed that f16 frames would change only 20 of 768,000 values by more than 0.02, so the f16 risk was small. f32 stays, at little cost.
+- Task 9: `GpuMel` works in chunks of 3000 frames, so one hour of audio needs about 194 MB, not 1.7 GB. `DevSlice::range`, the `first`/`count` arguments of `mel_frames`, and a second arena argument of `mel_window` came from this.
+- Task 10: the encoder weights and activations share **one arena**, because each op takes one arena for all its tensors. The decoder in 1b can join it.
+- Task 10: activations are **time first** (`[1500, 1280]`). `conv1d_with_layout` reads the mel channels first and writes time first through `colᵀ · wᵀ`, with no transpose kernel.
+- Task 10: block 31 and `ln_post` differ from PyTorch fp32 for 0.5-2.4% of values. Two hypotheses were tested: fp16 attention scores (rejected: the f32-score flash kernel gave the same error) and fp16 activations (confirmed: PyTorch itself in fp16 gives the same share at the same rows). The test allows the PyTorch fp16 level with a margin. The table is in `crates/jeuvoice-whisper/tests/cuda_encoder.rs`.
+- Review: the attention scale moved into the `Q·Kᵀ` GEMM alpha, so a raw score cannot pass the f16 limit. `GgmlModel::check_gpu_encoder` rejects models that are not large-v3 shaped. `merge_heads` checks its width.
 
 ## 6. Measurements so far (RTX 3050 Ti Laptop, 192 GB/s, 15.2 TFLOP/s fp16)
 
@@ -104,6 +115,13 @@ Phase 1a:
 | `softmax_regs_f16` | 30000x1500 | 993 µs | 94% |
 | `attention_naive_f16` | 20x1500x64 | 2.48 ms | 31% |
 | `attention_flash_f16` | 20x1500x64 | 26.2 ms | 3% |
+| `conv1d_direct_f16` | 1280>1280, t3000, stride 2 | 30.8-43.6 ms | 2-3% |
+| `conv1d_im2col_f16` | 1280>1280, t3000, stride 2 | 942 µs | 103% |
+| `conv1d_im2col_f16` | 128>1280, t3000 | 247 µs | 79% |
+| GPU mel, one 30 s window | upload, compute, download | 3.24 ms | — |
+| CPU mel port (f64, plain DFT) | one 30 s window | 311.8 ms | — |
+| **The encoder** | one 30 s window | **252 ms** | about 140 ms GEMM, 80 ms attention |
+| Encoder memory | weights / activations | 1214 MB / 165 MB | — |
 
 The % column for cuBLAS can pass 100. `DeviceInfo` reports 15.2 TFLOP/s fp16, and the card boosts above that. A first run on an idle GPU reads one step low. Run the table twice.
 
@@ -117,6 +135,15 @@ Deferred review findings (from the Phase 0 review):
 - M7: `scripts\cargo.cmd` picks the CUDA folder by name order (v13.4 before v13.10), drops `!` from PATH entries, and fails with a PATH near 8 KB.
 - M8: `cargo test --workspace` and `cargo clippy --workspace` include `jeuvoice-gpu`, which builds only with `cargo oxide`.
 - M10: `check::compare` ignores NaN in `max_rel` (`assert_close` still fails on NaN).
+
+Deferred from the Phase 1a review (the full list is in the ledger):
+
+- M1: mel frames past the end get the floor value. whisper.cpp writes 0 into the encoder input there. The 30 s tail makes this almost unreachable. Fix it in plan 1b with the window loop.
+- M6: `Blas` holds a raw cuBLAS handle, so it is `!Send` and `!Sync`. `CudaWhisper` must satisfy `Transcriber: Send + Sync`: plan a `Mutex` with an `unsafe impl Send`, or create `Blas` on the worker thread.
+- M7: the other-thread test covers only upload and download. Add a kernel launch and a GEMM.
+- Other minors: two constant doc comments on the wrong item, one rustfmt line, `attention()` reads the shape before it checks the rank, the ggml reader allocates the filter buffer before the size check, lesson 7 has no card-limit part, `reference` makes `safetensors` a production dependency.
+- The fp16 residual stream: if plan 1b misses the word error target, try an f32 residual stream first (whisper.cpp keeps activations in f32).
+- The encoder margin on `ses_001_0007` at `ln_post` is thin: 2.37% against a 2.5% limit.
 
 Found in Phase 1a, Task 7:
 
