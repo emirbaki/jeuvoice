@@ -3,6 +3,9 @@
 
 use cuda_core::LaunchConfig;
 
+mod rmsnorm;
+pub use rmsnorm::{rmsnorm, rmsnorm_naive};
+
 use crate::{Arena, DType, Gpu, GpuError, Tensor};
 
 /// `out = a + b`, element by element. All three are `F32` with the same element count.

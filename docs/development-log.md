@@ -204,7 +204,7 @@ Checked on 2026-11-24. With `rust-toolchain.toml` on 1.99.1, `cargo oxide build 
 |---|---|
 | `scripts\cargo.cmd test` | Plain tests of the default members. No cuda-oxide tools needed. |
 | `scripts\cargo.cmd oxide test -- -p jeuvoice-gpu` | GPU tests through the cuda-oxide backend. |
-| `scripts\cargo.cmd oxide run -- -p jeuvoice-gpu --bin gpu-bench --release` | The kernel benchmark table. |
+| `scripts\cargo.cmd oxide build -- -p jeuvoice-gpu --bin gpu-bench --release`, then `target\release\gpu-bench.exe [filter]` | The kernel benchmark table. (`cargo oxide run` gives the words after `--` to the program, not to cargo.) |
 
 ### Tools for the GPU build (Windows)
 
@@ -223,3 +223,20 @@ Checked on 2026-11-24. With `rust-toolchain.toml` on 1.99.1, `cargo oxide build 
 - **Fixed: "embedded artifact payload is empty".** cuda-oxide writes the PTX of a crate to one file per crate name. Cargo built the `jeuvoice-gpu` lib and its lib test at the same time, so one build read the file while the other rewrote it. `jeuvoice-gpu` now has `[lib] test = false`, and all its tests are in `tests/`.
 - **The PTX folder.** cuda-oxide writes `<crate>.ptx` and `.ll` files to the current folder. `scripts\cargo.cmd oxide` sets `CUDA_OXIDE_PTX_DIR` to `target\oxide-ptx`.
 - **fp16 in kernels** uses the built-in `f16` type with `#![feature(f16)]`, as in the cuda-oxide examples.
+
+### Measured speed (gpu-bench)
+
+Checked on 2026-11-24, release build, RTX 3050 Ti Laptop (limits: 192 GB/s memory, 15.2 TFLOP/s fp16 tensor with fp32 accumulate).
+
+| Kernel | Size | Time | Rate | % of limit |
+|---|---|---|---|---|
+| `gemm_f16` (cuBLAS) | 1500x1280x1280 | 364.0 µs | 13.5 TFLOP/s | 89% |
+| `gemm_f16` (cuBLAS) | 1500x5120x1280 | 1473.3 µs | 13.3 TFLOP/s | 88% |
+| `gemm_f16` (cuBLAS) | 4096x1024x1024 | 594.0 µs | 14.5 TFLOP/s | 95% |
+| `rmsnorm_naive_f32` | 4096x1024 | 932.6 µs | 36.0 GB/s | 19% |
+| `rmsnorm_f32` | 4096x1024 | 192.2 µs | 174.6 GB/s | 91% |
+| `rmsnorm_f16` | 4096x1024 | 98.5 µs | 170.3 GB/s | 89% |
+
+### Runs without the CUDA toolkit
+
+`gpu-bench.exe` ran from a folder with only `cublas64_13.dll` and `cublasLt64_13.dll` next to it, with `PATH` set to `C:\Windows\System32;C:\Windows` and no `CUDA_PATH`. All rows ran with the same speed. So the embedded PTX needs only the NVIDIA driver (the driver compiles the PTX for the card on first load), and `--materialize-cubin` is not needed. The installer for Phase 1 needs only the two cuBLAS DLLs, as today.
