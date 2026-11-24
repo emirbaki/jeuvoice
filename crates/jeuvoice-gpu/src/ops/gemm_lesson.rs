@@ -72,3 +72,15 @@ pub fn gemm_lesson(gpu: &Gpu, arena: &Arena, kind: GemmKind, a: &Tensor, b: &Ten
     }
     Ok(())
 }
+
+/// The tensor-core fragment probe (lessons 4 and 5): `d [16, 8] = a [16, 8] · b [8, 8]` with
+/// one `mma.sync.m16n8k8`. `a` and `b` are `F16`, `d` is `F32`, all row-major.
+pub fn mma_probe(gpu: &Gpu, arena: &Arena, a: &Tensor, b: &Tensor, d: &Tensor) -> Result<(), GpuError> {
+    assert!(a.dtype() == DType::F16 && b.dtype() == DType::F16 && d.dtype() == DType::F32, "mma_probe: a, b are F16 and d is F32");
+    assert!(a.shape() == [16, 8] && b.shape() == [8, 8] && d.shape() == [16, 8], "mma_probe: a [16, 8], b [8, 8], d [16, 8]");
+    let (sa, sb, sd) = (arena.slice::<f16>(a), arena.slice::<f16>(b), arena.slice::<f32>(d));
+    let cfg = LaunchConfig { grid_dim: (1, 1, 1), block_dim: (32, 1, 1), shared_mem_bytes: 0 };
+    // SAFETY: one block of 32 threads, and the shapes are checked above.
+    unsafe { gpu.kernels()?.mma_probe_f16(gpu.stream(), cfg, sa.as_ptr().cast(), sb.as_ptr().cast(), sd.as_mut_ptr()) }?;
+    Ok(())
+}

@@ -1216,6 +1216,46 @@ pub mod device {
         unsafe { *col.add(i) = v };
     }
 
+    // ---- Tensor cores: mma.sync.m16n8k8 (lessons 4 and 5) ----
+    // For lane l: g = l / 4 (the group, 0..7) and t = l % 4 (the thread in the group).
+    // A pair of f16 values packs into one u32, the lower column in the low 16 bits.
+    //   A (16 x 8, row-major):    a[0] = A[g][2t, 2t+1]     a[1] = A[g+8][2t, 2t+1]
+    //   B (8 x 8, column-major):  b    = B[2t, 2t+1][g]
+    //   C, D (16 x 8, f32):       c[0], c[1] = C[g][2t, 2t+1]   c[2], c[3] = C[g+8][2t, 2t+1]
+
+    /// Two f16 values in one `u32`, `lo` in the low 16 bits.
+    #[device]
+    pub fn pack_h2(lo: f16, hi: f16) -> u32 {
+        lo.to_bits() as u32 | ((hi.to_bits() as u32) << 16)
+    }
+
+    /// The fragment probe: one warp computes `D [16, 8] = A [16, 8] · B [8, 8]` with one
+    /// `mma.sync.m16n8k8`. Each lane reads its fragment values from global memory by the
+    /// table above, so a wrong table gives a wrong result. A and B are row-major.
+    ///
+    /// # Safety
+    /// One block of exactly 32 threads. `a` is valid for 128 values, `b` for 64, `d` for 128.
+    #[kernel]
+    pub unsafe fn mma_probe_f16(a: *const f16, b: *const f16, d: *mut f32) {
+        let lane = thread::threadIdx_x() as usize;
+        let (g, t) = (lane / 4, lane % 4);
+        // SAFETY: g < 8 and 2t + 1 < 8, so every index is inside A (16 x 8) and B (8 x 8).
+        // All 32 lanes reach the mma call: there is no branch before it.
+        unsafe {
+            let fa = [
+                pack_h2(*a.add(g * 8 + 2 * t), *a.add(g * 8 + 2 * t + 1)),
+                pack_h2(*a.add((g + 8) * 8 + 2 * t), *a.add((g + 8) * 8 + 2 * t + 1)),
+            ];
+            // B is row-major in memory: B[k][n] = b[k * 8 + n]. The fragment wants column g.
+            let fb = pack_h2(*b.add(2 * t * 8 + g), *b.add((2 * t + 1) * 8 + g));
+            let c = cuda_device::wmma::mma_m16n8k8_f32_f16([0.0; 4], fa, fb);
+            *d.add(g * 8 + 2 * t) = c[0];
+            *d.add(g * 8 + 2 * t + 1) = c[1];
+            *d.add((g + 8) * 8 + 2 * t) = c[2];
+            *d.add((g + 8) * 8 + 2 * t + 1) = c[3];
+        }
+    }
+
     // ---- The log-mel spectrogram (lesson 7: docs/cuda-lessons/07-mel.md) ----
     // The steps: frames with a Hann window, the DFT as an f32 GEMM (cuBLAS), the power,
     // the mel projection as a second f32 GEMM (cuBLAS), then log10 and the max over the

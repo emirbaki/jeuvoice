@@ -14,7 +14,7 @@ mod softmax;
 pub use attention::{ATTN_SCALE, AttnKind, attention, merge_heads, split_heads};
 pub use conv1d::{ConvKind, Layout, conv1d, conv1d_with_layout};
 pub use elementwise::{Width, add_into, add_rows, bias_add, bias_gelu, bias_gelu_with};
-pub use gemm_lesson::{GemmKind, gemm_lesson};
+pub use gemm_lesson::{GemmKind, gemm_lesson, mma_probe};
 pub use mel::{log10_max, log10_max_partials, mel_frames, mel_window, power_spectrum};
 pub use layernorm::{LayerNormKind, layernorm, layernorm_with};
 pub use rmsnorm::{rmsnorm, rmsnorm_naive};
