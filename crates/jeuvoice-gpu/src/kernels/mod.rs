@@ -15,6 +15,15 @@ pub const MAX_PAIRS_PER_THREAD: usize = 4;
 pub const GEMM_TILE: usize = 16;
 /// The tile of the register-tile GEMM: each thread computes a 4x4 block of outputs.
 pub const GEMM_RT_TILE: usize = 64;
+/// The tensor-core GEMM: block tile rows and columns, the k step, and the threads.
+pub const TC_BM: usize = 64;
+pub const TC_BN: usize = 64;
+pub const TC_BK: usize = 32;
+pub const TC_THREADS: u32 = 128;
+/// Shared row strides with 8 halfs of padding: 80 and 144 bytes, both multiples of 16
+/// (ldmatrix rows), and the padding moves each row to other memory banks.
+const TC_LDA: usize = TC_BK + 8;
+const TC_LDB: usize = TC_BN + 8;
 /// The head width of attention, and one row of the output: one thread per dimension.
 /// Values for each block of `log10_max_f32`: 8 for each of the `ROW_BLOCK` threads.
 pub const LOG_MAX_CHUNK: usize = ROW_BLOCK as usize * 8;
@@ -28,6 +37,13 @@ pub const FLASH_BK: usize = 64;
 /// warp read 32 different banks (`t * 33 mod 32 = t`), so the score loop has no conflicts.
 pub const FLASH_LD: usize = FLASH_D + 2;
 const ROW_WARPS: usize = (ROW_BLOCK / 32) as usize;
+
+/// 16 bytes (8 f16 values) with 16-byte alignment. The width of a load comes from the
+/// alignment of the element type: a plain `[u32; 4]` (4-byte aligned) compiles to four
+/// 4-byte loads, this type to one 16-byte load (lesson 4).
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub struct Q16(pub [u32; 4]);
 
 #[cuda_module]
 pub mod device {
@@ -1253,6 +1269,262 @@ pub mod device {
             *d.add(g * 8 + 2 * t + 1) = c[1];
             *d.add((g + 8) * 8 + 2 * t) = c[2];
             *d.add((g + 8) * 8 + 2 * t + 1) = c[3];
+        }
+    }
+
+    /// The tensor-core GEMM (lesson 4): row-major `C [m, n] = A [m, k] · B [k, n]`, f16 in
+    /// and out, f32 accumulate, with `mma.sync.m16n8k8`.
+    ///
+    /// One block of `TC_THREADS` (4 warps) computes a `TC_BM x TC_BN` tile of C. The 4 warps
+    /// are 2 x 2, and each warp computes 32 x 32: 2 row tiles of 16 times 4 column tiles of 8,
+    /// so 8 accumulators of 4 f32 registers. For each k step of `TC_BK`, the block copies an
+    /// A tile and a B tile to shared memory (zeros past the edges), then each warp loads its
+    /// fragments with `ldmatrix` and runs 4 x 8 `mma` calls.
+    ///
+    /// # Safety
+    /// `a` is valid for `m * k`, `b` for `k * n`, `c` for `m * n`, and `c` overlaps neither.
+    /// The grid is `(ceil(n / TC_BN), ceil(m / TC_BM))` with `TC_THREADS` threads.
+    #[kernel]
+    pub unsafe fn gemm_tc_f16(m: u32, n: u32, k: u32, a: *const f16, b: *const f16, c: *mut f16) {
+        static mut SA: SharedArray<f16, { TC_BM * TC_LDA }, 16> = SharedArray::UNINIT;
+        static mut SB: SharedArray<f16, { TC_BK * TC_LDB }, 16> = SharedArray::UNINIT;
+        let (m, n, k) = (m as usize, n as usize, k as usize);
+        let tid = thread::threadIdx_x() as usize;
+        let lane = tid % 32;
+        let (wm, wn) = ((tid / 32) / 2, (tid / 32) % 2);
+        let bm0 = thread::blockIdx_y() as usize * TC_BM;
+        let bn0 = thread::blockIdx_x() as usize * TC_BN;
+        // SAFETY: a raw pointer to the shared tiles (no reference to the statics).
+        let (sa, sb) = unsafe { ((*(&raw const SA)).as_ptr(), (*(&raw const SB)).as_ptr()) };
+
+        let mut acc = [[0.0f32; 4]; 8];
+        let mut k0 = 0;
+        while k0 < k {
+            // Copy the tiles. Neighbor threads read neighbor columns (coalesced).
+            let mut i = tid;
+            while i < TC_BM * TC_BK {
+                let (r, col) = (i / TC_BK, i % TC_BK);
+                let (gr, gc) = (bm0 + r, k0 + col);
+                // SAFETY: the read is inside A (checked), the write is inside SA.
+                unsafe { SA[r * TC_LDA + col] = if gr < m && gc < k { *a.add(gr * k + gc) } else { 0.0 as f16 } };
+                i += TC_THREADS as usize;
+            }
+            let mut i = tid;
+            while i < TC_BK * TC_BN {
+                let (r, col) = (i / TC_BN, i % TC_BN);
+                let (gr, gc) = (k0 + r, bn0 + col);
+                // SAFETY: the read is inside B (checked), the write is inside SB.
+                unsafe { SB[r * TC_LDB + col] = if gr < k && gc < n { *b.add(gr * n + gc) } else { 0.0 as f16 } };
+                i += TC_THREADS as usize;
+            }
+            thread::sync_threads();
+
+            let mut ks = 0;
+            while ks < TC_BK {
+                // A fragments: ldmatrix.x2. Lanes 0-15 give the 16 row addresses of a 16 x 8
+                // tile (rows 0-7 make the first 8 x 8 matrix, rows 8-15 the second). Lanes
+                // 16-31 repeat them: on sm_75 every lane must give a valid address.
+                let mut fa = [[0u32; 2]; 2];
+                let mut mi = 0;
+                while mi < 2 {
+                    let row = wm * 32 + mi * 16 + (lane % 16);
+                    // SAFETY: row < TC_BM and ks + 8 <= TC_BK, so the 16-byte row is inside
+                    // SA. Every lane reaches this call.
+                    fa[mi] = unsafe { cuda_device::wmma::ldmatrix_x2(sa.add(row * TC_LDA + ks) as *const u32) };
+                    mi += 1;
+                }
+                // B fragments: ldmatrix.x4.trans loads four 8 x 8 matrices: lanes 8j..8j+7 give
+                // the k rows of column tile j. .trans gives each lane B[2t, 2t+1][g].
+                let krow = ks + (lane % 8);
+                let col = wn * 32 + (lane / 8) * 8;
+                // SAFETY: krow < TC_BK and col + 8 <= TC_BN, so the row is inside SB.
+                let fb = unsafe { cuda_device::wmma::ldmatrix_x4_trans(sb.add(krow * TC_LDB + col) as *const u32) };
+                let mut mi = 0;
+                while mi < 2 {
+                    let mut ni = 0;
+                    while ni < 4 {
+                        // SAFETY: all 32 lanes run this call with their own fragments.
+                        acc[mi * 4 + ni] = unsafe { cuda_device::wmma::mma_m16n8k8_f32_f16(acc[mi * 4 + ni], fa[mi], fb[ni]) };
+                        ni += 1;
+                    }
+                    mi += 1;
+                }
+                ks += 8;
+            }
+            // The next copy overwrites the tiles: wait until every warp is done with them.
+            thread::sync_threads();
+            k0 += TC_BK;
+        }
+
+        // Write C by the accumulator layout: c[0], c[1] at row g, c[2], c[3] at row g + 8.
+        let (g, t) = (lane / 4, lane % 4);
+        let mut mi = 0;
+        while mi < 2 {
+            let mut ni = 0;
+            while ni < 4 {
+                let r0 = bm0 + wm * 32 + mi * 16 + g;
+                let c0 = bn0 + wn * 32 + ni * 8 + 2 * t;
+                let v = acc[mi * 4 + ni];
+                let mut h = 0;
+                while h < 2 {
+                    let r = r0 + h * 8;
+                    let mut j = 0;
+                    while j < 2 {
+                        if r < m && c0 + j < n {
+                            // SAFETY: inside C (checked), and each output has one owner lane.
+                            unsafe { *c.add(r * n + c0 + j) = v[h * 2 + j] as f16 };
+                        }
+                        j += 1;
+                    }
+                    h += 1;
+                }
+                ni += 1;
+            }
+            mi += 1;
+        }
+    }
+
+    /// 8 f16 values of a row from global memory, as four `u32`: one 16-byte load when the
+    /// whole chunk is inside the row and 16-byte aligned, else 8 checked 2-byte loads (zeros
+    /// past the edge). `row_ok` is false for a row past the matrix.
+    ///
+    /// # Safety
+    /// For `row_ok`, `p` points at element `col` of a row that holds `cols` values.
+    #[device]
+    pub unsafe fn load_chunk8(p: *const f16, row_ok: bool, col: usize, cols: usize) -> Q16 {
+        if row_ok && col + 8 <= cols && (p as usize) % 16 == 0 {
+            // SAFETY: the 8 values are inside the row, and the address is 16-byte aligned.
+            return unsafe { *(p as *const Q16) };
+        }
+        let mut h = [0.0 as f16; 8];
+        let mut j = 0;
+        while j < 8 {
+            if row_ok && col + j < cols {
+                // SAFETY: col + j < cols, inside the row.
+                h[j] = unsafe { *p.add(j) };
+            }
+            j += 1;
+        }
+        Q16([pack_h2(h[0], h[1]), pack_h2(h[2], h[3]), pack_h2(h[4], h[5]), pack_h2(h[6], h[7])])
+    }
+
+    /// `gemm_tc_f16` with two changes for lesson 4, one at a time:
+    /// - the tile copy reads 16 bytes (8 halfs) per load (`load_chunk8`), not 2 bytes;
+    /// - with `prefetch != 0`, the loads of the next k tile go into registers before the
+    ///   mma loop, so they are in flight while the tensor cores work on the current tile.
+    ///
+    /// # Safety
+    /// As `gemm_tc_f16`.
+    #[kernel]
+    pub unsafe fn gemm_tc2_f16(m: u32, n: u32, k: u32, a: *const f16, b: *const f16, c: *mut f16, prefetch: u32) {
+        static mut SA2: SharedArray<f16, { TC_BM * TC_LDA }, 16> = SharedArray::UNINIT;
+        static mut SB2: SharedArray<f16, { TC_BK * TC_LDB }, 16> = SharedArray::UNINIT;
+        let (m, n, k) = (m as usize, n as usize, k as usize);
+        let tid = thread::threadIdx_x() as usize;
+        let lane = tid % 32;
+        let (wm, wn) = ((tid / 32) / 2, (tid / 32) % 2);
+        let bm0 = thread::blockIdx_y() as usize * TC_BM;
+        let bn0 = thread::blockIdx_x() as usize * TC_BN;
+        // SAFETY: raw pointers to the shared tiles (no reference to the statics).
+        let (sa, sb) = unsafe { ((*(&raw mut SA2)).as_mut_ptr(), (*(&raw mut SB2)).as_mut_ptr()) };
+        // Each thread copies 2 chunks of A (64 rows x 4 chunks) and 2 of B (32 rows x 8 chunks).
+        let a_chunk = |q: usize, k0: usize| -> Q16 {
+            let (r, c8) = (q / 4, (q % 4) * 8);
+            let (gr, gc) = (bm0 + r, k0 + c8);
+            // SAFETY: load_chunk8 reads only inside row gr of A, and only when gr < m.
+            unsafe { load_chunk8(a.wrapping_add(gr * k + gc), gr < m, gc, k) }
+        };
+        let b_chunk = |q: usize, k0: usize| -> Q16 {
+            let (r, c8) = (q / 8, (q % 8) * 8);
+            let (gr, gc) = (k0 + r, bn0 + c8);
+            // SAFETY: load_chunk8 reads only inside row gr of B, and only when gr < k.
+            unsafe { load_chunk8(b.wrapping_add(gr * n + gc), gr < k, gc, n) }
+        };
+        let (q0, q1) = (tid, tid + TC_THREADS as usize);
+        let mut ra = [a_chunk(q0, 0), a_chunk(q1, 0)];
+        let mut rb = [b_chunk(q0, 0), b_chunk(q1, 0)];
+
+        let mut acc = [[0.0f32; 4]; 8];
+        let mut k0 = 0;
+        while k0 < k {
+            if prefetch == 0 && k0 > 0 {
+                ra = [a_chunk(q0, k0), a_chunk(q1, k0)];
+                rb = [b_chunk(q0, k0), b_chunk(q1, k0)];
+            }
+            // Registers to shared memory, 16 bytes per store. The row strides are multiples
+            // of 16 bytes, and each chunk starts at a multiple of 8 halfs.
+            let mut i = 0;
+            while i < 2 {
+                let q = tid + i * TC_THREADS as usize;
+                // SAFETY: the A chunk (row q / 4) and the B chunk (row q / 8) are inside SA2
+                // and SB2, 16-byte aligned.
+                unsafe {
+                    *(sa.add((q / 4) * TC_LDA + (q % 4) * 8) as *mut Q16) = ra[i];
+                    *(sb.add((q / 8) * TC_LDB + (q % 8) * 8) as *mut Q16) = rb[i];
+                }
+                i += 1;
+            }
+            thread::sync_threads();
+            if prefetch != 0 && k0 + TC_BK < k {
+                // The next tile: these loads run while the mma loop below works.
+                ra = [a_chunk(q0, k0 + TC_BK), a_chunk(q1, k0 + TC_BK)];
+                rb = [b_chunk(q0, k0 + TC_BK), b_chunk(q1, k0 + TC_BK)];
+            }
+
+            let mut ks = 0;
+            while ks < TC_BK {
+                let mut fa = [[0u32; 2]; 2];
+                let mut mi = 0;
+                while mi < 2 {
+                    let row = wm * 32 + mi * 16 + (lane % 16);
+                    // SAFETY: as in `gemm_tc_f16`.
+                    fa[mi] = unsafe { cuda_device::wmma::ldmatrix_x2(sa.add(row * TC_LDA + ks) as *const u32) };
+                    mi += 1;
+                }
+                let krow = ks + (lane % 8);
+                let col = wn * 32 + (lane / 8) * 8;
+                // SAFETY: as in `gemm_tc_f16`.
+                let fb = unsafe { cuda_device::wmma::ldmatrix_x4_trans(sb.add(krow * TC_LDB + col) as *const u32) };
+                let mut mi = 0;
+                while mi < 2 {
+                    let mut ni = 0;
+                    while ni < 4 {
+                        // SAFETY: all 32 lanes run this call with their own fragments.
+                        acc[mi * 4 + ni] = unsafe { cuda_device::wmma::mma_m16n8k8_f32_f16(acc[mi * 4 + ni], fa[mi], fb[ni]) };
+                        ni += 1;
+                    }
+                    mi += 1;
+                }
+                ks += 8;
+            }
+            thread::sync_threads();
+            k0 += TC_BK;
+        }
+
+        let (g, t) = (lane / 4, lane % 4);
+        let mut mi = 0;
+        while mi < 2 {
+            let mut ni = 0;
+            while ni < 4 {
+                let r0 = bm0 + wm * 32 + mi * 16 + g;
+                let c0 = bn0 + wn * 32 + ni * 8 + 2 * t;
+                let v = acc[mi * 4 + ni];
+                let mut h = 0;
+                while h < 2 {
+                    let r = r0 + h * 8;
+                    let mut j = 0;
+                    while j < 2 {
+                        if r < m && c0 + j < n {
+                            // SAFETY: inside C (checked), and each output has one owner lane.
+                            unsafe { *c.add(r * n + c0 + j) = v[h * 2 + j] as f16 };
+                        }
+                        j += 1;
+                    }
+                    h += 1;
+                }
+                ni += 1;
+            }
+            mi += 1;
         }
     }
 

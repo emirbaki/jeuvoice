@@ -326,3 +326,20 @@ Decisions in this task:
 - The weights and the activations share **one arena**, because each op takes one arena for all its tensors. The decoder in plan 1b can join the same arena.
 - The encoder activations are **time first** (`[1500, 1280]`), so each bias runs along the last dimension. `conv1d_with_layout` reads the mel channels first and writes time first. The GEMM computes `colᵀ · wᵀ`, so no transpose kernel runs.
 - Attention uses `AttnKind::Naive` (cuBLAS). `Encoder::set_attention` can choose `Flash` for tests and lessons.
+
+## Status (Rust CUDA, tensor cores)
+
+Plan: `docs/superpowers/plans/2026-11-24-rust-cuda-tensor-cores.md`.
+
+- **The `ptx_asm!` problem no longer blocks the tensor cores.** cuda-oxide generates `cuda_device::wmma::mma_m16n8k8_f32_f16` ("PTX 6.5 and sm_75+") and `ldmatrix_x1/x2/x4` with `_trans`. The kernels call them directly. The `ptx_asm!` test-profile bug is still there for other inline PTX.
+- **Load width comes from the type alignment.** A `[u32; 4]` load compiles to four `ld.global.b32`. A `#[repr(C, align(16))]` type (`kernels::Q16`) compiles to one `ld.global.v4`.
+
+| Kernel (1500 x 1280 x 1280) | Time | Rate |
+|---|---|---|
+| `gemm_regtile_f16` (SIMT) | 2533 µs | 1.9 TFLOP/s |
+| `gemm_tc_f16` (v1, 2-byte tile copy) | 658–662 µs | 7.4 TFLOP/s |
+| `gemm_tc_vec_f16` (v2, 16-byte tile copy) | 384–394 µs | 12.5–12.8 TFLOP/s |
+| `gemm_tc_pre_f16` (v3, v2 + register prefetch) | 379–381 µs | 12.9–13.0 TFLOP/s |
+| cuBLAS | 287–364 µs | 13.5–17.1 TFLOP/s |
+
+The product keeps cuBLAS for GEMM.

@@ -82,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // GEMM lesson rows: the same shape as the cuBLAS row above, for lesson 4.
-    for (name, kind) in [("gemm_naive_f16", GemmKind::Naive), ("gemm_tiled_f16", GemmKind::Tiled), ("gemm_regtile_f16", GemmKind::RegTile)] {
+    for (name, kind) in [("gemm_naive_f16", GemmKind::Naive), ("gemm_tiled_f16", GemmKind::Tiled), ("gemm_regtile_f16", GemmKind::RegTile), ("gemm_tc_f16", GemmKind::TensorCore), ("gemm_tc_vec_f16", GemmKind::TensorCoreVec), ("gemm_tc_pre_f16", GemmKind::TensorCorePrefetch)] {
         if name.contains(&filter) {
             rows.push(bench_gemm_lesson(&gpu, name, kind, 1500, 1280, 1280)?);
         }

@@ -1,4 +1,4 @@
-# Ders 4: GEMM (matris çarpımı) — cuBLAS neden bizden 9 kat hızlı?
+# Ders 4: GEMM (matris çarpımı) — cuBLAS neden hızlı, ve tensor core ile ona nasıl yaklaşırız?
 
 Whisper encoder'ının işinin neredeyse tamamı matris çarpımıdır. Bu derste aynı çarpımı üç kez yazıyoruz: önce saf hâliyle, sonra shared memory ile, sonra register bloklarıyla. Her adımda ölçüyoruz. Sonunda cuBLAS'ın neden bu kadar önde olduğunu görüyoruz: **tensor core**lar.
 
@@ -111,7 +111,62 @@ mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32   // sm_75 (Turing) ve sonrası
 
 Bir warp, 16×8 × 8×8'lik bir çarpımı **tek komutta** yapar: 16·8·8 = 1024 çarpma-toplama. Aynı işi normal FMA birimleriyle yapmak 32 thread × 32 FMA = 32 komut sürer. Yani tensor core kaba bir hesapla 32 kat, gerçekte saat başına ~8-16 kat daha hızlıdır. Kartın "15,2 TFLOP/s fp16 tensor" değeri buradan gelir; normal fp32 FMA birimlerinin teorik sınırı 20 SM × 128 çekirdek × 1,76 GHz × 2 ≈ **9 TFLOP/s**'tir.
 
-**Bu plan için önemli not:** `mma.sync` kernel'i bu depoya eklenmedi. Sebep bir toolchain hatası: `ptx_asm!` makrosu test profilinde çalışmıyor ("ptx_asm template must be a byte string literal, got MIR operand Move(_3)"), ve cuda-oxide'in hazır `mma` sarmalayıcıları `m16n8k16` için `sm_80` ister; bizim PTX hedefimiz `sm_75`. Bu engel `docs/development-log.md` içinde ertelenmiş iş olarak duruyor, ve alıştırma 5 olarak aşağıda. Ürün yolu zaten cuBLAS olduğu için encoder bundan etkilenmez.
+### 4.4. Kendi tensor core kernel'imiz (2,5 ms → 0,38 ms)
+
+İlk denemede bu kernel yazılamadı: `ptx_asm!` makrosu test profilinde derlenmiyordu. Sonra cuda-oxide'in **üretilmiş** sarmalayıcılarında aradığımız şeyi bulduk: `cuda_device::wmma::mma_m16n8k8_f32_f16`. Belgesi "PTX 6.5 ve sm_75+" der. `ldmatrix_x1/x2/x4` (ve `_trans`) da orada. Yani `ptx_asm!` gerekmedi. **Ders:** "yok" demeden önce kütüphanenin üretilmiş kodunu da ara.
+
+#### Adım 0: Fragment düzenini doğrula
+
+Tensor core komutunda **thread'lerin hangi değeri tuttuğu** sabittir. Buna "fragment düzeni" denir. `m16n8k8` için, warp içindeki şerit (lane) `l` için `g = l / 4` (grup, 0..7) ve `t = l % 4` (grup içindeki sıra, 0..3):
+
+| Fragment | Register | İçerik |
+|---|---|---|
+| A (16 × 8, satır düzeninde) | `a[0]`, `a[1]` | `a[0]` = A[g][2t, 2t+1], `a[1]` = A[g+8][2t, 2t+1] |
+| B (8 × 8, sütun düzeninde) | `b` | B[2t, 2t+1][g] (g sütununun iki k satırı) |
+| C, D (16 × 8, f32) | `c[0..4]` | `c[0], c[1]` = C[g][2t, 2t+1], `c[2], c[3]` = C[g+8][2t, 2t+1] |
+
+İki f16 değer bir `u32` içinde durur: küçük sütun alt 16 bitte.
+
+Önce tek bir warp ile tek bir `16×8×8` çarpım yapan bir **sonda** (probe) kernel'i yazdık (`mma_probe_f16`). Her thread değerlerini tabloya göre global bellekten okur. Test (`tests/tensor_cores.rs`) iki şey kontrol eder: rastgele matrislerde CPU ile aynı sonuç, ve A'nın her satırında tek bir 1 olduğunda D'nin tam olarak B'nin bir satırı olması. Düzen yanlış olsaydı ikinci test hangi satır ve sütunun karıştığını söylerdi. İlk koşuda geçti. PTX'te:
+
+```
+mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%r10, %r11, %r12, %r13}, {%r1, %r2}, {%r15}, ...
+```
+
+#### Adım 1: `gemm_tc_f16` (v1)
+
+| Seçim | Değer | Neden |
+|---|---|---|
+| Block tile | 64 × 64, k adımı 32 | `regtile` ile aynı tile, karşılaştırma adil olsun |
+| Warp'lar | 4 warp (2 × 2), her biri 32 × 32 | 2 satır döşemesi (16) × 4 sütun döşemesi (8) = 8 accumulator, 32 f32 register |
+| Shared satır adımı | 32 + 8 ve 64 + 8 half | 80 ve 144 bayt: `ldmatrix` 16 baytlık hizalı satır ister. Ek 8 half satırları farklı bank'lara kaydırır |
+| A fragment'i | `ldmatrix_x2` | şerit 0–15 satır adreslerini verir (0–7 ilk 8×8 matris, 8–15 ikinci). sm_75'te 32 şeridin hepsi geçerli adres vermeli, bu yüzden 16–31 aynısını tekrarlar |
+| B fragment'i | `ldmatrix_x4_trans` | B shared'da satır düzeninde (`[k][n]`), fragment sütun ister. `.trans` bunu çevirir. x4, bir warp'ın 4 sütun döşemesini tek komutta yükler |
+
+Kenarlar: tile kopyalanırken matrisin dışı sıfır yazılır. Sıfırlar toplama bir şey eklemez. Yazarken her çıktı satır ve sütun kontrolüyle yazılır (`67 × 129 × 96` ve `17 × 33 × 17` testleri).
+
+#### Adım 2 ve 3: kopyalamayı genişlet, sonra önceden yükle
+
+| Kernel | Değişiklik | Süre (1500 × 1280 × 1280) | Hız |
+|---|---|---|---|
+| `gemm_regtile_f16` | ders 4'ün en iyi SIMT kernel'i | 2533 µs | 1,9 TF/s |
+| `gemm_tc_f16` (v1) | tensor core, kopyalama 2 baytlık okumalarla | 658–662 µs | 7,4 TF/s |
+| `gemm_tc_vec_f16` (v2) | kopyalama 16 baytlık okumalarla | 384–394 µs | 12,5–12,8 TF/s |
+| `gemm_tc_pre_f16` (v3) | v2 + bir sonraki tile'ı register'a önceden yükle | **379–381 µs** | 12,9–13,0 TF/s |
+| cuBLAS | | 287–364 µs | 13,5–17,1 TF/s |
+
+Tensor core tek başına 3,8 kat kazandırdı. Ama v1'de vaktin yarısı **tile kopyalamasında** gidiyordu: her thread 32 tane 2 baytlık okuma yapıyordu ve tensor core'lar bunu bekliyordu.
+
+**v2'deki tuzak:** İlk v2 denemesinde 8 half'ı `[u32; 4]` olarak okuduk. PTX'te tek bir 16 baytlık okuma beklerken **dört tane** `ld.global.b32` gördük. Sebep: okumanın genişliğini **tipin hizalaması** belirler. `[u32; 4]` 4 bayt hizalıdır, derleyici 16 baytlık hizayı varsayamaz. Çözüm, 16 bayt hizalı bir tip:
+
+```rust
+#[repr(C, align(16))]
+pub struct Q16(pub [u32; 4]);
+```
+
+Bununla PTX'te 12 tane `ld.global.v4` ve 4 tane `st.shared.v4` var, hiç `ld.global.b32` yok. (cuda-oxide'in `vector.rs` belgesi de bunu anlatır.)
+
+**v3 neden az kazandırdı (%1)?** Önceden yükleme, bir sonraki tile'ın okumalarını tensor core'lar çalışırken başlatır. Ama her warp tile başına sadece 4 × 8 = 32 `mma` yapar. Bu, ~500 devirlik bir global okumayı saklamaya yetmez. cuBLAS bu kartta (sm_86) daha büyük tile'lar ve `cp.async` kullanır: global bellekten shared'a doğrudan, register'a uğramadan, birden çok tile'ı aynı anda. `cp.async` sm_80'dir. Bizim PTX hedefimiz sm_75 olduğu için kullanamayız.
 
 ## 5. Kartın sınırı ve ne kadar yaklaştık
 
@@ -119,10 +174,10 @@ Bir warp, 16×8 × 8×8'lik bir çarpımı **tek komutta** yapar: 16·8·8 = 102
 
 | Tavan | Değer | Bizim en iyimiz |
 |---|---|---|
-| fp16 tensor core (cuBLAS) | 15,2-19 TFLOP/s | 2,0 TF/s (13%) |
+| fp16 tensor core (cuBLAS) | 15,2-19 TFLOP/s | 13,0 TF/s (`gemm_tc_pre_f16`, %85) |
 | fp32 FMA birimleri (elle yazılmış SIMT) | ~9 TFLOP/s | 2,0 TF/s (23%) |
 
-Yani kendi kernel'imiz SIMT tavanının %23'ünde. İyi bir SGEMM %80-90'a çıkar. Fark, deneyimli bir GEMM'in yaptığı üç şeyden gelir:
+Tensor core kernel'imiz cuBLAS'ın süresinin 1,32 katında (379 µs ve 288 µs). Eski SIMT kernel'imiz ise SIMT tavanının %23'ünde. İyi bir SGEMM %80-90'a çıkar. Fark, deneyimli bir GEMM'in yaptığı üç şeyden gelir:
 
 1. **Daha büyük register bloğu** (8×8 = 64 çıktı).
 2. **Vektörel shared okuma** (`ld.shared.v4.b32`, 128 bit).
@@ -149,6 +204,7 @@ ncu --set full -k regex:gemm_regtile -o gemm target\release\gpu-bench.exe gemm
 - **Memory Workload Analysis → Shared Memory → Bank Conflicts**: `tiled` sürümünde yüksek çıkar. Padding ile düşür.
 - **Occupancy**: `regtile` 16 f32 accumulator + 8 yükleme register'ı tutar; 256 thread'lik blokla 20 SM'de kaç blok sığdığına bak.
 - cuBLAS kernel'ini SASS'ta görmek için: `cuobjdump -sass` ya da Nsight'ta `HMMA` komutlarını ara. Fark orada tek satırda görünür.
+- `gemm_tc2_f16`: PTX'te `mma.sync.aligned.m16n8k8`, `ldmatrix.sync.aligned.m8n8.x2` ve `x4.trans`, `ld.global.v4` (16 bayt) ve `st.shared.v4`. Nsight'ta **Tensor Pipe Utilization** ve **Warp State → Stall Long Scoreboard** (global okuma beklemesi) değerlerine bak. v1 ile v3 arasındaki farkın çoğu bu bekleme satırında görünür.
 
 ## 7. Alıştırmalar
 
@@ -156,5 +212,6 @@ ncu --set full -k regex:gemm_regtile -o gemm target\release\gpu-bench.exe gemm
 2. **Vektörel shared okuma.** `RA`'yı `[f16; 8]` olarak oku (16 bayt). PTX'te `ld.shared.v4.b32` görüyor musun? Süre değişiyor mu?
 3. **Bank çakışması.** Tile'ı `64 + 8` sütunla ayır (satır adımı 72 f16). `ncu`'da bank conflict sayısı ne oldu, süre ne oldu?
 4. **Kenar maliyeti.** `1500 x 1280 x 1280` (kenarlar var) ile `1536 x 1280 x 1280` (tam tile) ölç. Kenar maskeleri ne kadar sürüyor?
-5. **Tensor core.** `mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32` kernel'ini yaz. Cihaz fonksiyonu içinde `cuda_device::ptx::__ptx_asm_out_7` doğrudan çağrısıyla test profilinde de derlenebildiğini doğruladık (bkz. `docs/development-log.md`). Fragment yerleşimi: bu dersin 6. bölümü ve PTX dokümanı. cuBLAS'ın %89'una ne kadar yaklaşıyor?
+5. **Daha büyük tensor core tile'ı.** `gemm_tc2_f16`'yı 128 × 128 tile ve 8 warp (her biri 64 × 32) ile yaz. Her warp tile başına iki kat `mma` yapar, ve önceden yükleme daha çok işe yarar. cuBLAS'a ne kadar yaklaşıyor? Register sayısı (`ncu`'da "Registers Per Thread") ne oldu?
 6. **Neden 4 GEMM?** QKV projeksiyonunu tek `[1280, 3840]` matrisi yerine üç ayrı GEMM olarak yapmak ne kaybettirir? Tek GEMM'i ölç, üçünü ölç.
+7. **A için `ldmatrix_x4`.** A fragment'lerini iki k adımı için tek `ldmatrix_x4` ile yükle (16 × 16 bir parça). Komut sayısı ve süre ne değişti?

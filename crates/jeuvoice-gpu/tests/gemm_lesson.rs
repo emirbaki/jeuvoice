@@ -4,7 +4,8 @@ use jeuvoice_gpu::check::{Tol, assert_close};
 use jeuvoice_gpu::ops::{GemmKind, gemm_lesson};
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu};
 
-const KINDS: [GemmKind; 3] = [GemmKind::Naive, GemmKind::Tiled, GemmKind::RegTile];
+const KINDS: [GemmKind; 6] =
+    [GemmKind::Naive, GemmKind::Tiled, GemmKind::RegTile, GemmKind::TensorCore, GemmKind::TensorCoreVec, GemmKind::TensorCorePrefetch];
 
 fn rnd(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;

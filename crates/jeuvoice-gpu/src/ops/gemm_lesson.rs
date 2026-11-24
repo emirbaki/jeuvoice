@@ -5,7 +5,7 @@ use cuda_core::LaunchConfig;
 use half::f16;
 
 use super::grid_elems;
-use crate::kernels::{GEMM_RT_TILE, GEMM_TILE};
+use crate::kernels::{GEMM_RT_TILE, GEMM_TILE, TC_BM, TC_BN, TC_THREADS};
 use crate::{Arena, DType, Gpu, GpuError, Tensor};
 
 /// Which kernel computes the product.
@@ -17,6 +17,12 @@ pub enum GemmKind {
     Tiled,
     /// A 64 x 64 shared tile and a 4 x 4 output block in registers per thread.
     RegTile,
+    /// Tensor cores: `mma.sync.m16n8k8` with `ldmatrix`, 4 warps per 64 x 64 tile.
+    TensorCore,
+    /// `TensorCore` with 16-byte loads in the tile copy.
+    TensorCoreVec,
+    /// `TensorCoreVec` with a register prefetch of the next k tile.
+    TensorCorePrefetch,
 }
 
 /// `c = a · b` with the chosen kernel. `a` is `[m, k]`, `b` is `[k, n]`, `c` is `[m, n]`,
@@ -53,6 +59,12 @@ pub fn gemm_lesson(gpu: &Gpu, arena: &Arena, kind: GemmKind, a: &Tensor, b: &Ten
             block_dim: (16, 16, 1),
             shared_mem_bytes: 0,
         },
+        // 4 warps per TC_BM x TC_BN tile.
+        GemmKind::TensorCore | GemmKind::TensorCoreVec | GemmKind::TensorCorePrefetch => LaunchConfig {
+            grid_dim: (grid_elems(n.div_ceil(TC_BN)), grid_elems(m.div_ceil(TC_BM)), 1),
+            block_dim: (TC_THREADS, 1, 1),
+            shared_mem_bytes: 0,
+        },
     };
     let k32 = grid_elems(k);
     let (m32, n32) = (grid_elems(m), grid_elems(n));
@@ -68,6 +80,13 @@ pub fn gemm_lesson(gpu: &Gpu, arena: &Arena, kind: GemmKind, a: &Tensor, b: &Ten
         }?,
         GemmKind::RegTile => unsafe {
             kk.gemm_regtile_f16(gpu.stream(), cfg, m32, n32, k32, asl.as_ptr().cast(), bsl.as_ptr().cast(), csl.as_mut_ptr().cast())
+        }?,
+        GemmKind::TensorCore => unsafe {
+            kk.gemm_tc_f16(gpu.stream(), cfg, m32, n32, k32, asl.as_ptr().cast(), bsl.as_ptr().cast(), csl.as_mut_ptr().cast())
+        }?,
+        GemmKind::TensorCoreVec | GemmKind::TensorCorePrefetch => unsafe {
+            let prefetch = u32::from(kind == GemmKind::TensorCorePrefetch);
+            kk.gemm_tc2_f16(gpu.stream(), cfg, m32, n32, k32, asl.as_ptr().cast(), bsl.as_ptr().cast(), csl.as_mut_ptr().cast(), prefetch)
         }?,
     }
     Ok(())
