@@ -9,6 +9,10 @@ jeuvoice-core = { path = "../jeuvoice-core" }
 whisper-rs.workspace = true
 ureq.workspace = true
 directories.workspace = true
+half.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 whisper-rs = { workspace = true, features = ["cuda"] }

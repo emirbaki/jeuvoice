@@ -255,3 +255,24 @@ Plan: `docs/superpowers/plans/2026-11-24-rust-cuda-phase1a-encoder.md`.
 
 - Fixed: the arena waits for its stream before it frees memory (M1). `Blas` holds its context and checks it on each call (M2). Uploads and downloads bind the context, so other threads can use a `Gpu` (M3). Empty tensors return at once, and grid sizes over `u32` panic with a clear message (M4). `block_sum` ends with a barrier, so a kernel can call it twice (M6). `Blas::load` tries the DLL next to the exe first (M9).
 - Still open: M5 (a real out-of-memory at allocation comes back as a driver error), M7 (`cargo.cmd` limits: CUDA folder order, `!` in PATH, very long PATH), M8 (`--workspace` commands include `jeuvoice-gpu`), M10 (`compare` ignores NaN in `max_rel`).
+
+### The ggml model file (large-v3-turbo)
+
+`jeuvoice_whisper::ggml::GgmlModel` reads it in plain Rust. Hparams: `n_mels 128`, `n_audio_ctx 1500`, `n_audio_state 1280`, `n_audio_head 20`, `n_audio_layer 32`, `n_text_layer 4`, `n_vocab 51866`. Mel filters `128 x 201`. 2-D weights are f16. Biases, norm weights and `encoder.positional_embedding` are f32.
+
+| Encoder tensor | Type | Shape |
+|---|---|---|
+| `encoder.conv1.weight` / `.bias` | f16 / f32 | `[1280, 128, 3]` / `[1280, 1]` |
+| `encoder.conv2.weight` / `.bias` | f16 / f32 | `[1280, 1280, 3]` / `[1280, 1]` |
+| `encoder.positional_embedding` | f32 | `[1500, 1280]` |
+| `encoder.blocks.N.attn_ln.weight` / `.bias` | f32 | `[1280]` |
+| `encoder.blocks.N.attn.query.weight` / `.bias` | f16 / f32 | `[1280, 1280]` / `[1280]` |
+| `encoder.blocks.N.attn.key.weight` (no bias) | f16 | `[1280, 1280]` |
+| `encoder.blocks.N.attn.value.weight` / `.bias` | f16 / f32 | `[1280, 1280]` / `[1280]` |
+| `encoder.blocks.N.attn.out.weight` / `.bias` | f16 / f32 | `[1280, 1280]` / `[1280]` |
+| `encoder.blocks.N.mlp_ln.weight` / `.bias` | f32 | `[1280]` |
+| `encoder.blocks.N.mlp.0.weight` / `.bias` | f16 / f32 | `[5120, 1280]` / `[5120]` |
+| `encoder.blocks.N.mlp.2.weight` / `.bias` | f16 / f32 | `[1280, 5120]` / `[1280]` |
+| `encoder.ln_post.weight` / `.bias` | f32 | `[1280]` |
+
+The decoder blocks have the same names under `decoder.blocks.N`, plus `cross_attn.*` and `cross_attn_ln.*`.

@@ -2068,7 +2068,9 @@ name = "jeuvoice-whisper"
 version = "0.0.1"
 dependencies = [
  "directories",
+ "half",
  "jeuvoice-core",
+ "tempfile",
  "ureq",
  "whisper-rs",
 ]
