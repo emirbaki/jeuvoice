@@ -318,7 +318,7 @@ This task depends on the Task 12 numbers. Do not start a speed change before a m
 
 The user approved the plan on 2026-11-25 and asked to keep these risks in view. Each task report says the state of each item.
 
-- **W1 The no-speech prob.** whisper.cpp reads logits row 0, but it fills only the last row. Task 0 settles it. Copy what whisper.cpp does.
+- **W1 The no-speech prob.** Settled in Task 0: whisper.cpp reads row 0 of its logits buffer. That row holds the raw logits of the last 1-token decode (a step of the window before, or the language detection), or zeros in a new state. Task 4 copies this, and a `ScriptedModel` test checks both cases.
 - **W2 The fallback windows.** Above temperature 0, our random draws are not the whisper.cpp draws. Count the fallback windows in each measurement, and report them next to the WER.
 - **W3 The VRAM.** `CudaWhisper` needs about 1.7 GB. Compare it with the whisper.cpp peak of Task 0 after each task that adds memory (Tasks 10 and 11).
 

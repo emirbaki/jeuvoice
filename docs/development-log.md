@@ -361,3 +361,26 @@ The product keeps cuBLAS for GEMM.
 ### The score tensor only for Naive attention
 
 `ops::attention` takes the `[heads, seq, seq]` scratch tensor as `Option<&Tensor>`. Only `AttnKind::Naive` needs it. `Encoder::load` (FlashTc) does not plan it, and `Encoder::load_with_attention(.., AttnKind::Naive)` does. Measured on 2026-11-25: the encoder activations went from **165 MB to 79 MB**, with the same speed (175.0 ms per 30 s window).
+
+## Status (Rust CUDA, Phase 1b)
+
+Plan: `docs/superpowers/plans/2026-11-25-rust-cuda-phase1b-decoder.md`. Branch: `rust-cuda-phase1b`.
+
+### The whisper.cpp baseline (Task 0, 2026-11-25)
+
+The example `dump_whisper_rs` runs `WhisperRs` with the app's parameters and writes `target/reference/whisper/<clip>.rs.json`. Two runs give byte-equal files, so whisper-rs is deterministic on these clips.
+
+| Clip | Length | Windows | Segments | Tokens | Warm time (median of runs 2 to 4) | VRAM above idle (peak) |
+|---|---|---|---|---|---|---|
+| my_voice.ogg | 27.0 s | 1 | 3 | 138 | 1.127 s | 2162 MiB |
+| my_voice2.mp4 | 33.6 s | 2 | 6 | 189 | 1.874 s | 2160 MiB |
+| ses_001_0007.wav | 8.4 s | 1 | 3 | 52 | 0.741 s | 2134 MiB |
+| **69 s set** | | 4 | 12 | 379 | **3.74 s** | **2162 MiB** |
+
+- The time does not include the model load. Run 1 is slower (CUDA start-up), so the table uses the median of runs 2 to 4. The spec target of criterion 3 stays at 4.3 s. Report both numbers.
+- The VRAM is the whole card (`nvidia-smi --query-gpu=memory.used` every 100 ms) minus the idle value before the run. Per-process numbers show `[N/A]` on this Windows driver (WDDM).
+- The fallback count is not in the whisper-rs API (`n_fail_p` is on the state, and `print_timings` prints the context's own state). The mean token logprob of each segment is between −0.19 and −0.006, far above `logprob_thold = −1.0`. So the 4 windows most likely decode at temperature 0.
+
+### The no-speech prob in whisper.cpp
+
+whisper.cpp computes the no-speech prob from row 0 of `state->logits` (line 7154). The prompt decode fills only its last row. So row 0 holds the raw logits of the last 1-token decode, or zeros in a new state. Measured: the first window of each clip gives 1.93e-5 (a zero row: 1/51866 with f32 sum error). The second window of my_voice2 gives 1.5e-10 (the last step of window 1). The port copies this behavior, because criterion 1 compares with whisper.cpp.
