@@ -4,8 +4,8 @@ Date: 2026-11-24. Written by the previous agent for the next agent. Read `AGENTS
 
 ## 1. Start here
 
-1. Check out the branch: `git switch rust-cuda-phase1a`. The last commit is `3e1cd12 fix: close the three Important findings of the Phase 1a review`.
-2. Run the GPU tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-gpu`. Expected: 58 tests pass.
+1. Plan 1a is merged to `main`. The tensor-core work is on `git switch rust-cuda-tensor-cores` (not merged yet).
+2. Run the GPU tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-gpu`. Expected: 62 tests pass on `rust-cuda-tensor-cores`, 58 on `main`.
 3. Run the plain tests: `scripts\cargo.cmd test`. Expected: 348 tests pass, with no failures.
 4. Run the Whisper GPU tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-whisper --features cuda-kernels -- --include-ignored --test-threads 1`. Expected: all pass. The first run builds whisper.cpp with CUDA (about 20 minutes).
 5. **Plan 1a is complete and reviewed.** The branch is not merged to `main` yet: the user decides. Continue with section 4.
@@ -53,9 +53,17 @@ The full design: `docs/superpowers/specs/2026-11-24-rust-cuda-inference-design.m
 
 ## 4. The next steps, in order
 
-1. **Ask the user to merge `rust-cuda-phase1a` to `main`.** Merge and push only when the user says so.
-2. **Tensor-core task (not in a plan yet).** The user's main goal is learning CUDA, and tensor cores are central to it. Write a small plan for: (a) a `ptx_asm!` wrapper macro over the marker call, so inline PTX builds in the test profile, (b) `gemm_tc_f16` with `mma.sync.aligned.m16n8k8` (`sm_75` form) for lesson 4, (c) a tensor-core flash attention for lesson 5. Measure both against cuBLAS and the naive attention. The product keeps cuBLAS and `AttnKind::Naive` unless a measurement says otherwise.
-3. **Write the Phase 1b plan.** The spec, Phase 1 section, lists what it must cover. Section 8 below lists the facts for it. It must also handle the deferred findings M1 and M6 (section 7).
+1. **The tensor-core task is done** on the branch `rust-cuda-tensor-cores` (plan `docs/superpowers/plans/2026-11-24-rust-cuda-tensor-cores.md`, reviewed). Merge it to `main` only when the user says so. Results: `gemm_tc_pre_f16` 377–383 µs vs cuBLAS 287–364 µs at `1500 x 1280 x 1280`. `flash_attn_tc_f16` 0.90 ms vs 2.49 ms for the naive attention. The encoder uses `AttnKind::FlashTc`: **176 ms per 30 s window** (it was 252 ms). Lessons 4 and 5 have the new sections.
+2. **Drop the 86 MB `scores` tensor** from the encoder arena when the attention kind is `FlashTc` (review minor M8 of the tensor-core branch). Small, and it matters on a 4 GB card.
+3. **Write the Phase 1b plan.** The spec, Phase 1 section, lists what it must cover. Section 8 below lists the facts for it. It must also handle the deferred findings M1 and M6 of the Phase 1a review (section 7).
+
+Key findings of the tensor-core task (details in `docs/development-log.md` and the lessons):
+
+- `cuda_device::wmma::mma_m16n8k8_f32_f16` and `ldmatrix_x1/x2/x4` (+ `_trans`) work on `sm_75`. The `ptx_asm!` bug does not block tensor cores.
+- A load is as wide as the **alignment of its type**: `[u32; 4]` gives four 4-byte loads, a `#[repr(C, align(16))]` type (`kernels::Q16`) gives one 16-byte load.
+- A register array indexed by a loop variable goes to **local memory** when the compiler does not unroll the loop (the first FlashTc took 6.8 ms with 80 `ld.local`). The `unroll!` macro in `kernels/mod.rs` fixes it (0.90 ms).
+- Take shared-memory pointers with `SharedArray::as_raw_mut_ptr(&raw mut X)`, not `as_ptr()`/`as_mut_ptr()`, which make overlapping references in every thread.
+- Run `gpu-bench` with a filter that also includes cuBLAS or naive rows. A short filter can run on a card below full clock and read 15–25% slow.
 
 ## 5. Rulings made so far (decisions not in the plans)
 
