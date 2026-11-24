@@ -53,7 +53,7 @@ The ggml file stores fewer words than `n_vocab`. whisper.cpp names the extra ids
 4. Timestamp pairs. Let `last` be the last sampled token and `penult` the one before. If `last` is a timestamp: if `penult` is also a timestamp, or there is only one sampled token, set all timestamps to −∞. Else set all text tokens below EOT to −∞.
 5. Initial timestamp limit: at the first sampled token, set the timestamps from `BEG + round(1.0 / 0.02) + 1` up to −∞.
 6. Increasing timestamps: when the decoder has had a timestamp (`has_ts`), set `BEG .. BEG + seek_delta / 2` to −∞.
-7. Log-softmax. If `logsumexp(timestamp logprobs) > max(text logprobs)`, set all text tokens to −∞.
+7. Log-softmax. If `logsumexp(timestamp logprobs) > max(logprobs below BEG)`, set the logits and the logprobs of all ids below BEG to −∞ (EOT and the special tokens too). The logprobs are not normalized again.
 8. Then the probs and logprobs are computed again from the result.
 
 Read the full function before Task 3. These notes are a summary, not the source.
