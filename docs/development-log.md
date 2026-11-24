@@ -397,3 +397,16 @@ whisper.cpp computes the no-speech prob from row 0 of `state->logits` (line 7154
 | `ids_upload` alone (448 `i32`) | 10.0 µs | — |
 
 The upload and its wait cost more than the kernel. A decoder step uses `embed_one`. Lesson 8, part A, has the details.
+
+### The decoder attention (Task 8, 2026-11-25)
+
+`ops::attention_decode` covers the self-attention with the KV cache (causal or one step), the cross-attention on the 1500 encoder positions, and the softmax of chosen heads for DTW (`ProbsOut`). It reads the `[rows, 1280]` layout of the GEMM outputs, so the decoder needs no head split. Medians of 3 runs of `gpu-bench attn_dec` (20 heads):
+
+| Case | Naive | Split (flash decoding) | Gain |
+|---|---|---|---|
+| 1 x 448 (self step) | 56.2 µs | 22.9 µs (52% of the limit) | 2.5x |
+| 1 x 1500 (cross step) | 175.5 µs | 59.1 µs (68% of the limit) | 3.0x |
+| 224 x 224 causal (prompt) | 1024 µs | 482 µs | 2.1x |
+| 224 x 1500 with probs (DTW) | 12.6 ms | 3.47 ms | 3.6x |
+
+The product uses `Split`. It needs a scratch tensor of `decode_split_scratch(heads, nq, nk)` f32. The multi-row cases are limited by the scalar math on shared memory. A tensor-core version is lesson 8 exercise 4.

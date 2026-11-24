@@ -6,7 +6,7 @@ use half::f16;
 use jeuvoice_gpu::bench::{Timing, pct_of_memory_limit, pct_of_tensor_limit, time_on_stream};
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
-    AttnKind, ConvKind, GemmKind, LayerNormKind, SoftmaxKind, Width, attention, bias_gelu_with, conv1d, embed_one, embed_with, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive,
+    AttnKind, ConvKind, DecodeAttnKind, ProbsOut, attention_decode_with, decode_split_scratch, GemmKind, LayerNormKind, SoftmaxKind, Width, attention, bias_gelu_with, conv1d, embed_one, embed_with, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive,
     softmax_rows_with,
 };
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
@@ -113,6 +113,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // Decoder attention rows (20 heads of 64): one step against 448 cached keys, one step
+    // of cross-attention on the 1500 encoder positions, a causal prompt of 224 rows, and the
+    // DTW pass (224 rows of cross-attention with the softmax of 2 heads written out).
+    for (name, kind) in [("attn_dec_naive", DecodeAttnKind::Naive), ("attn_dec_split", DecodeAttnKind::Split)] {
+        if name.contains(&filter) {
+            for (nq, nk, causal, probs) in [(1, 448, false, false), (1, 1500, false, false), (224, 224, true, false), (224, 1500, false, true)] {
+                rows.push(bench_attn_decode(&gpu, name, kind, nq, nk, causal, probs)?);
+            }
+        }
+    }
+
     if "embed_one".contains(&filter) {
         rows.push(bench_embed_one(&gpu)?);
     }
@@ -188,6 +199,35 @@ fn bench_embed_one(gpu: &Gpu) -> Result<Row, GpuError> {
     Ok(Row {
         name: "embed_one".into(),
         size: format!("1x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+fn bench_attn_decode(gpu: &Gpu, name: &str, kind: DecodeAttnKind, nq: usize, nk: usize, causal: bool, with_probs: bool) -> Result<Row, GpuError> {
+    let (heads, w) = (20, 1280);
+    let mut plan = ArenaPlan::new();
+    let q = plan.add(DType::F16, &[nq, w]);
+    let k = plan.add(DType::F16, &[nk, w]);
+    let v = plan.add(DType::F16, &[nk, w]);
+    let out = plan.add(DType::F16, &[nq, w]);
+    let pt = plan.add(DType::F32, &[2, nq, nk]);
+    let scratch = plan.add(DType::F32, &[decode_split_scratch(heads, nq, nk)]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &q, &vec![f16::from_f32(0.1); nq * w])?;
+    arena.upload(gpu, &k, &vec![f16::from_f32(0.1); nk * w])?;
+    arena.upload(gpu, &v, &vec![f16::from_f32(0.1); nk * w])?;
+    let probs = with_probs.then_some(ProbsOut { probs: &pt, heads_mask: (1 << 4) | (1 << 11), slot0: 0 });
+    let t = time_on_stream(gpu, 3, 50, || attention_decode_with(gpu, &arena, &q, &k, &v, &out, heads, causal, probs, Some(&scratch), kind))?;
+    // The least memory traffic: K and V once, q and out once, and the probs.
+    let mut bytes = (2 * nk * w * 2 + 2 * nq * w * 2) as u64;
+    if with_probs {
+        bytes += (2 * nq * nk * 4) as u64;
+    }
+    Ok(Row {
+        name: name.into(),
+        size: format!("{nq}x{nk}{}", if causal { " c" } else if with_probs { " p" } else { "" }),
         t,
         rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
         pct: pct_of_memory_limit(bytes, &t, gpu.info()),

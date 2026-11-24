@@ -3,9 +3,9 @@
 Bu ders decoder'ın GPU kernel'lerini anlatır. İki bölümü var:
 
 - **Bölüm A: token gömme (embedding).** Decoder'a giren her token'ı 1280 sayılık bir vektöre çeviren kernel.
-- **Bölüm B: decoder attention ve KV cache.** Plan Task 8 ile eklenecek.
+- **Bölüm B: decoder attention ve KV cache.** Self-attention, cross-attention ve DTW için hizalama başlarının softmax'ı tek bir kernel ailesinde.
 
-Kod: `crates/jeuvoice-gpu/src/ops/embed.rs` ve kernel'ler `embed_f16`, `embed_f16x2`, `embed_one_f16x2` (`crates/jeuvoice-gpu/src/kernels/mod.rs`). Testler: `crates/jeuvoice-gpu/tests/embed.rs`.
+Kod: `crates/jeuvoice-gpu/src/ops/embed.rs`, `crates/jeuvoice-gpu/src/ops/attention_decode.rs` ve kernel'ler `embed_*`, `attn_decode_f16`, `attn_decode_split_f16`, `attn_decode_merge_f16` (`crates/jeuvoice-gpu/src/kernels/mod.rs`). Testler: `crates/jeuvoice-gpu/tests/embed.rs`, `crates/jeuvoice-gpu/tests/attention_decode.rs`.
 
 ---
 
@@ -133,3 +133,135 @@ Nsight Systems'ta (`nsys profile`) zaman çizgisine bakın. `embed` çağrısın
 2. Prompt en çok 227 token. Id'leri bir yükleme yerine kernel argümanı olarak vermenin bir yolunu düşün (örneğin sabit boyutlu bir dizi argüman). Kernel argümanlarının boyut sınırı nedir? Ölç.
 3. Gömmeyi decoder'ın ilk LayerNorm'u ile tek kernel'de birleştir. Kaç bayt okuma ve yazma kalkar? Tek satırda süre ne kadar değişir, ve neden çok değişmez?
 4. 1 satırdan 448 satıra kadar `embed_x2` süresini çiz. Çizgi nerede yatay, nerede yükselen bir doğru? Kırılma noktası neyi gösterir?
+
+---
+
+# Bölüm B: Decoder attention ve KV cache
+
+## 1. Ne yapar?
+
+Decoder'ın her katmanında iki attention var. İkisi de aynı formül, baş (head) başına:
+
+```
+out[r] = softmax(q[r] · Kᵀ / 8) · V
+```
+
+| Durum | Sorgu (q) satırı | Anahtar (k) sayısı | Maske |
+|---|---|---|---|
+| Self-attention, bir adım | 1 | `geçmiş + 1` (en çok 448) | yok |
+| Self-attention, prompt veya DTW geçişi | `n` | `n` | nedensel (causal) |
+| Cross-attention | 1 veya `n` | 1500 (encoder çıktısı) | yok |
+
+- **Self-attention:** yeni token, o ana kadar yazılmış token'lara bakar. Nedensel maske ile satır `r`, `0 … nk − nq + r` anahtarlarını görür, sonrakileri görmez.
+- **Cross-attention:** token, encoder'ın 1500 ses konumuna bakar. Hangi sesi "dinlediğini" böyle seçer.
+
+**KV cache:** Bir adımda yalnızca yeni token'ın `q`, `k`, `v` değerleri hesaplanır. Eski token'ların `k` ve `v` satırları değişmez, onları her adımda yeniden hesaplamak boşa iştir. Bu yüzden her katman için `[448, 1280]` boyutlu bir K ve bir V tamponu (cache) tutarız. Yeni token kendi satırını bu tampona yazar, attention bütün satırları okur. Cross-attention'ın K ve V'si pencere başına bir kez, encoder çıktısından hesaplanır.
+
+**Veri düzeni:** `q`, `k`, `v` ve `out`, GEMM çıktısının düzeninde durur: `[satır, 1280]`. Baş `h`, `64h … 64h + 63` sütunlarıdır. Encoder'daki gibi `[baş, satır, 64]` düzenine kopyalamaya (`split_heads`) gerek yok: kernel başın sütunlarını doğrudan okur.
+
+**DTW için softmax:** Ders 9'daki kelime zamanları için 6 "hizalama başının" cross-attention softmax'ı gerekir. Kernel, `probs_mask` ile seçilen başların softmax'ını ayrıca bir f32 tensöre yazar. Bit `h` açıksa baş `h`, `slot0 + (h'den küçük açık bit sayısı)` numaralı yuvaya gider. Bu sayıyı tek bir `popc` (bit sayma) komutu verir.
+
+## 2. Neden gerekli, ne sıklıkla çalışır?
+
+Attention, decoder'ın bağlamı kullandığı tek yerdir: self-attention metnin geri kalanını, cross-attention sesi getirir. Bir decoder adımında 4 katman · 2 attention = **8 çağrı** var. Bir pencerede en çok 220 adım, yani en çok 1760 çağrı. Bu yüzden asıl önemli durum **tek sorgu satırıdır**.
+
+Tek satırda iş azdır ama bütün K ve V okunur. Cross-attention için bu 2 · 1500 · 1280 · 2 bayt = **7,7 MB**. Hesap yok denecek kadar az: attention burada **bellek sınırlıdır**.
+
+## 3. İlk sürüm: satır ve baş başına bir blok
+
+`attn_decode_f16` en basit hâldir. Her (sorgu satırı, baş) çifti için 256 thread'lik bir blok:
+
+1. 64 sorgu değeri ortak belleğe (shared memory) gider.
+2. Thread `t`, `t, t + 256, …` anahtarlarının puanını hesaplar. Her anahtar satırını baştan sona kendisi okur. Puanlar ortak bellekte durur (en çok 1536 · 4 bayt = 6 KB).
+3. `block_max` ve `block_sum` ile satırın en büyüğü ve üstel toplamı (Ders 3).
+4. `P · V`: 256 thread 64 boyutu 4 gruba böler, her grup anahtarların dörtte birini toplar, sonra ortak bellekte birleştirilir.
+
+Ölçüm (20 baş, 3 çalıştırmanın ortancası):
+
+| Durum | Naive | Sınırın yüzdesi |
+|---|---|---|
+| 1 × 448 (self, bir adım) | 56,2 µs | %21 |
+| 1 × 1500 (cross, bir adım) | 175,5 µs | %23 |
+| 224 × 224, nedensel (prompt) | 1024 µs | — |
+| 224 × 1500, softmax çıktılı (DTW) | 12,6 ms | — |
+
+Bir adımın 4 katmanı (56 + 175) · 4 ≈ **0,94 ms** tutar. Çok fazla. İki sebebi var:
+
+1. **Çok az blok.** Tek satırda grid 1 × 20 = 20 blok. Kartta 20 SM var, yani her SM'de tek blok, 8 warp. Bellekten okuma isteklerini gizleyecek kadar çok warp yok.
+2. **Dağınık okuma.** Thread `t`, anahtar satırı `t`'yi 2 baytlık okumalarla okur. Bir warp'ın 32 thread'i aynı anda 32 farklı satıra (her biri 2560 bayt uzakta) dokunur: 32 ayrı önbellek satırı.
+
+Çok satırlı durumlar daha da kötü: her satır için K ve V yeniden okunur.
+
+## 4. Hızlandırma: flash decoding
+
+Fikir: **anahtarları parçalara böl, her parçayı ayrı bir blok yapsın, sonunda birleştir.** Buna "flash decoding" denir. Ders 5'teki online softmax'ın paralel hâlidir.
+
+### Bölüm 1: parça kernel'i (`attn_decode_split_f16`)
+
+Grid `(parça sayısı, baş, ⌈nq / 4⌉)`. Her blok 64 anahtarlık bir parça ve 4 sorgu satırı alır:
+
+1. K ve V'nin `64 × 64` parçasını ortak belleğe yükler. Ardışık thread'ler bir anahtar satırının ardışık değerlerini okur: **birleşik (coalesced) okuma**. Satır adımı 66 f16'dır, böylece puan döngüsünde 32 thread 32 farklı bankaya düşer (Ders 5'teki `FLASH_LD` ile aynı hile).
+2. Thread `t` = sorgu satırı `t / 64`, anahtar `t % 64`. Puanı ortak bellekten hesaplar.
+3. Bir satırın 64 thread'i iki warp'tır. Her warp kendi en büyüğünü `shfl` ile bulur, sonra ikisi ortak bellekte birleşir.
+4. Her satır için bir **ara sonuç** yazar: 64 toplam `Σ exp(s − m) · v`, parçanın en büyüğü `m`, üstel toplam `l`.
+
+Tek sorgu ve 1500 anahtarda grid 24 · 20 = **480 blok** olur. Her SM'ye 24 blok düşer.
+
+### Bölüm 2: birleştirme kernel'i (`attn_decode_merge_f16`)
+
+Satır ve baş başına bir blok, parçaları birleştirir:
+
+```
+M = max_c m_c
+L = Σ_c l_c · exp(m_c − M)
+out = Σ_c acc_c · exp(m_c − M) / L
+```
+
+Bu, online softmax'taki "eski toplamı yeni en büyüğe göre ölçekle" adımının aynısıdır. Nedensel maskede bir satırın hiç göremediği bir parça `m = −∞`, `l = 0` verir. `exp(−∞ − M) = 0` olduğu için o parça hiçbir şey katmaz. Parça 0 her satırda en az bir anahtar (anahtar 0) içerdiği için `M` hep sonludur. Test `split_causal_probs_and_partial_chunks` tam bu durumu dener.
+
+DTW softmax'ı için parça kernel'i ham puanları yazar (maskeli anahtar için `−∞`). Birleştirme kernel'i onları `exp(s − M) / L`'ye çevirir.
+
+Ara sonuçlar bir "scratch" tensörde durur: `baş · nq · parça · 66` f32. Tek satırda 20 · 24 · 66 · 4 = 127 KB.
+
+### Ölçüm
+
+| Durum | Naive | Split | Kazanç | Split, sınırın yüzdesi |
+|---|---|---|---|---|
+| 1 × 448 (self, bir adım) | 56,2 µs | 22,9 µs | 2,5× | %52 |
+| 1 × 1500 (cross, bir adım) | 175,5 µs | **59,1 µs** | 3,0× | **%68** |
+| 224 × 224, nedensel (prompt) | 1024 µs | 482 µs | 2,1× | — |
+| 224 × 1500, softmax çıktılı (DTW) | 12,6 ms | 3,47 ms | 3,6× | — |
+
+Bir adımın 4 katmanı artık (22,9 + 59,1) · 4 ≈ **0,33 ms**. Ürün `Split` kullanır.
+
+## 5. Kartın sınırı ve ne kadar yaklaştık
+
+Tek sorgulu cross-attention 7,7 MB okur. 192 GB/s sınırında bu **40 µs** sürer. `Split` 59 µs ile sınırın **%68**'inde. Geri kalanın bir kısmı iki kernel başlatmasıdır (Bölüm A'da gördüğümüz birkaç µs'lik maliyet, burada iki kez). Bir kısmı da parça yüklemesindeki 2 baytlık okumalardır (bkz. 6. bölüm).
+
+Çok satırlı durumlarda tablo "sınırın yüzdesi" vermiyor, çünkü orada sınır bellek değil. 224 × 1500 DTW geçişi yaklaşık 224 · 1500 · 20 · 64 · 2 · 2 ≈ 0,86 GFLOP skaler f32 işlem yapar. 3,47 ms'de bu ~250 GFLOP/s eder. Kartın skaler f32 gücünün çok altında. Sebep: puan döngüsünde her çarpma-toplama iki ortak bellek okuması ister, yani ortak bellek bant genişliği sınırlıdır. Bunun doğru çözümü tensör çekirdekleridir (Ders 5'teki `FlashTc` gibi). Ama bu durumlar pencere başına yalnızca birkaç kez çalışır: DTW 4 pencerede ~14 ms, toplam 4,3 saniyelik bütçenin küçük bir parçası. Bu yüzden şimdilik bıraktık.
+
+## 6. PTX ve Nsight'ta neye bakmalı
+
+| Kernel | Global okuma | Ortak bellek | Diğer |
+|---|---|---|---|
+| `attn_decode_f16` | 6 × `ld.global.b16` | 27 × `ld.shared.b32` | 6 × `bar.sync`, 10 × `shfl`, 1 × `popc` |
+| `attn_decode_split_f16` | 3 × `ld.global.b16` | 7 × `ld.shared.b16`, 11 × `ld.shared.b32` | 3 × `bar.sync`, 10 × `shfl`, 1 × `popc` |
+| `attn_decode_merge_f16` | 8 × `ld.global.b32` | yok | 3 × `ex2.approx.ftz.f32` |
+
+Dikkat edilecekler:
+
+1. **Yerel bellek (`ld.local`) yok.** Diziler yazmaçlarda kaldı.
+2. **`count_ones()` tek bir `popc.b32` oldu.** Yuva numarası için döngü gerekmiyor.
+3. **`libm::expf` bir `ex2.approx.ftz.f32` oldu:** `exp(x) = 2^(x · log2 e)`. Donanımın hızlı yaklaşık üs komutu. Doğruluğu softmax için yeter, testler bunu gösteriyor.
+4. **64'e bölme yok.** `i / 64` ve `i % 64` kaydırma ve maskeye dönüştü, çünkü 64 bir sabit ve 2'nin kuvveti.
+5. **Parça yüklemesi 2 baytlık (`ld.global.b16`).** Birleşik olsa da her okuma komutu az veri taşır. Bu, sınıra kalan mesafenin bir sebebi olabilir. Alıştırma 1'e bakın.
+
+Nsight Compute'ta `attn_decode_split_f16` için "Memory Workload Analysis" bölümüne bakın: L2'den gelen bayt, DRAM'den gelen bayta yakın olmalı (her K ve V satırı bir kez okunur). `attn_decode_f16`'da ise "Occupancy" düşük görünür: tek satırda SM başına tek blok.
+
+## 7. Alıştırmalar
+
+1. Parça kernel'inde K ve V'yi `Q16` (16 baytlık) okumalarla yükle (Ders 4). PTX'te `ld.global.v4` görünüyor mu? 1 × 1500 süresi 40 µs'ye ne kadar yaklaşıyor?
+2. Parça boyutunu 64'ten 128'e çıkar. Blok sayısı yarıya iner, birleştirme işi azalır. Tek satırda hangisi daha hızlı? Ortak bellek kullanımı 48 KB sınırını geçiyor mu?
+3. Birleştirme kernel'ini parça kernel'ine katmanın bir yolunu düşün (örneğin son biten blok birleştirsin, bir atomik sayaçla). Bir kernel başlatması kaç µs kazandırır?
+4. DTW geçişi (224 × 1500) için puanları `mma.sync.m16n8k8` ile hesaplayan bir sürüm tasarla. `FlashTc`'den farkı ne olmalı (nedensel maske, `nq ≠ nk`, softmax çıktısı)?
+5. KV cache'i f16 yerine f32 tutsaydık bir adımın okuduğu bayt ne kadar artardı? Süre?

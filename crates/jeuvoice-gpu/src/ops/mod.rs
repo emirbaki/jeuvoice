@@ -4,6 +4,7 @@
 use cuda_core::LaunchConfig;
 
 mod attention;
+mod attention_decode;
 mod conv1d;
 mod elementwise;
 mod embed;
@@ -13,6 +14,7 @@ mod mel;
 mod rmsnorm;
 mod softmax;
 pub use attention::{ATTN_SCALE, AttnKind, attention, merge_heads, split_heads};
+pub use attention_decode::{DecodeAttnKind, ProbsOut, attention_decode, attention_decode_with, decode_split_scratch};
 pub use conv1d::{ConvKind, Layout, conv1d, conv1d_with_layout};
 pub use elementwise::{Width, add_into, add_rows, bias_add, bias_gelu, bias_gelu_with};
 pub use embed::{embed, embed_one, embed_with};
