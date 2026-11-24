@@ -1,4 +1,4 @@
-﻿//! All device kernels. `#[cuda_module]` makes cuda-oxide compile the module to PTX, put the
+//! All device kernels. `#[cuda_module]` makes cuda-oxide compile the module to PTX, put the
 //! PTX into this crate, and make a host-side `device::load(&ctx)` with one typed launch
 //! method for each `#[kernel]`.
 
@@ -351,7 +351,7 @@ pub mod device {
     // ---- LayerNorm (lesson 2: docs/cuda-lessons/02-layernorm.md) ----
     // y = (x - mean) / sqrt(var + eps) * gamma + beta, one block of ROW_BLOCK threads per row.
     // Two-pass: first the mean, then the variance of (x - mean). The one-pass form
-    // E[xÂ²] - E[x]Â² loses all digits when the mean is large next to the spread.
+    // E[x²] - E[x]² loses all digits when the mean is large next to the spread.
 
     /// # Safety
     /// `x` and `y` are valid for `rows * d`, `gamma` and `beta` for `d`. `y` overlaps none of
@@ -692,7 +692,7 @@ pub mod device {
 
 
     // ---- Lesson GEMM (lesson 4: docs/cuda-lessons/04-gemm.md) ----
-    // Row-major C = AÂ·B, f16 in and out, f32 accumulate. The product uses cuBLAS.
+    // Row-major C = A·B, f16 in and out, f32 accumulate. The product uses cuBLAS.
 
     /// One thread per output element, one k step at a time. The first version of lesson 4.
     ///

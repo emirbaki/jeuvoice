@@ -1,4 +1,4 @@
-﻿//! Host functions that launch one kernel on arena tensors. Each checks shapes and types,
+//! Host functions that launch one kernel on arena tensors. Each checks shapes and types,
 //! picks the launch size, and queues the kernel on the GPU stream (no sync).
 
 use cuda_core::LaunchConfig;

@@ -1,4 +1,4 @@
-﻿//! Attention on arena tensors: `out = softmax(scale * QÂ·Káµ€) Â· V` per head, plus the head
+//! Attention on arena tensors: `out = softmax(scale * Q·Kᵀ) · V` per head, plus the head
 //! split and merge copies. Lesson 5 compares the two ways to compute it.
 
 use cuda_core::LaunchConfig;
@@ -12,7 +12,7 @@ use crate::{Arena, DType, Gpu, GpuError, Tensor};
 /// How `attention` computes the result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttnKind {
-    /// Batched cuBLAS `QÂ·Káµ€` into `scratch`, the softmax, then batched cuBLAS `Â·V`.
+    /// Batched cuBLAS `Q·Kᵀ` into `scratch`, the softmax, then batched cuBLAS `·V`.
     Naive,
     /// One flash-attention kernel: online softmax, K and V tiles in shared memory, and
     /// `scratch` is not touched.
@@ -27,7 +27,7 @@ fn check_heads(name: &str, t: &Tensor, heads: usize, seq: usize) {
     assert_eq!(t.shape(), &[heads, seq, FLASH_D], "{name}: the shape must be [heads, seq, 64]");
 }
 
-/// `out[h] = softmax(scale Â· q[h]Â·k[h]áµ€) Â· v[h]`. `q`, `k`, `v`, `out` are `[heads, seq, 64]`,
+/// `out[h] = softmax(scale · q[h]·k[h]ᵀ) · v[h]`. `q`, `k`, `v`, `out` are `[heads, seq, 64]`,
 /// `scratch` is `[heads, seq, seq]` (the score matrix; `AttnKind::Flash` never touches it).
 #[allow(clippy::too_many_arguments)]
 pub fn attention(
@@ -61,11 +61,11 @@ pub fn attention(
                 arena.slice::<f16>(scratch),
             );
             let stride = seq * FLASH_D;
-            // scores[h] = q[h] Â· k[h]áµ€
+            // scores[h] = q[h] · k[h]ᵀ
             blas.gemm_f16_batched(gpu, &qs, Op::N, stride, &ks, Op::T, stride, &ss, seq * seq, seq, seq, FLASH_D, heads, 1.0, 0.0)?;
             // The softmax over the last dimension of the whole batch: [heads * seq, seq].
             softmax_rows(gpu, arena, scratch, ATTN_SCALE, None)?;
-            // out[h] = probs[h] Â· v[h]
+            // out[h] = probs[h] · v[h]
             blas.gemm_f16_batched(gpu, &ss, Op::N, seq * seq, &vs, Op::N, stride, &os, stride, seq, FLASH_D, seq, heads, 1.0, 0.0)?;
         }
         AttnKind::Flash => {

@@ -63,4 +63,5 @@ The GPU tools on this machine: Rust 1.99.1 (pinned), CUDA 13.4, LLVM (`C:\Progra
 - `DisjointSlice::from_raw_parts` needs a type, for example `let out: DisjointSlice<f32> = ...`.
 - The built-in `f16` needs `#![feature(f16)]` (already in `jeuvoice-gpu`).
 - Two GPU test runs at the same time can run out of the 4 GB of video memory. Run one at a time.
+- **Save every file as UTF-8 without a BOM.** One edit tool read UTF-8 files as Windows-1252 and saved them again, so `Q·Kᵀ` became `QÂ·Káµ€` in 7 files. Commit `fix: repair double-encoded comments` repaired them. After an edit, check that non-ASCII characters (`·`, `ᵀ`, `²`, Turkish letters) still look right.
 - An `[f16; 2]` load compiles to two 2-byte loads. That is fine here: the L1 cache merges them (lesson 1).

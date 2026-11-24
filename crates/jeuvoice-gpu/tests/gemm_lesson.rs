@@ -1,4 +1,4 @@
-﻿use half::f16;
+use half::f16;
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::check::{Tol, assert_close};
 use jeuvoice_gpu::ops::{GemmKind, gemm_lesson};
@@ -16,7 +16,7 @@ fn rnd(n: usize, seed: u32, scale: f32) -> Vec<f32> {
         .collect()
 }
 
-/// `c = a Â· b` in f64, with the f16-rounded inputs (the CPU reference of the lesson).
+/// `c = a · b` in f64, with the f16-rounded inputs (the CPU reference of the lesson).
 fn cpu_gemm(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Vec<f32> {
     let mut c = vec![0.0f32; m * n];
     for i in 0..m {
@@ -76,7 +76,7 @@ fn gemm_tiny_shapes() {
 }
 
 /// The encoder shape, against cuBLAS. cuBLAS takes `w` as `[n, k]` and `Op::T`, so the test
-/// builds `b = wáµ€` on the CPU: both sides then compute the same product.
+/// builds `b = wᵀ` on the CPU: both sides then compute the same product.
 #[test]
 fn gemm_big_matches_cublas() {
     let gpu = Gpu::open(0).unwrap();

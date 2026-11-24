@@ -1,4 +1,4 @@
-﻿use half::f16;
+use half::f16;
 use jeuvoice_gpu::blas::Blas;
 use jeuvoice_gpu::check::{Tol, assert_close};
 use jeuvoice_gpu::ops::{AttnKind, attention, merge_heads, split_heads};
@@ -16,7 +16,7 @@ fn rnd(n: usize, seed: u32, scale: f32) -> Vec<f32> {
         .collect()
 }
 
-/// Scaled dot-product attention in f64, one head after another: `out = softmax(qÂ·káµ€ / 8) Â· v`.
+/// Scaled dot-product attention in f64, one head after another: `out = softmax(q·kᵀ / 8) · v`.
 fn cpu_attention(q: &[f32], k: &[f32], v: &[f32], heads: usize, seq: usize) -> Vec<f32> {
     let stride = seq * D;
     let mut out = vec![0.0f32; heads * stride];

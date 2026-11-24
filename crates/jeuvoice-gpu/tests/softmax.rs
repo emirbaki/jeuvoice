@@ -1,4 +1,4 @@
-﻿use half::f16;
+use half::f16;
 use jeuvoice_gpu::check::{Tol, assert_close};
 use jeuvoice_gpu::ops::{SoftmaxKind, softmax_rows_with};
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu};

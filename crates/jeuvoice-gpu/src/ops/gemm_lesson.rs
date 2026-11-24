@@ -1,4 +1,4 @@
-﻿//! The lesson GEMM kernels: row-major `C = AÂ·B`, f16 in and out, f32 accumulate.
+//! The lesson GEMM kernels: row-major `C = A·B`, f16 in and out, f32 accumulate.
 //! The product code uses cuBLAS (`blas::gemm_f16`). Lesson 4 compares these kernels with it.
 
 use cuda_core::LaunchConfig;
@@ -19,7 +19,7 @@ pub enum GemmKind {
     RegTile,
 }
 
-/// `c = a Â· b` with the chosen kernel. `a` is `[m, k]`, `b` is `[k, n]`, `c` is `[m, n]`,
+/// `c = a · b` with the chosen kernel. `a` is `[m, k]`, `b` is `[k, n]`, `c` is `[m, n]`,
 /// all `F16`. Shapes come from the tensors.
 pub fn gemm_lesson(gpu: &Gpu, arena: &Arena, kind: GemmKind, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<(), GpuError> {
     for t in [a, b, c] {
