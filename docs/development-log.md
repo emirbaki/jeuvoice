@@ -421,3 +421,18 @@ The product uses `Split`. It needs a scratch tensor of `decode_split_scratch(hea
 | 7 x 51866 x 1280 | 736 µs | 182 GB/s | 95% |
 
 One decoder step reads the whole 133 MB table, so this is the largest single cost of a step. cuBLAS is at the limit, so there is no kernel work to do here.
+
+### The GPU decoder and GpuWhisper (Task 10, 2026-11-25)
+
+`cuda::decoder::Decoder` (4 blocks, the self-attention KV cache, the cross K/V per window, f32 logits of the last row) and `cuda::model::GpuWhisper` (mel, encoder and decoder as the `WhisperModel` of the window loop). The test feeds the PyTorch encoder output into the decoder, so it checks the decoder alone (`tools/reference/whisper_decoder_reference.py`).
+
+| Check | Ours | PyTorch fp16 |
+|---|---|---|
+| step logits, ses_001_0007: arg max agree, max, mean diff vs fp32 | 1.0, 0.032, 0.0033 | 1.0, 0.030, 0.0034 |
+| step logits, my_voice | 1.0, 0.056, 0.0045 | 1.0, 0.123, 0.0043 |
+| alignment softmax, max diff vs fp32 (ses, my_voice) | 0.0016, 0.0032 | 0.0031, 0.0030 |
+| one batch against the steps (KV cache), max diff | 0.008 | — |
+
+- Memory: decoder weights 328 MB, decoder activations and caches 53 MB. Encoder and decoder together: 1676 MB. The load and one run use 1714 MB (without the CUDA context).
+- Speed (release, median): one decoder step 2.49 ms (p90 2.6 ms), the cross K/V 3.1 ms per window.
+- The whole model with the window loop on ses_001_0007: all 52 tokens equal whisper-rs (same position and id).

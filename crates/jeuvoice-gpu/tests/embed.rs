@@ -150,3 +150,21 @@ fn embed_id_past_the_vocab_panics_before_the_gpu_reads() {
 fn embed_position_past_the_end_panics() {
     run_embed(1000, 64, &[1, 2, 3], 446, Width::Two);
 }
+
+#[test]
+fn prefix_as_gives_the_first_elements_with_a_new_shape() {
+    let mut plan = ArenaPlan::new();
+    let t = plan.add(DType::F32, &[6, 32, 1500]);
+    let p = t.prefix_as(&[6, 5, 1500]);
+    assert_eq!(p.offset(), t.offset());
+    assert_eq!(p.shape(), &[6, 5, 1500]);
+    assert_eq!(p.strides(), &[5 * 1500, 1500, 1]);
+    assert_eq!(p.numel(), 6 * 5 * 1500);
+}
+
+#[test]
+#[should_panic(expected = "more elements than")]
+fn prefix_as_larger_than_the_tensor_panics() {
+    let mut plan = ArenaPlan::new();
+    plan.add(DType::F32, &[4, 4]).prefix_as(&[5, 4]);
+}

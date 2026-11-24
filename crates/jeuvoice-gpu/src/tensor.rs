@@ -121,6 +121,17 @@ impl Tensor {
         let bytes = n * row_bytes;
         Tensor { offset, dtype: self.dtype, shape, strides: self.strides.clone(), bytes }
     }
+
+    /// The first elements of this tensor as a row-major tensor of `shape`, at the same
+    /// offset. A buffer planned for the largest case can then serve a smaller one.
+    ///
+    /// # Panics
+    /// If `shape` has more elements than this tensor.
+    pub fn prefix_as(&self, shape: &[usize]) -> Tensor {
+        let t = Tensor::new(self.offset, self.dtype, shape);
+        assert!(t.bytes <= self.bytes, "prefix_as: shape {shape:?} has more elements than the tensor {:?}", self.shape);
+        t
+    }
 }
 
 /// Row-major strides: the last dimension is contiguous. Each stride is at most the element
