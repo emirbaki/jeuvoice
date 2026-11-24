@@ -189,3 +189,33 @@ fn merge_heads_rejects_a_bad_width() {
     let arena = Arena::new(&gpu, &plan).unwrap();
     merge_heads(&gpu, &arena, &h, &y).unwrap();
 }
+
+#[test]
+fn attention_flash_tc_last_tile_with_one_key() {
+    // Review finding: seq = 65 and 129 leave a last key tile with exactly one valid key, so
+    // the row max of that tile comes from one lane through the shuffles.
+    let gpu = Gpu::open(0).unwrap();
+    for seq in [65, 129] {
+        let heads = 2;
+        let q = rnd(heads * seq * D, 81, 1.0);
+        let k = rnd(heads * seq * D, 82, 1.0);
+        let v = rnd(heads * seq * D, 83, 1.0);
+        let (got, want) = run(&gpu, AttnKind::FlashTc, &q, &k, &v, heads, seq);
+        assert_close(&format!("flash-tc seq {seq}"), &got, &want, Tol { abs: 3e-3, rel: 2e-2 });
+    }
+}
+
+#[test]
+fn attention_flash_tc_rising_scores() {
+    // Review finding: large scores that grow from tile to tile. Keys 64 and up score twice as
+    // high as the first tile, so the online softmax rescales (alpha < 1) with scores near
+    // 16384 after the scale. The result must be finite and match the CPU.
+    let gpu = Gpu::open(0).unwrap();
+    let (heads, seq) = (1, 130);
+    let q = vec![32.0f32; heads * seq * D];
+    let k: Vec<f32> = (0..heads * seq * D).map(|i| if (i / D) % seq >= 64 { 64.0 } else { 32.0 }).collect();
+    let v = rnd(heads * seq * D, 84, 1.0);
+    let (got, want) = run(&gpu, AttnKind::FlashTc, &q, &k, &v, heads, seq);
+    assert!(got.iter().all(|x| x.is_finite()), "inf or NaN");
+    assert_close("flash-tc rising scores", &got, &want, Tol { abs: 3e-3, rel: 2e-2 });
+}

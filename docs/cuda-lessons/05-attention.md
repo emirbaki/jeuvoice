@@ -149,7 +149,7 @@ Tek bir değişiklik, 7,5 kat hız. **Ders:** tensor core kernel'lerinde bütün
 
 Skaler flash, klasik yola kaybediyordu: klasik yolun ağır kısmını **cuBLAS tensor core'ları** yapıyor. Tensor core'lu flash ise klasik yolu **2,7 kat** geçiyor. Artık iki kazancı birden alıyor: tensor core hızı **ve** 90 MB'lık skor matrisinin hiç yazılmaması (360 MB bellek trafiği).
 
-**Karar:** encoder artık `AttnKind::FlashTc` kullanıyor. Bir 30 saniyelik pencere 252 ms'den **176 ms**'ye indi. Doğruluk da arttı: flash skorları f32 register'larda tutar, klasik yol ise f16 olarak bellekte saklar. Encoder testinde `ses_001_0007`'nin `ln_post` değerleri %2,37 yerine %1,80 oranında toleransın dışında.
+**Karar:** encoder artık `AttnKind::FlashTc` kullanıyor. Bir 30 saniyelik pencere 252 ms'den **176 ms**'ye indi. Doğruluk sonucu karışık: toleransın dışındaki değerler üç klipten ikisinde azaldı (`ses_001_0007` `ln_post`: %2,37 → %1,80, `my_voice2` `ln_post`: %0,75 → %0,50), `my_voice`'ta ise biraz arttı (%1,08 → %1,14). Olası sebep: flash skorları f32 register'larda tutar, klasik yol ise f16 olarak bellekte saklar. Ama `my_voice` sonucu gösteriyor ki bu tek etken değil. Bütün değerler testin sınırı içinde.
 
 Bu dersin asıl kazancı şu: "flash attention daha hızlıdır" cümlesi **tek başına doğru değildir**. Doğrusu: "flash attention ara belleği siler; kazancı, matris çarpımını tensor core'larda yaptığınız ve fragment'leri register'da tuttuğunuz sürece ortaya çıkar."
 
@@ -160,6 +160,11 @@ PTX (`target\oxide-ptx\jeuvoice_gpu.ptx`):
 - `flash_attn_f16`: iç döngüde 4 × `fma.rn.f32` ve 8 × `ld.shared.u16` (q ve k için), `shfl.sync` (8 satırın maksimumu ve toplamı için), `bar.sync` × 4 her dilimde.
 - `ld.local` **olmamalı**: `acc[8]`, `m[8]`, `l[8]`, `s[8]` register'da kalmalı. Kalmıyorsa register baskısı dizileri local memory'ye taşımıştır ve her şey yavaşlar.
 - `split_heads_f16` çok basit bir kopyadır: `ld.global.b16` + `st.global.b16`, indeks bölmeleri. `[1500, 1280]` için ~5 µs.
+- `flash_attn_tc_f16` (tensor core'lu flash):
+  - 128 × `mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32` (64 tanesi `S = Q·Kᵀ`, 64 tanesi `P·V` için).
+  - `ldmatrix.sync.aligned.m8n8.x4.shared.b16` (K için, `.trans` yok) ve `ldmatrix...x4.trans` (V için).
+  - Satır maksimumu ve toplamı için `shfl.sync.bfly.b32` (adım 1 ve 2), ve `ex2.approx` (`expf` içinden).
+  - **Sıfır** `ld.local` ve `st.local`. Görürsen bir dizi register'dan düşmüştür: önce onu düzelt (4.4. bölüm).
 
 Nsight Compute:
 
@@ -171,6 +176,10 @@ ncu --set full -k regex:flash -o fla target\release\gpu-bench.exe attention
 - **Warp State Statistics → Stall Long Scoreboard ve Stall MIO Throttle**: shared bellek bekleyen warp'lar. ILP ekleyince bu düşer.
 - **Speed Of Light**: bellek %20'nin altında, hesap %10 civarı; yani hiçbir kısıt dolu değil. Bu, "latency bound" demektir.
 - `attention_naive_f16` için: timeline'da üç kernel görürsün (GEMM, softmax, GEMM). İlk GEMM'in ardından gelen softmax 90 MB okur. Toplam sürenin çoğu buradadır.
+- `flash_attn_tc_f16` için (`ncu --set full -k regex:flash_attn_tc -o fatc target\release\gpu-bench.exe attention`):
+  - **Compute (SM) → Tensor Pipe Utilization**: tensor core'ların ne kadar dolu olduğu. %80'in üstü iyidir.
+  - **Warp State → Stall Long Scoreboard**: K ve V kopyası sırasında global okuma bekleyen warp'lar. Alıştırma 5'teki önceden yükleme bunu hedefler.
+  - **Memory Workload Analysis → Local Memory**: sıfır olmalı.
 
 ## 7. Alıştırmalar
 

@@ -1310,8 +1310,10 @@ pub mod device {
         let (wm, wn) = ((tid / 32) / 2, (tid / 32) % 2);
         let bm0 = thread::blockIdx_y() as usize * TC_BM;
         let bn0 = thread::blockIdx_x() as usize * TC_BN;
-        // SAFETY: a raw pointer to the shared tiles (no reference to the statics).
-        let (sa, sb) = unsafe { ((*(&raw const SA)).as_ptr(), (*(&raw const SB)).as_ptr()) };
+        // SAFETY: as_raw_mut_ptr makes the pointers from `&raw mut` without a Rust reference to
+        // the statics, so the threads of the block do not hold overlapping `&mut` references.
+        // Each thread writes a different part, and the barriers order the reads after the writes.
+        let (sa, sb) = unsafe { (SharedArray::as_raw_mut_ptr(&raw mut SA), SharedArray::as_raw_mut_ptr(&raw mut SB)) };
 
         let mut acc = [[0.0f32; 4]; 8];
         let mut k0 = 0;
@@ -1322,7 +1324,7 @@ pub mod device {
                 let (r, col) = (i / TC_BK, i % TC_BK);
                 let (gr, gc) = (bm0 + r, k0 + col);
                 // SAFETY: the read is inside A (checked), the write is inside SA.
-                unsafe { SA[r * TC_LDA + col] = if gr < m && gc < k { *a.add(gr * k + gc) } else { 0.0 as f16 } };
+                unsafe { *sa.add(r * TC_LDA + col) = if gr < m && gc < k { *a.add(gr * k + gc) } else { 0.0 as f16 } };
                 i += TC_THREADS as usize;
             }
             let mut i = tid;
@@ -1330,7 +1332,7 @@ pub mod device {
                 let (r, col) = (i / TC_BN, i % TC_BN);
                 let (gr, gc) = (k0 + r, bn0 + col);
                 // SAFETY: the read is inside B (checked), the write is inside SB.
-                unsafe { SB[r * TC_LDB + col] = if gr < k && gc < n { *b.add(gr * n + gc) } else { 0.0 as f16 } };
+                unsafe { *sb.add(r * TC_LDB + col) = if gr < k && gc < n { *b.add(gr * n + gc) } else { 0.0 as f16 } };
                 i += TC_THREADS as usize;
             }
             thread::sync_threads();
@@ -1441,8 +1443,10 @@ pub mod device {
         let (wm, wn) = ((tid / 32) / 2, (tid / 32) % 2);
         let bm0 = thread::blockIdx_y() as usize * TC_BM;
         let bn0 = thread::blockIdx_x() as usize * TC_BN;
-        // SAFETY: raw pointers to the shared tiles (no reference to the statics).
-        let (sa, sb) = unsafe { ((*(&raw mut SA2)).as_mut_ptr(), (*(&raw mut SB2)).as_mut_ptr()) };
+        // SAFETY: as_raw_mut_ptr makes the pointers from `&raw mut` without a Rust reference to
+        // the statics, so the threads of the block do not hold overlapping `&mut` references.
+        // Each thread writes a different part, and the barriers order the reads after the writes.
+        let (sa, sb) = unsafe { (SharedArray::as_raw_mut_ptr(&raw mut SA2), SharedArray::as_raw_mut_ptr(&raw mut SB2)) };
         // Each thread copies 2 chunks of A (64 rows x 4 chunks) and 2 of B (32 rows x 8 chunks).
         let a_chunk = |q: usize, k0: usize| -> Q16 {
             let (r, c8) = (q / 4, (q % 4) * 8);
@@ -1569,8 +1573,10 @@ pub mod device {
         let (g, t) = (lane / 4, lane % 4);
         let base = thread::blockIdx_y() as usize * seq * FLASH_D;
         let row0 = thread::blockIdx_x() as usize * FTC_ROWS + (tid / 32) * 16;
-        // SAFETY: raw pointers to the shared tiles (no reference to the statics).
-        let (sk, sv) = unsafe { ((*(&raw mut SK3)).as_mut_ptr(), (*(&raw mut SV3)).as_mut_ptr()) };
+        // SAFETY: as_raw_mut_ptr makes the pointers from `&raw mut` without a Rust reference to
+        // the statics, so the threads of the block do not hold overlapping `&mut` references.
+        // Each thread writes a different part, and the barriers order the reads after the writes.
+        let (sk, sv) = unsafe { (SharedArray::as_raw_mut_ptr(&raw mut SK3), SharedArray::as_raw_mut_ptr(&raw mut SV3)) };
 
         // 1. This warp's Q slice as A fragments: qa[ks] covers head dims ks*8 .. ks*8+8.
         let mut qa = [[0u32; 2]; 8];

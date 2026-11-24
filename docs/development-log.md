@@ -356,4 +356,4 @@ The product keeps cuBLAS for GEMM.
 | **`FlashTc`, with `unroll!`** | **0.90–0.92 ms** (no local memory) |
 
 - **Local memory finding:** an array indexed by a loop variable goes to local memory when the compiler does not unroll the loop. The `unroll!` macro in `kernels/mod.rs` writes the body out with constant indexes.
-- The encoder now uses `FlashTc`: one 30 s window takes **176.4 ms** (it was 252 ms). The reference test passes on all 3 clips, with fewer values out of tolerance than `Naive` (f32 scores in registers).
+- The encoder now uses `FlashTc`: one 30 s window takes **176.4 ms** (it was 252 ms). The reference test passes on all 3 clips. Values out of tolerance went down on 2 clips (ses_001_0007 ln_post 2.37% to 1.80%, my_voice2 ln_post 0.75% to 0.50%) and up a little on my_voice (ln_post 1.08% to 1.14%). The f32 scores in registers are the likely cause of the gains, but not the only factor.
