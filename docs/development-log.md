@@ -246,3 +246,12 @@ Checked on 2026-11-24, release build, RTX 3050 Ti Laptop (limits: 192 GB/s memor
 - **PTX target sm_75.** The cuda-oxide default target is sm_80, and the driver compiles PTX only for its target or newer cards. So an RTX 20 or GTX 16 card would open but fail to load the kernels. `scripts\cargo.cmd oxide` now sets `CUDA_OXIDE_TARGET=sm_75`. The test `ptx_targets_turing` checks the built PTX. With sm_75 PTX on the sm_86 card: `rmsnorm_f32` 199.6 µs (88%), `rmsnorm_f16` 98.7 µs (89%).
 - **Checked sizes.** `Tensor` fields are private, and only `ArenaPlan::add` makes a `Tensor`. Sizes, offsets and the batched GEMM extents use checked math, so a huge shape or stride panics with a clear message instead of wrapping to a small size. `Element` is sealed to `half::f16`, `f32` and `i32`.
 - **Workspace-wide commands.** `cargo test --workspace` and `cargo clippy --workspace` include `jeuvoice-gpu`, which builds only through `scripts\cargo.cmd oxide`. Use the default members (`scripts\cargo.cmd test`) for a plain build. Every build also needs GitHub access once, to fetch the pinned `NVIDIA/cuda-rust` commit.
+
+## Status (Rust CUDA, Phase 1a: Whisper encoder)
+
+Plan: `docs/superpowers/plans/2026-11-24-rust-cuda-phase1a-encoder.md`.
+
+### Phase 0 review follow-ups
+
+- Fixed: the arena waits for its stream before it frees memory (M1). `Blas` holds its context and checks it on each call (M2). Uploads and downloads bind the context, so other threads can use a `Gpu` (M3). Empty tensors return at once, and grid sizes over `u32` panic with a clear message (M4). `block_sum` ends with a barrier, so a kernel can call it twice (M6). `Blas::load` tries the DLL next to the exe first (M9).
+- Still open: M5 (a real out-of-memory at allocation comes back as a driver error), M7 (`cargo.cmd` limits: CUDA folder order, `!` in PATH, very long PATH), M8 (`--workspace` commands include `jeuvoice-gpu`), M10 (`compare` ignores NaN in `max_rel`).

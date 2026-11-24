@@ -87,6 +87,10 @@ pub mod device {
     /// Step 1: a warp adds its 32 values with 5 register shuffles (16, 8, 4, 2, 1 lanes apart).
     /// Step 2: lane 0 of each warp writes its sum to shared memory, and a barrier waits.
     /// Step 3: every thread adds the 8 warp sums (all threads read one address: a broadcast).
+    /// Step 4: a second barrier, so a later `block_sum` call cannot overwrite the slots while a
+    /// slow warp still reads them.
+    ///
+    /// The block must have exactly `ROW_BLOCK` threads: more threads would write past the slots.
     #[device]
     pub fn block_sum(v: f32) -> f32 {
         static mut WARP_SUMS: SharedArray<f32, ROW_WARPS> = SharedArray::UNINIT;
@@ -104,7 +108,26 @@ pub mod device {
             total += unsafe { WARP_SUMS[i] };
             i += 1;
         }
+        thread::sync_threads();
         total
+    }
+
+    /// Test only: two `block_sum` calls in one kernel. Thread t adds t, then 2t.
+    ///
+    /// # Safety
+    /// One block of `ROW_BLOCK` threads. `out` is valid for 2 elements.
+    #[kernel]
+    pub unsafe fn block_sum_twice_f32(out: *mut f32) {
+        let t = thread::threadIdx_x() as f32;
+        let first = block_sum(t);
+        let second = block_sum(2.0 * t);
+        if thread::threadIdx_x() == 0 {
+            // SAFETY: only thread 0 writes, and `out` has 2 elements.
+            unsafe {
+                *out = first;
+                *out.add(1) = second;
+            }
+        }
     }
 
     /// One block of `ROW_BLOCK` threads per row. Thread `t` reads columns t, t+256, t+512...,

@@ -5,8 +5,9 @@
 //! starts, and the hot loop never allocates.
 
 use std::marker::PhantomData;
+use std::sync::Arc;
 
-use cuda_core::DeviceBuffer;
+use cuda_core::{DeviceBuffer, Stream};
 use cuda_core::sys;
 
 use crate::tensor::{DevSlice, Element, Tensor};
@@ -44,6 +45,16 @@ impl ArenaPlan {
 
 pub struct Arena {
     buf: DeviceBuffer<u8>,
+    /// Kernels on raw pointers hold no lease on `buf`, so `Drop` waits for this stream
+    /// before the memory goes back to the driver.
+    stream: Arc<Stream>,
+}
+
+impl Drop for Arena {
+    fn drop(&mut self) {
+        // A failed sync means the context is already broken. Nothing better can happen here.
+        let _ = self.stream.synchronize();
+    }
 }
 
 impl Arena {
@@ -56,7 +67,7 @@ impl Arena {
             return Err(GpuError::OutOfMemory { needed, free });
         }
         let buf = DeviceBuffer::<u8>::zeroed(gpu.stream(), needed as usize)?;
-        Ok(Arena { buf })
+        Ok(Arena { buf, stream: Arc::clone(gpu.stream()) })
     }
 
     /// The device memory of `t`, typed as `T`.
@@ -76,6 +87,8 @@ impl Arena {
     pub fn upload<T: Element>(&self, gpu: &Gpu, t: &Tensor, data: &[T]) -> Result<(), GpuError> {
         let dst = self.slice::<T>(t);
         assert_eq!(data.len(), dst.len(), "upload length does not match the tensor");
+        // The raw driver calls below use the context of the calling thread.
+        gpu.ctx().bind_to_thread()?;
         let stream = gpu.stream();
         let bytes = std::mem::size_of_val(data);
         // SAFETY: `dst` has room for `bytes` (checked in `slice`), `data` is valid for
@@ -90,6 +103,7 @@ impl Arena {
     /// Copy `t` to the host, after all work queued on the stream before this call.
     pub fn download<T: Element>(&self, gpu: &Gpu, t: &Tensor) -> Result<Vec<T>, GpuError> {
         let src = self.slice::<T>(t);
+        gpu.ctx().bind_to_thread()?;
         let stream = gpu.stream();
         let mut out = Vec::<T>::with_capacity(src.len());
         let bytes = src.len() * std::mem::size_of::<T>();

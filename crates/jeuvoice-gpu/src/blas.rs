@@ -11,8 +11,9 @@
 
 use std::ffi::c_void;
 use std::path::Path;
+use std::sync::Arc;
 
-use cuda_core::sys;
+use cuda_core::{CudaContext, sys};
 use half::f16;
 use libloading::Library;
 
@@ -57,6 +58,8 @@ const DLL: &str = "cublas64_13.dll";
 const DLL: &str = "libcublas.so.13";
 
 pub struct Blas {
+    /// The context the handle belongs to. Held so the handle never outlives it.
+    ctx: Arc<CudaContext>,
     handle: Handle,
     destroy: DestroyFn,
     gemm_ex: GemmExFn,
@@ -66,8 +69,17 @@ pub struct Blas {
 }
 
 impl Blas {
-    /// Load cuBLAS from the normal DLL search path (the exe folder, then PATH).
+    /// Load cuBLAS: first the DLL next to the program, then the normal DLL search path.
+    ///
+    /// The exact path first, because the normal Windows search can also look in the
+    /// current folder, which the user controls.
     pub fn load(gpu: &Gpu) -> Result<Blas, GpuError> {
+        if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+            let next_to_exe = dir.join(DLL);
+            if next_to_exe.is_file() {
+                return Self::open(gpu, next_to_exe.as_os_str());
+            }
+        }
         Self::open(gpu, DLL)
     }
 
@@ -102,7 +114,7 @@ impl Blas {
             unsafe { destroy(handle) };
             return Err(e);
         }
-        Ok(Blas { handle, destroy, gemm_ex, gemm_strided_batched_ex, _lib: lib })
+        Ok(Blas { ctx: Arc::clone(gpu.ctx()), handle, destroy, gemm_ex, gemm_strided_batched_ex, _lib: lib })
     }
 
     /// Row-major `C[m, n] = alpha * op(A) * op(B) + beta * C`, fp16 in and out, fp32 math.
@@ -125,7 +137,7 @@ impl Blas {
         let size = |r: usize, c: usize| r.checked_mul(c).unwrap_or_else(|| panic!("gemm_f16: sizes overflow"));
         assert!(a.len() >= size(m, k) && b.len() >= size(k, n) && c.len() >= size(m, n), "gemm_f16: a buffer is too small");
         let (lda, ldb) = (stored_cols(op_a, m, k), stored_cols(op_b, k, n));
-        gpu.ctx().bind_to_thread()?;
+        self.bind(gpu)?;
         // SAFETY: the sizes are checked above, all three pointers are device memory of the
         // current context, and alpha/beta are f32 as CUBLAS_COMPUTE_32F needs.
         status("cublasGemmEx", unsafe {
@@ -184,7 +196,7 @@ impl Blas {
         let stride = |s: usize| i64::try_from(s).unwrap_or_else(|_| overflow());
         let (stride_a, stride_b, stride_c) = (stride(stride_a), stride(stride_b), stride(stride_c));
         let (lda, ldb) = (stored_cols(op_a, m, k), stored_cols(op_b, k, n));
-        gpu.ctx().bind_to_thread()?;
+        self.bind(gpu)?;
         // SAFETY: as in `gemm_f16`, with the batch extent checked above.
         status("cublasGemmStridedBatchedEx", unsafe {
             (self.gemm_strided_batched_ex)(
@@ -202,8 +214,21 @@ impl Blas {
     }
 }
 
+impl Blas {
+    /// Makes the handle's context current on this thread.
+    ///
+    /// # Panics
+    /// If `gpu` is a different device: the pointers would belong to another context.
+    fn bind(&self, gpu: &Gpu) -> Result<(), GpuError> {
+        assert_eq!(gpu.ctx().cu_ctx(), self.ctx.cu_ctx(), "Blas was loaded for another GPU");
+        self.ctx.bind_to_thread()?;
+        Ok(())
+    }
+}
+
 impl Drop for Blas {
     fn drop(&mut self) {
+        let _ = self.ctx.bind_to_thread();
         // SAFETY: the handle came from `cublasCreate_v2` and is not used after this.
         unsafe { (self.destroy)(self.handle) };
     }
