@@ -1,0 +1,15 @@
+[package]
+name = "jeuvoice-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GPU base for JeuVoice inference: Rust CUDA kernels (cuda-oxide), cuBLAS, buffers, test and benchmark helpers."
+
+# Build and test only through the cuda-oxide backend:
+#   scripts\cargo.cmd oxide test -- -p jeuvoice-gpu
+[dependencies]
+cuda-core.workspace = true
+cuda-device.workspace = true
+cuda-host.workspace = true
+half.workspace = true
+libloading.workspace = true

@@ -1,2 +1,5 @@
+# cuda-oxide (the Rust GPU kernel compiler in crates/jeuvoice-gpu) loads into this exact
+# rustc version only. 1.99.1 is a stable release, so the macOS build uses it too.
 [toolchain]
-channel = "stable"
+channel = "1.99.1"
+components = ["rust-src", "rustc-dev", "llvm-tools", "clippy", "rustfmt"]

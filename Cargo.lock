@@ -183,6 +183,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.105"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2cb931c189b85683d69a5cfad41d4d418671e1ac413dd209f3f2fc31e3cfd902"
+
+[[package]]
 name = "arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -962,6 +968,110 @@ dependencies = [
 ]
 
 [[package]]
+name = "cuda-artifact-finalizer"
+version = "0.4.0"
+source = "git+https://github.com/NVIDIA/cuda-rust?rev=5e5c77b19a4b3204d6542bab2f0fde2a4eed824b#5e5c77b19a4b3204d6542bab2f0fde2a4eed824b"
+dependencies = [
+ "libnvvm-sys",
+ "nvjitlink-sys",
+ "ptx-parse",
+ "serde",
+ "sha2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "cuda-bindings"
+version = "0.5.0"
+source = "git+https://github.com/NVIDIA/cuda-rust?rev=5e5c77b19a4b3204d6542bab2f0fde2a4eed824b#5e5c77b19a4b3204d6542bab2f0fde2a4eed824b"
+dependencies = [
+ "bindgen",
+ "libloading",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "cuda-core"
+version = "0.5.0"
+source = "git+https://github.com/NVIDIA/cuda-rust?rev=5e5c77b19a4b3204d6542bab2f0fde2a4eed824b#5e5c77b19a4b3204d6542bab2f0fde2a4eed824b"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "cuda-bindings",
+ "cuda-core-derive",
+ "cuda-repr",
+ "half",
+ "oxide-artifacts",
+]
+
+[[package]]
+name = "cuda-core-derive"
+version = "0.5.0"
+source = "git+https://github.com/NVIDIA/cuda-rust?rev=5e5c77b19a4b3204d6542bab2f0fde2a4eed824b#5e5c77b19a4b3204d6542bab2f0fde2a4eed824b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "cuda-device"
+version = "0.4.0"
+source = "git+https://github.com/NVIDIA/cuda-rust?rev=5e5c77b19a4b3204d6542bab2f0fde2a4eed824b#5e5c77b19a4b3204d6542bab2f0fde2a4eed824b"
+dependencies = [
+ "bytemuck",
+ "cuda-macros",
+ "cuda-repr",
+]
+
+[[package]]
+name = "cuda-host"
+version = "0.4.0"
+source = "git+https://github.com/NVIDIA/cuda-rust?rev=5e5c77b19a4b3204d6542bab2f0fde2a4eed824b#5e5c77b19a4b3204d6542bab2f0fde2a4eed824b"
+dependencies = [
+ "cuda-artifact-finalizer",
+ "cuda-core",
+ "cuda-device",
+ "cuda-macros",
+ "half",
+ "libc",
+ "oxide-artifacts",
+ "ptx-parse",
+ "sha2",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "cuda-macros"
+version = "0.4.0"
+source = "git+https://github.com/NVIDIA/cuda-rust?rev=5e5c77b19a4b3204d6542bab2f0fde2a4eed824b#5e5c77b19a4b3204d6542bab2f0fde2a4eed824b"
+dependencies = [
+ "oxide-tile-export",
+ "proc-macro2",
+ "quote",
+ "reserved-oxide-symbols",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "cuda-repr"
+version = "0.5.0"
+source = "git+https://github.com/NVIDIA/cuda-rust?rev=5e5c77b19a4b3204d6542bab2f0fde2a4eed824b#5e5c77b19a4b3204d6542bab2f0fde2a4eed824b"
+
+[[package]]
+name = "cuda-target-spec"
+version = "0.4.0"
+source = "git+https://github.com/NVIDIA/cuda-rust?rev=5e5c77b19a4b3204d6542bab2f0fde2a4eed824b#5e5c77b19a4b3204d6542bab2f0fde2a4eed824b"
+
+[[package]]
+name = "cuda-toolkit-discovery"
+version = "0.1.0"
+source = "git+https://github.com/NVIDIA/cuda-rust?rev=5e5c77b19a4b3204d6542bab2f0fde2a4eed824b#5e5c77b19a4b3204d6542bab2f0fde2a4eed824b"
+
+[[package]]
 name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1519,6 +1629,7 @@ version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
 dependencies = [
+ "bytemuck",
  "cfg-if",
  "crunchy",
  "num-traits",
@@ -1930,6 +2041,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jeuvoice-gpu"
+version = "0.0.1"
+dependencies = [
+ "cuda-core",
+ "cuda-device",
+ "cuda-host",
+ "half",
+ "libloading",
+]
+
+[[package]]
 name = "jeuvoice-kaggle"
 version = "0.0.1"
 dependencies = [
@@ -2098,6 +2220,17 @@ name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
+name = "libnvvm-sys"
+version = "0.4.0"
+source = "git+https://github.com/NVIDIA/cuda-rust?rev=5e5c77b19a4b3204d6542bab2f0fde2a4eed824b#5e5c77b19a4b3204d6542bab2f0fde2a4eed824b"
+dependencies = [
+ "cuda-target-spec",
+ "cuda-toolkit-discovery",
+ "libloading",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "libredox"
@@ -2463,6 +2596,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "nvjitlink-sys"
+version = "0.4.0"
+source = "git+https://github.com/NVIDIA/cuda-rust?rev=5e5c77b19a4b3204d6542bab2f0fde2a4eed824b#5e5c77b19a4b3204d6542bab2f0fde2a4eed824b"
+dependencies = [
+ "cuda-toolkit-discovery",
+ "libloading",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2846,6 +2989,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "object"
+version = "0.36.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
+dependencies = [
+ "crc32fast",
+ "hashbrown 0.15.5",
+ "indexmap",
+ "memchr",
+]
+
+[[package]]
 name = "oboe"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2923,6 +3078,25 @@ checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "oxide-artifacts"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74d9a941c0c43d2dceaf25f5c9ca4c9f9cceb28dfa5e4e3cfd14e476f003e7c9"
+dependencies = [
+ "object",
+]
+
+[[package]]
+name = "oxide-tile-export"
+version = "0.4.0"
+source = "git+https://github.com/NVIDIA/cuda-rust?rev=5e5c77b19a4b3204d6542bab2f0fde2a4eed824b#5e5c77b19a4b3204d6542bab2f0fde2a4eed824b"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3272,6 +3446,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
+name = "ptx-parse"
+version = "0.4.0"
+source = "git+https://github.com/NVIDIA/cuda-rust?rev=5e5c77b19a4b3204d6542bab2f0fde2a4eed824b#5e5c77b19a4b3204d6542bab2f0fde2a4eed824b"
+
+[[package]]
 name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3458,6 +3637,11 @@ name = "renderdoc-sys"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
+
+[[package]]
+name = "reserved-oxide-symbols"
+version = "0.4.0"
+source = "git+https://github.com/NVIDIA/cuda-rust?rev=5e5c77b19a4b3204d6542bab2f0fde2a4eed824b#5e5c77b19a4b3204d6542bab2f0fde2a4eed824b"
 
 [[package]]
 name = "resvg"

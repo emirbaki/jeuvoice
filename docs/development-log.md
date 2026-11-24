@@ -187,3 +187,35 @@ The user guide for teammates is in [docs/user-guide.md](user-guide.md).
 
 - The free-space check does not work on macOS. It never blocks setup there.
 - The macOS build is not tested.
+
+## Status (Rust CUDA, Phase 0: GPU base)
+
+Plan: `docs/superpowers/plans/2026-11-24-rust-cuda-phase0.md`. Spec: `docs/superpowers/specs/2026-11-24-rust-cuda-inference-design.md`.
+
+### Build way 1: the whole workspace builds with the cuda-oxide backend
+
+Checked on 2026-11-24. With `rust-toolchain.toml` on 1.99.1, `cargo oxide build -- -p jeuvoice-app --release` built the release app in 26 min (most of it is whisper.cpp with CUDA). The app started and opened its window. So the kernels live inside the workspace, in `crates/jeuvoice-gpu`, and no separate PTX build step is needed.
+
+`jeuvoice-gpu` is a workspace member but not a default member. A plain `cargo build` or `cargo test` leaves it out, so the app still builds without the cuda-oxide tools.
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `scripts\cargo.cmd test` | Plain tests of the default members. No cuda-oxide tools needed. |
+| `scripts\cargo.cmd oxide test -- -p jeuvoice-gpu` | GPU tests through the cuda-oxide backend. |
+| `scripts\cargo.cmd oxide run -- -p jeuvoice-gpu --bin gpu-bench --release` | The kernel benchmark table. |
+
+### Tools for the GPU build (Windows)
+
+1. Rust 1.99.1 with `rust-src`, `rustc-dev`, `llvm-tools` (rustup installs them from `rust-toolchain.toml`).
+2. The CUDA 13 toolkit (13.4 here).
+3. LLVM for `libclang.dll`: `winget install --id LLVM.LLVM -e`.
+4. libffi from vcpkg: `vcpkg install libffi:x64-windows`. Set `JEUVOICE_VCPKG` to the vcpkg folder if it is not in `C:\vcpkg`, `D:\vcpkg` or `%USERPROFILE%\vcpkg`.
+5. cargo-oxide: `cargo +1.99.1 install --git https://github.com/NVIDIA/cuda-rust.git cargo-oxide`, then `cargo oxide setup` once.
+
+### Problems found and the fixes
+
+- **MinGW on PATH breaks the cuda-bindings build.** libclang reads the MinGW headers and fails. `scripts\cargo.cmd oxide ...` removes every PATH entry with `mingw` in it.
+- **vcvars64.bat sets `VCPKG_ROOT`** to the Visual Studio copy of vcpkg, which has no libffi. The script looks for `ffi.lib` in the usual folders instead.
+- **The backend needs the exact toolchain.** With `channel = "stable"`, cargo-oxide stops with "the cuda-oxide main clone needs Rust 1.99.1".
