@@ -6,7 +6,7 @@ use half::f16;
 use jeuvoice_gpu::bench::{Timing, pct_of_memory_limit, pct_of_tensor_limit, time_on_stream};
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
-    AttnKind, GemmKind, LayerNormKind, SoftmaxKind, Width, attention, bias_gelu_with, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive,
+    AttnKind, ConvKind, GemmKind, LayerNormKind, SoftmaxKind, Width, attention, bias_gelu_with, conv1d, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive,
     softmax_rows_with,
 };
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
@@ -92,6 +92,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, kind) in [("attention_naive_f16", AttnKind::Naive), ("attention_flash_f16", AttnKind::Flash)] {
         if name.contains(&filter) {
             rows.push(bench_attention(&gpu, name, kind, 20, 1500)?);
+        }
+    }
+
+    // conv1d rows: the two convolutions of the Whisper encoder stem.
+    for (name, kind) in [("conv1d_direct_f16", ConvKind::Direct), ("conv1d_im2col_f16", ConvKind::Im2col)] {
+        if name.contains(&filter) {
+            rows.push(bench_conv1d(&gpu, name, kind, 128, 1280, 3000, 1)?);
+            rows.push(bench_conv1d(&gpu, name, kind, 1280, 1280, 3000, 2)?);
         }
     }
 
@@ -243,6 +251,30 @@ fn bench_attention(gpu: &Gpu, name: &str, kind: AttnKind, heads: usize, seq: usi
     Ok(Row {
         name: name.into(),
         size: format!("{heads}x{seq}x64"),
+        t,
+        rate: (flops as f64 / (t.us * 1e-6) / 1e12, "TF/s"),
+        pct: pct_of_tensor_limit(flops, &t, gpu.info()),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bench_conv1d(gpu: &Gpu, name: &str, kind: ConvKind, c_in: usize, c_out: usize, t_in: usize, stride: usize) -> Result<Row, GpuError> {
+    let blas = Blas::load(gpu)?;
+    let t_out = (t_in - 1) / stride + 1;
+    let mut plan = ArenaPlan::new();
+    let x = plan.add(DType::F16, &[c_in, t_in]);
+    let w = plan.add(DType::F16, &[c_out, c_in, 3]);
+    let y = plan.add(DType::F16, &[c_out, t_out]);
+    let col = plan.add(DType::F16, &[c_in * 3, t_out]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &x, &vec![f16::from_f32(0.01); c_in * t_in])?;
+    arena.upload(gpu, &w, &vec![f16::from_f32(0.02); c_out * c_in * 3])?;
+    let scratch = if kind == ConvKind::Im2col { Some(&col) } else { None };
+    let t = time_on_stream(gpu, 2, 10, || conv1d(gpu, &arena, &blas, &x, &w, &y, stride, scratch, kind))?;
+    let flops = 2 * (c_out * t_out * c_in * 3) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{c_in}>{c_out} t{t_in}/{stride}"),
         t,
         rate: (flops as f64 / (t.us * 1e-6) / 1e12, "TF/s"),
         pct: pct_of_tensor_limit(flops, &t, gpu.info()),

@@ -4,12 +4,14 @@
 use cuda_core::LaunchConfig;
 
 mod attention;
+mod conv1d;
 mod elementwise;
 mod gemm_lesson;
 mod layernorm;
 mod rmsnorm;
 mod softmax;
 pub use attention::{ATTN_SCALE, AttnKind, attention, merge_heads, split_heads};
+pub use conv1d::{ConvKind, conv1d};
 pub use elementwise::{Width, add_into, add_rows, bias_add, bias_gelu, bias_gelu_with};
 pub use gemm_lesson::{GemmKind, gemm_lesson};
 pub use layernorm::{LayerNormKind, layernorm, layernorm_with};

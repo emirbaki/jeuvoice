@@ -1126,4 +1126,69 @@ pub mod device {
         // SAFETY: as in `split_heads_f16`.
         unsafe { *x.add(s * heads * FLASH_D + h * FLASH_D + d) = *y.add(i) };
     }
+
+    // ---- conv1d with kernel size 3 and padding 1 (lesson 6: docs/cuda-lessons/06-conv1d.md) ----
+    // y[co][t] = sum over ci and k of w[co][ci][k] * x[ci][t * stride + k - 1]
+    // An input index outside 0..t_in reads as zero (the padding).
+
+    /// The direct form: one thread for each output `y[co][t]`, which adds `3 * c_in` products.
+    ///
+    /// # Safety
+    /// `x` is valid for `c_in * t_in`, `w` for `c_out * c_in * 3`, `y` for `c_out * t_out`,
+    /// and `y` overlaps neither.
+    #[kernel]
+    pub unsafe fn conv1d_k3_direct_f16(
+        x: *const f16,
+        w: *const f16,
+        y: *mut f16,
+        c_in: usize,
+        t_in: usize,
+        c_out: usize,
+        t_out: usize,
+        stride: usize,
+    ) {
+        let i = thread::index_1d().get();
+        if i >= c_out * t_out {
+            return;
+        }
+        let (co, t) = (i / t_out, i % t_out);
+        let mut s = 0.0f32;
+        let mut ci = 0;
+        while ci < c_in {
+            let mut k = 0;
+            while k < 3 {
+                // `t * stride + k` is the padded index. Index 0 and t_in + 1 are padding.
+                let p = t * stride + k;
+                if p >= 1 && p <= t_in {
+                    // SAFETY: co < c_out, ci < c_in, k < 3, and p - 1 < t_in.
+                    unsafe { s += *w.add((co * c_in + ci) * 3 + k) as f32 * *x.add(ci * t_in + p - 1) as f32 };
+                }
+                k += 1;
+            }
+            ci += 1;
+        }
+        // SAFETY: i < c_out * t_out, and one thread writes each output.
+        unsafe { *y.add(i) = s as f16 };
+    }
+
+    /// The im2col step: `col[ci * 3 + k][t] = x[ci][t * stride + k - 1]` (zero for padding).
+    /// Then `y = w · col` is one GEMM, because `w` `[c_out, c_in, 3]` is already the matrix
+    /// `[c_out, c_in * 3]` in memory.
+    ///
+    /// # Safety
+    /// `x` is valid for `c_in * t_in`, `col` for `c_in * 3 * t_out`, and they do not overlap.
+    #[kernel]
+    pub unsafe fn im2col_k3_f16(x: *const f16, col: *mut f16, c_in: usize, t_in: usize, t_out: usize, stride: usize) {
+        let i = thread::index_1d().get();
+        if i >= c_in * 3 * t_out {
+            return;
+        }
+        let (r, t) = (i / t_out, i % t_out);
+        let (ci, k) = (r / 3, r % 3);
+        let p = t * stride + k;
+        // SAFETY: ci < c_in, and p - 1 < t_in in the branch that reads.
+        let v = if p >= 1 && p <= t_in { unsafe { *x.add(ci * t_in + p - 1) } } else { 0.0 as f16 };
+        // SAFETY: i < c_in * 3 * t_out, one thread for each element.
+        unsafe { *col.add(i) = v };
+    }
 }
