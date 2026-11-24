@@ -1,6 +1,6 @@
 use half::f16;
 use jeuvoice_gpu::check::{Tol, assert_close};
-use jeuvoice_gpu::ops::layernorm;
+use jeuvoice_gpu::ops::{LayerNormKind, layernorm_with};
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu};
 
 const EPS: f32 = 1e-5;
@@ -30,7 +30,7 @@ fn cpu_layernorm(x: &[f32], g: &[f32], b: &[f32], d: usize) -> Vec<f32> {
 }
 
 /// Runs `layernorm` in `dtype` and returns y as f32. Inputs are rounded to `dtype` first.
-fn run(gpu: &Gpu, dtype: DType, x: &[f32], g: &[f32], b: &[f32], rows: usize, d: usize) -> (Vec<f32>, Vec<f32>) {
+fn run_kind(gpu: &Gpu, dtype: DType, kind: LayerNormKind, x: &[f32], g: &[f32], b: &[f32], rows: usize, d: usize) -> (Vec<f32>, Vec<f32>) {
     let mut plan = ArenaPlan::new();
     let tx = plan.add(dtype, &[rows, d]);
     let tg = plan.add(dtype, &[d]);
@@ -53,13 +53,18 @@ fn run(gpu: &Gpu, dtype: DType, x: &[f32], g: &[f32], b: &[f32], rows: usize, d:
             cpu_layernorm(x, g, b, d)
         }
     };
-    layernorm(gpu, &arena, &tx, &tg, &tb, &ty, EPS).unwrap();
+    layernorm_with(gpu, &arena, &tx, &tg, &tb, &ty, EPS, kind).unwrap();
     let got = match dtype {
         DType::F16 => back(&arena.download::<f16>(gpu, &ty).unwrap()),
         _ => arena.download::<f32>(gpu, &ty).unwrap(),
     };
     (got, want)
 }
+
+fn run(gpu: &Gpu, dtype: DType, x: &[f32], g: &[f32], b: &[f32], rows: usize, d: usize) -> (Vec<f32>, Vec<f32>) {
+    run_kind(gpu, dtype, LayerNormKind::RegistersPairs, x, g, b, rows, d)
+}
+
 
 #[test]
 fn layernorm_shapes() {
@@ -86,4 +91,26 @@ fn layernorm_large_offset() {
     let b = vec![0.0; d];
     let (got, want) = run(&gpu, DType::F32, &x, &g, &b, rows, d);
     assert_close("layernorm offset 1000", &got, &want, Tol { abs: 1e-3, rel: 1e-3 });
+}
+
+/// Both kernels must match the CPU reference. The register kernel keeps the row in registers,
+/// so it reads `x` once instead of three times (lesson 2). A row wider than
+/// `ROW_BLOCK * MAX_COLS_PER_THREAD` falls back to the three-pass kernel.
+#[test]
+fn layernorm_kinds_agree() {
+    let gpu = Gpu::open(0).unwrap();
+    for (rows, d) in [(1500, 1280), (7, 1000), (3, 64), (5, 2048), (2, 3000)] {
+        let x = rnd(rows * d, 31, 3.0);
+        let g: Vec<f32> = rnd(d, 32, 0.2).iter().map(|v| 1.0 + v).collect();
+        let b = rnd(d, 33, 0.5);
+        for (dtype, tol) in [
+            (DType::F32, Tol { abs: 1e-5, rel: 1e-4 }),
+            (DType::F16, Tol { abs: 2e-3, rel: 1e-2 }),
+        ] {
+            for kind in [LayerNormKind::ThreePass, LayerNormKind::Registers, LayerNormKind::RegistersPairs] {
+                let (got, want) = run_kind(&gpu, dtype, kind, &x, &g, &b, rows, d);
+                assert_close(&format!("layernorm {dtype:?} {kind:?} {rows}x{d}"), &got, &want, tol);
+            }
+        }
+    }
 }

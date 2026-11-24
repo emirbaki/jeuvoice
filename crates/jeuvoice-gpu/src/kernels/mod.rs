@@ -4,8 +4,13 @@
 
 use cuda_device::{DisjointSlice, SharedArray, cuda_module, device, kernel, thread, warp};
 
-/// Threads per block of the row kernels (RMSNorm). 256 threads = 8 warps of 32.
+/// Threads per block of the row kernels (RMSNorm, LayerNorm). 256 threads = 8 warps of 32.
 pub const ROW_BLOCK: u32 = 256;
+/// The most columns one thread keeps in registers in the LayerNorm register kernel.
+/// A row of up to `ROW_BLOCK * MAX_COLS_PER_THREAD` (2048) columns takes this path.
+pub const MAX_COLS_PER_THREAD: usize = 8;
+/// The same for the pair kernel: it covers `2 * ROW_BLOCK * MAX_PAIRS_PER_THREAD` (2048) columns.
+pub const MAX_PAIRS_PER_THREAD: usize = 4;
 const ROW_WARPS: usize = (ROW_BLOCK / 32) as usize;
 
 #[cuda_module]
@@ -380,6 +385,178 @@ pub mod device {
                 *y.add(base + c) = v as f16;
             }
             c += step;
+        }
+    }
+
+    /// LayerNorm with the row in registers: one read of `x`, then the mean and the variance
+    /// of `x - mean` from the registers, then one write of `y`. The other kernel reads `x`
+    /// in all three passes, and the L1 cache serves the last two.
+    ///
+    /// The two-pass form stays: the variance comes from `x - mean`, not from
+    /// `E[x^2] - E[x]^2`. Only the storage of `x` changes.
+    ///
+    /// # Safety
+    /// `x` and `y` are valid for `rows * d`, `gamma` and `beta` for `d`, `y` overlaps none of
+    /// them, and `d <= ROW_BLOCK * MAX_COLS_PER_THREAD`. The grid has one block per row and
+    /// `ROW_BLOCK` threads.
+    #[kernel]
+    pub unsafe fn layernorm_regs_f32(x: *const f32, gamma: *const f32, beta: *const f32, y: *mut f32, d: usize, eps: f32) {
+        let base = thread::blockIdx_x() as usize * d;
+        let tid = thread::threadIdx_x() as usize;
+        let step = ROW_BLOCK as usize;
+        // Load the row once. A slot past the row end stays 0.0 and is masked below.
+        let mut v = [0.0f32; MAX_COLS_PER_THREAD];
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            let c = tid + j * step;
+            if c < d {
+                // SAFETY: c < d, one block per row.
+                v[j] = unsafe { *x.add(base + c) };
+            }
+            j += 1;
+        }
+        let mut s = 0.0f32;
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            s += v[j];
+            j += 1;
+        }
+        let mean = block_sum(s) / d as f32;
+        let mut s = 0.0f32;
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            if tid + j * step < d {
+                let t = v[j] - mean;
+                s += t * t;
+            }
+            j += 1;
+        }
+        let inv = 1.0 / (block_sum(s) / d as f32 + eps).sqrt();
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            let c = tid + j * step;
+            if c < d {
+                // SAFETY: each (row, c) belongs to exactly one thread.
+                unsafe { *y.add(base + c) = (v[j] - mean) * inv * *gamma.add(c) + *beta.add(c) };
+            }
+            j += 1;
+        }
+    }
+
+    /// `layernorm_regs_f32` for fp16 data: loads fp16, all math in f32, stores fp16.
+    ///
+    /// # Safety
+    /// As `layernorm_regs_f32`.
+    #[kernel]
+    pub unsafe fn layernorm_regs_f16(x: *const f16, gamma: *const f16, beta: *const f16, y: *mut f16, d: usize, eps: f32) {        let base = thread::blockIdx_x() as usize * d;
+        let tid = thread::threadIdx_x() as usize;
+        let step = ROW_BLOCK as usize;
+        let mut v = [0.0f32; MAX_COLS_PER_THREAD];
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            let c = tid + j * step;
+            if c < d {
+                // SAFETY: as in `layernorm_regs_f32`.
+                v[j] = unsafe { *x.add(base + c) } as f32;
+            }
+            j += 1;
+        }
+        let mut s = 0.0f32;
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            s += v[j];
+            j += 1;
+        }
+        let mean = block_sum(s) / d as f32;
+        let mut s = 0.0f32;
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            if tid + j * step < d {
+                let t = v[j] - mean;
+                s += t * t;
+            }
+            j += 1;
+        }
+        let inv = 1.0 / (block_sum(s) / d as f32 + eps).sqrt();
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            let c = tid + j * step;
+            if c < d {
+                // SAFETY: as in `layernorm_regs_f32`.
+                unsafe {
+                    let o = (v[j] - mean) * inv * *gamma.add(c) as f32 + *beta.add(c) as f32;
+                    *y.add(base + c) = o as f16;
+                }
+            }
+            j += 1;
+        }
+    }
+
+    /// As `layernorm_regs_f16`, but each thread takes two neighbor columns as one `[f16; 2]`.
+    /// Half the loads and the stores, and the row needs half the register slots.
+    /// `d2` counts pairs, so the row length must be even.
+    ///
+    /// # Safety
+    /// `x` and `y` are valid for `rows * d2` pairs, `gamma` and `beta` for `d2` pairs, all
+    /// 4-byte aligned, `y` overlaps none of them, and `d2 <= ROW_BLOCK * MAX_PAIRS_PER_THREAD`.
+    /// The grid has one block per row and `ROW_BLOCK` threads.
+    #[kernel]
+    pub unsafe fn layernorm_regs_f16x2(
+        x: *const [f16; 2],
+        gamma: *const [f16; 2],
+        beta: *const [f16; 2],
+        y: *mut [f16; 2],
+        d2: usize,
+        eps: f32,
+    ) {
+        let base = thread::blockIdx_x() as usize * d2;
+        let tid = thread::threadIdx_x() as usize;
+        let step = ROW_BLOCK as usize;
+        // Four pairs per thread: 8 f32 registers, and a row of up to 2048 columns.
+        let mut v = [0.0f32; 2 * MAX_PAIRS_PER_THREAD];
+        let mut j = 0;
+        while j < MAX_PAIRS_PER_THREAD {
+            let c = tid + j * step;
+            if c < d2 {
+                // SAFETY: c < d2, one block per row, 4-byte aligned pairs.
+                let p = unsafe { *x.add(base + c) };
+                v[2 * j] = p[0] as f32;
+                v[2 * j + 1] = p[1] as f32;
+            }
+            j += 1;
+        }
+        let mut s = 0.0f32;
+        let mut k = 0;
+        while k < 2 * MAX_PAIRS_PER_THREAD {
+            s += v[k];
+            k += 1;
+        }
+        let mean = block_sum(s) / (2 * d2) as f32;
+        let mut s = 0.0f32;
+        let mut j = 0;
+        while j < MAX_PAIRS_PER_THREAD {
+            if tid + j * step < d2 {
+                let t0 = v[2 * j] - mean;
+                let t1 = v[2 * j + 1] - mean;
+                s += t0 * t0 + t1 * t1;
+            }
+            j += 1;
+        }
+        let inv = 1.0 / (block_sum(s) / (2 * d2) as f32 + eps).sqrt();
+        let mut j = 0;
+        while j < MAX_PAIRS_PER_THREAD {
+            let c = tid + j * step;
+            if c < d2 {
+                // SAFETY: each (row, c) pair belongs to exactly one thread.
+                unsafe {
+                    let g = *gamma.add(c);
+                    let b = *beta.add(c);
+                    let o0 = (v[2 * j] - mean) * inv * g[0] as f32 + b[0] as f32;
+                    let o1 = (v[2 * j + 1] - mean) * inv * g[1] as f32 + b[1] as f32;
+                    *y.add(base + c) = [o0 as f16, o1 as f16];
+                }
+            }
+            j += 1;
         }
     }
 }

@@ -5,7 +5,7 @@
 use half::f16;
 use jeuvoice_gpu::bench::{Timing, pct_of_memory_limit, pct_of_tensor_limit, time_on_stream};
 use jeuvoice_gpu::blas::{Blas, Op};
-use jeuvoice_gpu::ops::{Width, bias_gelu_with, rmsnorm, rmsnorm_naive};
+use jeuvoice_gpu::ops::{LayerNormKind, Width, bias_gelu_with, layernorm_with, rmsnorm, rmsnorm_naive};
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
 
 /// One row of the table.
@@ -49,6 +49,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, width) in [("bias_gelu_x1", Width::One), ("bias_gelu_x2", Width::Two), ("bias_gelu_x2_b32", Width::TwoPacked)] {
         if name.contains(&filter) {
             rows.push(bench_bias_gelu(&gpu, name, width, 1500, 5120)?);
+        }
+    }
+
+    // LayerNorm rows: one encoder activation, [1500, 1280] out of 32 blocks.
+    for (name, dtype, kind) in [
+        ("layernorm_3pass_f16", DType::F16, LayerNormKind::ThreePass),
+        ("layernorm_f16_regs", DType::F16, LayerNormKind::Registers),
+        ("layernorm_f16", DType::F16, LayerNormKind::RegistersPairs),
+        ("layernorm_f32", DType::F32, LayerNormKind::RegistersPairs),
+        ("layernorm_f16_x4", DType::F16, LayerNormKind::RegistersPairs),
+    ] {
+        if name.contains(&filter) {
+            // The x4 row is 4 times the rows of one window: the launch cost fades there.
+            let n_rows = if name.ends_with("x4") { 6000 } else { 1500 };
+            rows.push(bench_layernorm(&gpu, name, dtype, kind, n_rows, 1280)?);
         }
     }
 
@@ -102,6 +117,38 @@ fn bench_rmsnorm(gpu: &Gpu, name: &str, dtype: DType, naive: bool, rows: usize, 
         }
     })?;
     // Bytes moved: read x once, write y once. w is small and stays in the cache.
+    let bytes = (2 * rows * d * dtype.size()) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{rows}x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+/// LayerNorm moves x in and y out. gamma and beta are one row and stay in the cache.
+fn bench_layernorm(gpu: &Gpu, name: &str, dtype: DType, kind: LayerNormKind, rows: usize, d: usize) -> Result<Row, GpuError> {
+    let mut plan = ArenaPlan::new();
+    let x = plan.add(dtype, &[rows, d]);
+    let g = plan.add(dtype, &[d]);
+    let b = plan.add(dtype, &[d]);
+    let y = plan.add(dtype, &[rows, d]);
+    let arena = Arena::new(gpu, &plan)?;
+    match dtype {
+        DType::F16 => {
+            arena.upload(gpu, &x, &vec![f16::from_f32(0.5); rows * d])?;
+            arena.upload(gpu, &g, &vec![f16::from_f32(1.0); d])?;
+            arena.upload(gpu, &b, &vec![f16::from_f32(0.0); d])?;
+        }
+        _ => {
+            arena.upload(gpu, &x, &vec![0.5f32; rows * d])?;
+            arena.upload(gpu, &g, &vec![1.0f32; d])?;
+            arena.upload(gpu, &b, &vec![0.0f32; d])?;
+        }
+    }
+    let t = time_on_stream(gpu, 3, 50, || layernorm_with(gpu, &arena, &x, &g, &b, &y, 1e-5, kind))?;
+    // Bytes moved: read x once, write y once.
     let bytes = (2 * rows * d * dtype.size()) as u64;
     Ok(Row {
         name: name.into(),
