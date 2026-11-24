@@ -54,7 +54,7 @@ The full design: `docs/superpowers/specs/2026-11-24-rust-cuda-inference-design.m
 ## 4. The next steps, in order
 
 1. **The tensor-core task is done** on the branch `rust-cuda-tensor-cores` (plan `docs/superpowers/plans/2026-11-24-rust-cuda-tensor-cores.md`, reviewed). Merge it to `main` only when the user says so. Results: `gemm_tc_pre_f16` 377–383 µs vs cuBLAS 287–364 µs at `1500 x 1280 x 1280`. `flash_attn_tc_f16` 0.90 ms vs 2.49 ms for the naive attention. The encoder uses `AttnKind::FlashTc`: **176 ms per 30 s window** (it was 252 ms). Lessons 4 and 5 have the new sections.
-2. **Drop the 86 MB `scores` tensor** from the encoder arena when the attention kind is `FlashTc` (review minor M8 of the tensor-core branch). Small, and it matters on a 4 GB card.
+2. **Done:** the encoder plans the 86 MB `scores` tensor only for `AttnKind::Naive`. Activations: 165 MB to 79 MB.
 3. **Write the Phase 1b plan.** The spec, Phase 1 section, lists what it must cover. Section 8 below lists the facts for it. It must also handle the deferred findings M1 and M6 of the Phase 1a review (section 7).
 
 Key findings of the tensor-core task (details in `docs/development-log.md` and the lessons):
@@ -129,7 +129,7 @@ Phase 1a, Tasks 8-10 and the review (this agent):
 | GPU mel, one 30 s window | upload, compute, download | 3.24 ms | — |
 | CPU mel port (f64, plain DFT) | one 30 s window | 311.8 ms | — |
 | **The encoder** | one 30 s window | **252 ms** | about 140 ms GEMM, 80 ms attention |
-| Encoder memory | weights / activations | 1214 MB / 165 MB | — |
+| Encoder memory | weights / activations | 1214 MB / 79 MB (165 MB with Naive) | — |
 
 The % column for cuBLAS can pass 100. `DeviceInfo` reports 15.2 TFLOP/s fp16, and the card boosts above that. A first run on an idle GPU reads one step low. Run the table twice.
 

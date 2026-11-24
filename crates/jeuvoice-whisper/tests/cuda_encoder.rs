@@ -149,3 +149,17 @@ fn encoder_timing() {
         enc.activation_bytes() >> 20
     );
 }
+
+#[test]
+#[ignore = "needs the model file"]
+fn flash_tc_encoder_plans_no_scores_tensor() {
+    // The default encoder (FlashTc) has no [20, 1500, 1500] score tensor: 86 MB less video
+    // memory. A Naive encoder still has it.
+    let gpu = Gpu::open(0).unwrap();
+    let model = GgmlModel::open(&jeuvoice_whisper::model_path()).unwrap();
+    let scores = 20 * 1500 * 1500 * 2;
+    let flash = Encoder::load(&gpu, &model).unwrap().activation_bytes();
+    let naive = Encoder::load_with_attention(&gpu, &model, jeuvoice_gpu::ops::AttnKind::Naive).unwrap().activation_bytes();
+    eprintln!("activations: FlashTc {} MB, Naive {} MB", flash >> 20, naive >> 20);
+    assert!(naive - flash >= scores, "the FlashTc encoder still plans the score tensor");
+}

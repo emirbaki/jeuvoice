@@ -245,7 +245,7 @@ fn bench_attention(gpu: &Gpu, name: &str, kind: AttnKind, heads: usize, seq: usi
     arena.upload(gpu, &q, &vec![f16::from_f32(0.01); heads * seq * 64])?;
     arena.upload(gpu, &k, &vec![f16::from_f32(0.01); heads * seq * 64])?;
     arena.upload(gpu, &v, &vec![f16::from_f32(0.01); heads * seq * 64])?;
-    let t = time_on_stream(gpu, 3, 20, || attention(gpu, &arena, &blas, &q, &k, &v, &out, &scratch, kind))?;
+    let t = time_on_stream(gpu, 3, 20, || attention(gpu, &arena, &blas, &q, &k, &v, &out, Some(&scratch), kind))?;
     // Two matrix multiplies: Q·K^T and probs·V.
     let flops = 4 * (heads * seq * seq * 64) as u64;
     Ok(Row {

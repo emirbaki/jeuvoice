@@ -53,8 +53,8 @@ struct Acts {
     kh: Tensor,
     vh: Tensor,
     oh: Tensor,
-    /// `[heads, n_ctx, n_ctx]`: the attention scores.
-    scores: Tensor,
+    /// `[heads, n_ctx, n_ctx]`: the attention scores. Only `AttnKind::Naive` has it (86 MB).
+    scores: Option<Tensor>,
     /// `[n_ctx, d]`: the merged heads.
     att: Tensor,
     /// `[n_ctx, d]`: the output of the attention projection and of mlp2.
@@ -76,8 +76,14 @@ pub struct Encoder {
 
 impl Encoder {
     /// Plans the weights and the activations in one arena, allocates it, and uploads the
-    /// encoder weights of `model`.
+    /// encoder weights of `model`. The attention is `AttnKind::FlashTc`.
     pub fn load(gpu: &Gpu, model: &GgmlModel) -> Result<Encoder, WhisperError> {
+        Self::load_with_attention(gpu, model, AttnKind::FlashTc)
+    }
+
+    /// As `load`, with a chosen attention kernel. Only `AttnKind::Naive` plans the
+    /// `[heads, 1500, 1500]` score tensor (86 MB).
+    pub fn load_with_attention(gpu: &Gpu, model: &GgmlModel, attn: AttnKind) -> Result<Encoder, WhisperError> {
         model.check_gpu_encoder()?;
         let mut plan = ArenaPlan::new();
         let w = EncoderWeights::plan(&mut plan, model)?;
@@ -101,7 +107,7 @@ impl Encoder {
             kh: plan.add(f, &[heads, n_ctx, 64]),
             vh: plan.add(f, &[heads, n_ctx, 64]),
             oh: plan.add(f, &[heads, n_ctx, 64]),
-            scores: plan.add(f, &[heads, n_ctx, n_ctx]),
+            scores: (attn == AttnKind::Naive).then(|| plan.add(f, &[heads, n_ctx, n_ctx])),
             att: plan.add(f, &[n_ctx, d]),
             proj: plan.add(f, &[n_ctx, d]),
             mlp: plan.add(f, &[n_ctx, d_mlp]),
@@ -110,7 +116,7 @@ impl Encoder {
         let activation_bytes = plan.total_bytes() - weight_bytes;
         let arena = Arena::new(gpu, &plan)?;
         w.upload(gpu, &arena, model)?;
-        Ok(Encoder { arena, w, a, weight_bytes, activation_bytes, attn: AttnKind::FlashTc })
+        Ok(Encoder { arena, w, a, weight_bytes, activation_bytes, attn })
     }
 
     /// The arena and the `[n_mels, 3000]` `F16` mel input tensor. `GpuMel::window_into`
@@ -119,8 +125,13 @@ impl Encoder {
         (&self.arena, &self.a.mel)
     }
 
-    /// Chooses the attention kernel (default `AttnKind::FlashTc`). For tests and lesson 5.
+    /// Changes the attention kernel. For tests and lesson 5.
+    ///
+    /// # Panics
+    /// If `kind` is `AttnKind::Naive` and the encoder has no score tensor: load it with
+    /// `load_with_attention(.., AttnKind::Naive)` for that.
     pub fn set_attention(&mut self, kind: AttnKind) {
+        assert!(kind != AttnKind::Naive || self.a.scores.is_some(), "set_attention: Naive needs an encoder loaded with AttnKind::Naive");
         self.attn = kind;
     }
 
@@ -174,7 +185,7 @@ impl Encoder {
             split_heads(gpu, ar, &a.q, &a.qh)?;
             split_heads(gpu, ar, &a.k, &a.kh)?;
             split_heads(gpu, ar, &a.v, &a.vh)?;
-            attention(gpu, ar, blas, &a.qh, &a.kh, &a.vh, &a.oh, &a.scores, attn)?;
+            attention(gpu, ar, blas, &a.qh, &a.kh, &a.vh, &a.oh, a.scores.as_ref(), attn)?;
             merge_heads(gpu, ar, &a.oh, &a.att)?;
             linear(&a.att, &b.o_w, &a.proj, n_ctx, d, d)?;
             bias_add(gpu, ar, &a.proj, &b.o_b)?;

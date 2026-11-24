@@ -60,7 +60,7 @@ fn run(gpu: &Gpu, kind: AttnKind, q: &[f32], k: &[f32], v: &[f32], heads: usize,
     arena.upload(gpu, &tq, &hq).unwrap();
     arena.upload(gpu, &tk, &hk).unwrap();
     arena.upload(gpu, &tv, &hv).unwrap();
-    attention(gpu, &arena, &blas, &tq, &tk, &tv, &to, &ts, kind).unwrap();
+    attention(gpu, &arena, &blas, &tq, &tk, &tv, &to, Some(&ts), kind).unwrap();
     let got = back(&arena.download::<f16>(gpu, &to).unwrap());
     let want = cpu_attention(&back(&hq), &back(&hk), &back(&hv), heads, seq);
     (got, want)
@@ -80,7 +80,7 @@ fn run_raw(gpu: &Gpu, kind: AttnKind, q: &[f32], k: &[f32], v: &[f32], heads: us
     arena.upload(gpu, &tq, &r16(q)).unwrap();
     arena.upload(gpu, &tk, &r16(k)).unwrap();
     arena.upload(gpu, &tv, &r16(v)).unwrap();
-    attention(gpu, &arena, &blas, &tq, &tk, &tv, &to, &ts, kind).unwrap();
+    attention(gpu, &arena, &blas, &tq, &tk, &tv, &to, Some(&ts), kind).unwrap();
     arena.download::<f16>(gpu, &to).unwrap().iter().map(|v| v.to_f32()).collect()
 }
 
@@ -218,4 +218,38 @@ fn attention_flash_tc_rising_scores() {
     let (got, want) = run(&gpu, AttnKind::FlashTc, &q, &k, &v, heads, seq);
     assert!(got.iter().all(|x| x.is_finite()), "inf or NaN");
     assert_close("flash-tc rising scores", &got, &want, Tol { abs: 3e-3, rel: 2e-2 });
+}
+
+#[test]
+fn flash_kinds_need_no_scratch() {
+    // Flash and FlashTc never touch the score matrix, so the caller can leave it out. For the
+    // encoder this saves the [20, 1500, 1500] f16 tensor (86 MB).
+    let gpu = Gpu::open(0).unwrap();
+    let blas = Blas::load(&gpu).unwrap();
+    let (heads, seq) = (2, 37);
+    let (q, k, v) = (rnd(heads * seq * D, 91, 1.0), rnd(heads * seq * D, 92, 1.0), rnd(heads * seq * D, 93, 1.0));
+    let mut plan = ArenaPlan::new();
+    let ts: Vec<_> = (0..4).map(|_| plan.add(DType::F16, &[heads, seq, D])).collect();
+    let arena = Arena::new(&gpu, &plan).unwrap();
+    let r16 = |x: &[f32]| x.iter().map(|&v| f16::from_f32(v)).collect::<Vec<_>>();
+    for (t, x) in ts.iter().zip([&q, &k, &v]) {
+        arena.upload(&gpu, t, &r16(x)).unwrap();
+    }
+    let want = run_raw(&gpu, AttnKind::Naive, &q, &k, &v, heads, seq);
+    for kind in [AttnKind::Flash, AttnKind::FlashTc] {
+        attention(&gpu, &arena, &blas, &ts[0], &ts[1], &ts[2], &ts[3], None, kind).unwrap();
+        let got: Vec<f32> = arena.download::<f16>(&gpu, &ts[3]).unwrap().iter().map(|x| x.to_f32()).collect();
+        assert_close(&format!("{kind:?} without scratch"), &got, &want, Tol { abs: 3e-3, rel: 2e-2 });
+    }
+}
+
+#[test]
+#[should_panic(expected = "Naive needs the scratch tensor")]
+fn naive_without_scratch_panics() {
+    let gpu = Gpu::open(0).unwrap();
+    let blas = Blas::load(&gpu).unwrap();
+    let mut plan = ArenaPlan::new();
+    let ts: Vec<_> = (0..4).map(|_| plan.add(DType::F16, &[1, 8, D])).collect();
+    let arena = Arena::new(&gpu, &plan).unwrap();
+    attention(&gpu, &arena, &blas, &ts[0], &ts[1], &ts[2], &ts[3], None, AttnKind::Naive).unwrap();
 }

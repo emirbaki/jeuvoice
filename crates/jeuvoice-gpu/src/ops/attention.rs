@@ -30,8 +30,12 @@ fn check_heads(name: &str, t: &Tensor, heads: usize, seq: usize) {
     assert_eq!(t.shape(), &[heads, seq, FLASH_D], "{name}: the shape must be [heads, seq, 64]");
 }
 
-/// `out[h] = softmax(scale · q[h]·k[h]ᵀ) · v[h]`. `q`, `k`, `v`, `out` are `[heads, seq, 64]`,
-/// `scratch` is `[heads, seq, seq]` (the score matrix; `AttnKind::Flash` never touches it).
+/// `out[h] = softmax(scale · q[h]·k[h]ᵀ) · v[h]`. `q`, `k`, `v`, `out` are `[heads, seq, 64]`.
+/// `scratch` is the `[heads, seq, seq]` score matrix. Only `AttnKind::Naive` uses it: `Flash`
+/// and `FlashTc` take `None`, which saves the memory (86 MB for the Whisper encoder).
+///
+/// # Panics
+/// "Naive needs the scratch tensor" for `AttnKind::Naive` with `None`.
 #[allow(clippy::too_many_arguments)]
 pub fn attention(
     gpu: &Gpu,
@@ -41,7 +45,7 @@ pub fn attention(
     k: &Tensor,
     v: &Tensor,
     out: &Tensor,
-    scratch: &Tensor,
+    scratch: Option<&Tensor>,
     kind: AttnKind,
 ) -> Result<(), GpuError> {
     let heads = q.shape()[0];
@@ -49,13 +53,16 @@ pub fn attention(
     for (name, t) in [("attention q", q), ("attention k", k), ("attention v", v), ("attention out", out)] {
         check_heads(name, t, heads, seq);
     }
-    assert_eq!(scratch.dtype(), DType::F16, "attention scratch takes an F16 tensor");
-    assert_eq!(scratch.shape(), &[heads, seq, seq], "attention: scratch must be [heads, seq, seq]");
+    if let Some(s) = scratch {
+        assert_eq!(s.dtype(), DType::F16, "attention scratch takes an F16 tensor");
+        assert_eq!(s.shape(), &[heads, seq, seq], "attention: scratch must be [heads, seq, seq]");
+    }
     if heads == 0 || seq == 0 {
         return Ok(());
     }
     match kind {
         AttnKind::Naive => {
+            let scratch = scratch.expect("attention: AttnKind::Naive needs the scratch tensor");
             let (qs, ks, vs, os, ss) = (
                 arena.slice::<f16>(q),
                 arena.slice::<f16>(k),
