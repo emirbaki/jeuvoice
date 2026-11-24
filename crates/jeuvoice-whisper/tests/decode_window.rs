@@ -29,6 +29,7 @@ enum Call {
     Encode(usize),
     First(Vec<u32>),
     Next(u32),
+    Align(Vec<u32>, usize),
 }
 
 /// Gives the logits row for the next token of a script. The script of a window is chosen by
@@ -46,6 +47,9 @@ struct Scripted {
     /// The row for the language detection decode (`decode_first(&[SOT])`).
     detect_row: Option<Vec<f32>>,
     sot: u32,
+    /// `seek -> audio bounds` of the alignment blocks. A missing seek splits the audio
+    /// into equal blocks.
+    align_bounds: HashMap<usize, Vec<usize>>,
 }
 
 impl Scripted {
@@ -60,6 +64,7 @@ impl Scripted {
             scripts: HashMap::new(),
             detect_row: None,
             sot: v.sot,
+            align_bounds: HashMap::new(),
         }
     }
 
@@ -102,6 +107,26 @@ impl WhisperModel for Scripted {
         self.calls.push(Call::Next(token));
         self.generated += 1;
         Ok(self.row())
+    }
+
+    /// Blocks: row 2 + k (NOT, then the text tokens) has 1.0 in block k of the audio, and
+    /// 0.0 elsewhere. Rows SOT, lang and EOT are 0.0. The same for the 6 heads.
+    fn alignment(&mut self, tokens: &[u32], n_audio: usize) -> Result<Vec<f32>, WhisperError> {
+        self.calls.push(Call::Align(tokens.to_vec(), n_audio));
+        let rows = tokens.len() - 3;
+        let bounds = self.align_bounds.get(&self.seek).cloned().unwrap_or_else(|| (1..rows).map(|k| k * n_audio / rows).collect());
+        assert_eq!(bounds.len(), rows - 1);
+        let edges: Vec<usize> = std::iter::once(0).chain(bounds).chain(std::iter::once(n_audio)).collect();
+        let n_tok = tokens.len();
+        let mut w = vec![0.0f32; 6 * n_tok * n_audio];
+        for h in 0..6 {
+            for k in 0..rows {
+                for a in edges[k]..edges[k + 1] {
+                    w[(h * n_tok + 2 + k) * n_audio + a] = 1.0;
+                }
+            }
+        }
+        Ok(w)
     }
 }
 
@@ -177,6 +202,28 @@ fn three_windows_with_segments_past_prompt_and_progress() {
     // Progress at the top of each loop: 100 × seek / seek_end in whole percent. Window 3
     // ends with text and one timestamp, so seek moves to seek_end (100 %).
     assert_eq!(progress, vec![0.0, 0.62, 0.84, 1.0]);
+}
+
+#[test]
+fn dtw_gives_the_text_tokens_their_start_times() {
+    let v = vocab();
+    // Window 1: text tokens 10 and 11, seek_delta 200, so the DTW reads 100 audio positions.
+    // NOT has audio 0..30, token 10 has 30..60, token 11 has 60..100.
+    let mut m = Scripted::new(&v)
+        .script(0, 0, vec![v.beg, 10, 11, v.beg + 100, v.beg + 100, v.eot], STRONG)
+        .script(200, 0, vec![v.beg, 12, v.beg + 295], STRONG);
+    m.align_bounds.insert(0, vec![30, 60]);
+    let (t, _) = run(&mut m, N8, "tr");
+    let tr = v.lang_token(lang_id("tr").unwrap());
+    let aligns: Vec<&Call> = m.calls.iter().filter(|c| matches!(c, Call::Align(..))).collect();
+    assert_eq!(aligns[0], &Call::Align(vec![v.sot, tr, v.not, 10, 11, v.eot], 100));
+    let dtw: Vec<i64> = t.segments[0].tokens.iter().map(|t| t.t_dtw).collect();
+    // 2 × audio index + seek. BEG and the timestamp get no DTW time.
+    assert_eq!(dtw, vec![-1, 60, 120, -1]);
+    // Window 2 at seek 200: n_frames = min(3000, seek_delta 590, 799 - 200) = 590, so 295
+    // audio positions. Equal blocks: NOT has 0..147, token 12 starts at 147.
+    assert_eq!(aligns[1], &Call::Align(vec![v.sot, tr, v.not, 12, v.eot], 295));
+    assert_eq!(t.segments[1].tokens[1].t_dtw, 200 + 2 * 147);
 }
 
 #[test]

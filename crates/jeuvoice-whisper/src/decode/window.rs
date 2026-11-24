@@ -7,6 +7,7 @@
 //!
 //! Times are in centiseconds ("frames" of 10 ms). One timestamp step is 2 frames (20 ms).
 
+use super::dtw::{cost_matrix, dtw_path, dtw_tokens, place_dtw_times, ALIGNMENT_HEADS, MEDFILT_WIDTH};
 use super::rules::{log_softmax, process_logits, RuleInput};
 use super::sample::{sample_token, sequence_score, Rng, TokenData};
 use super::token_times::{signal_energy, token_level_times, TokenTimeState};
@@ -22,6 +23,11 @@ pub trait WhisperModel {
     fn decode_first(&mut self, tokens: &[u32]) -> Result<Vec<f32>, WhisperError>;
     /// Decodes one more token with the cache and returns its `n_vocab` logits.
     fn decode_next(&mut self, token: u32) -> Result<Vec<f32>, WhisperError>;
+    /// The DTW pass: starts a new self-attention cache and decodes `tokens` in one batch
+    /// with the cross K/V of the last `encode`. Returns the cross-attention softmax of the
+    /// `ALIGNMENT_HEADS` for the first `n_audio` audio positions, as
+    /// `[heads][tokens][n_audio]`. It must not change the logits that the loop reads.
+    fn alignment(&mut self, tokens: &[u32], n_audio: usize) -> Result<Vec<f32>, WhisperError>;
 }
 
 /// The decoding parameters. `Default` gives the values of the app (`WhisperRs`).
@@ -37,6 +43,8 @@ pub struct DecodeParams {
     pub length_penalty: f32,
     /// Gives each token `t0` and `t1` (`token_level_times`). The app sets it.
     pub token_timestamps: bool,
+    /// Gives each text token `t_dtw` (the DTW start time). The app sets it.
+    pub dtw: bool,
 }
 
 impl Default for DecodeParams {
@@ -50,6 +58,7 @@ impl Default for DecodeParams {
             no_speech_thold: 0.6,
             length_penalty: -1.0,
             token_timestamps: true,
+            dtw: true,
         }
     }
 }
@@ -271,8 +280,30 @@ pub fn transcribe_tokens(
         }
         prompt_past = past;
 
+        let n_before = out.segments.len();
         if !tokens.is_empty() && !is_no_speech {
             make_segments(&mut out.segments, vocab, tokens, seek, dec.seek_delta, no_speech_prob, &mut times);
+        }
+
+        // DTW on the new segments of this window, before the next encode replaces the
+        // cross K/V. It runs before the single-timestamp rule changes seek_delta.
+        let new = &mut out.segments[n_before..];
+        if params.dtw && !new.is_empty() {
+            let n_frames = WINDOW_FRAMES.min(dec.seek_delta).min(seek_end - seek);
+            let n_audio = (n_frames / 2).max(0) as usize;
+            // whisper.cpp asserts that the median filter is narrower than the audio. Skip
+            // DTW for so short a window: the tokens keep t_dtw = -1 and use t0.
+            if n_audio > MEDFILT_WIDTH {
+                let toks = dtw_tokens(vocab, prompt_init[1], new);
+                let w = model.alignment(&toks, n_audio)?;
+                let want = ALIGNMENT_HEADS.len() * toks.len() * n_audio;
+                if w.len() != want {
+                    return Err(WhisperError::Transcribe(format!("the model gave {} alignment values, not {want}", w.len())));
+                }
+                let cost = cost_matrix(&w, ALIGNMENT_HEADS.len(), toks.len(), n_audio);
+                let path = dtw_path(&cost, toks.len() - 3, n_audio);
+                place_dtw_times(vocab, new, &path, seek);
+            }
         }
 
         let mut seek_delta = dec.seek_delta;
