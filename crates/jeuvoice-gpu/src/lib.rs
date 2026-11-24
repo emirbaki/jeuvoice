@@ -1,12 +1,17 @@
 //! GPU base for JeuVoice inference. The kernels are Rust, compiled to PTX by cuda-oxide.
 //! Lessons for each kernel are in `docs/cuda-lessons/` (Turkish).
 
+mod arena;
 mod device;
 mod error;
 pub mod kernels;
+pub mod ops;
+mod tensor;
 
 pub use device::{DeviceInfo, Gpu};
+pub use arena::{Arena, ArenaPlan};
 pub use error::GpuError;
+pub use tensor::{DType, DevSlice, Element, Tensor};
 
 use cuda_core::{DeviceBuffer, LaunchConfig};
 

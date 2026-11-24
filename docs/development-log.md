@@ -219,3 +219,5 @@ Checked on 2026-11-24. With `rust-toolchain.toml` on 1.99.1, `cargo oxide build 
 - **MinGW on PATH breaks the cuda-bindings build.** libclang reads the MinGW headers and fails. `scripts\cargo.cmd oxide ...` removes every PATH entry with `mingw` in it.
 - **vcvars64.bat sets `VCPKG_ROOT`** to the Visual Studio copy of vcpkg, which has no libffi. The script looks for `ffi.lib` in the usual folders instead.
 - **The backend needs the exact toolchain.** With `channel = "stable"`, cargo-oxide stops with "the cuda-oxide main clone needs Rust 1.99.1".
+- **Arena kernels take raw device pointers.** The synchronous cuda-oxide launch accepts `&DeviceBuffer<T>`, `&mut DeviceBuffer<T>` or raw pointers. An arena tensor is a part of one buffer, so kernels take `*const T` / `*mut T` and a length, and build a `DisjointSlice` inside with `from_raw_parts`.
+- **Known issue:** one test run failed with "embedded artifact payload is empty", and the next runs passed with no change. The likely cause is that cargo builds the lib and the lib test of `jeuvoice-gpu` at the same time. If it comes back, run the command again.

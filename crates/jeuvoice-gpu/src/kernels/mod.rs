@@ -18,4 +18,20 @@ pub mod device {
             *o = a[i] + b[i];
         }
     }
+
+    /// `out[i] = a[i] + b[i]` on raw device pointers: the form every arena kernel uses.
+    ///
+    /// # Safety
+    /// All three pointers are valid for `n` elements, and `out` overlaps neither input.
+    #[kernel]
+    pub unsafe fn add_f32_ptr(a: *const f32, b: *const f32, out: *mut f32, n: usize) {
+        // The type names the default 1-D index space, so `get_mut` takes `index_1d()`.
+        let mut out: DisjointSlice<f32> = unsafe { DisjointSlice::from_raw_parts(out, n) };
+        let idx = thread::index_1d();
+        let i = idx.get();
+        if let Some(o) = out.get_mut(idx) {
+            // SAFETY: `get_mut` gave `Some`, so `i < n`.
+            *o = unsafe { *a.add(i) + *b.add(i) };
+        }
+    }
 }

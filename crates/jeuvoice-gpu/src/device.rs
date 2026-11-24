@@ -1,12 +1,13 @@
 //! Open a GPU and read what it can do.
 
 use std::mem::MaybeUninit;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use cuda_core::sys;
 use cuda_core::{CudaContext, Stream};
 
 use crate::GpuError;
+use crate::kernels::device::LoadedModule;
 
 /// What the card is, and its two speed limits. The benchmarks compare each kernel with
 /// these limits: a memory-bound kernel with `mem_bandwidth_gbs`, a GEMM with
@@ -30,6 +31,7 @@ pub struct Gpu {
     ctx: Arc<CudaContext>,
     stream: Arc<Stream>,
     info: DeviceInfo,
+    kernels: OnceLock<LoadedModule>,
 }
 
 impl Gpu {
@@ -81,7 +83,7 @@ impl Gpu {
             fp16_tensor_tflops,
         };
         let stream = ctx.default_stream();
-        Ok(Gpu { ctx, stream, info })
+        Ok(Gpu { ctx, stream, info, kernels: OnceLock::new() })
     }
 
     pub fn info(&self) -> &DeviceInfo {
@@ -95,6 +97,15 @@ impl Gpu {
     /// The one stream all JeuVoice GPU work runs on, in order.
     pub fn stream(&self) -> &Arc<Stream> {
         &self.stream
+    }
+
+    /// The kernel module (all `#[kernel]`s of `crate::kernels`), loaded on first use.
+    pub fn kernels(&self) -> Result<&LoadedModule, GpuError> {
+        if let Some(k) = self.kernels.get() {
+            return Ok(k);
+        }
+        let k = crate::kernels::device::load(&self.ctx).map_err(|e| GpuError::Driver(e.to_string()))?;
+        Ok(self.kernels.get_or_init(|| k))
     }
 
     /// Free video memory in bytes, right now.
