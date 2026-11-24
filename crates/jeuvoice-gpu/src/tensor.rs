@@ -97,6 +97,30 @@ impl Tensor {
     pub fn bytes(&self) -> usize {
         self.bytes
     }
+
+    /// The rows `start .. start + n` of the first dimension, as a tensor in the same
+    /// memory. The decoder plans its tensors for 448 rows and works on fewer.
+    ///
+    /// # Panics
+    /// If the rows pass the end, or if row `start` does not start on the 256-byte arena
+    /// alignment. The kernels rely on that alignment (for example the 16-byte loads of the
+    /// tensor-core kernels). A row of 1280 `f16` values is 2560 bytes, so every row of the
+    /// Whisper activations is aligned.
+    pub fn rows(&self, start: usize, n: usize) -> Tensor {
+        assert!(!self.shape.is_empty(), "rows: a tensor with no dimensions has no rows");
+        let end = start.checked_add(n).unwrap_or_else(|| panic!("rows: {start} + {n} overflows"));
+        assert!(end <= self.shape[0], "rows: rows {start}..{end} passes the end ({} rows)", self.shape[0]);
+        let row_bytes = self.strides[0] * self.dtype.size();
+        let offset = self.offset + start * row_bytes;
+        assert!(
+            offset % crate::arena::ALIGN == 0,
+            "rows: row {start} is not 256-byte aligned (one row is {row_bytes} bytes)"
+        );
+        let mut shape = self.shape.clone();
+        shape[0] = n;
+        let bytes = n * row_bytes;
+        Tensor { offset, dtype: self.dtype, shape, strides: self.strides.clone(), bytes }
+    }
 }
 
 /// Row-major strides: the last dimension is contiguous. Each stride is at most the element

@@ -6,7 +6,7 @@ use half::f16;
 use jeuvoice_gpu::bench::{Timing, pct_of_memory_limit, pct_of_tensor_limit, time_on_stream};
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
-    AttnKind, ConvKind, GemmKind, LayerNormKind, SoftmaxKind, Width, attention, bias_gelu_with, conv1d, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive,
+    AttnKind, ConvKind, GemmKind, LayerNormKind, SoftmaxKind, Width, attention, bias_gelu_with, conv1d, embed_one, embed_with, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive,
     softmax_rows_with,
 };
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
@@ -103,6 +103,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Embedding rows: one decoder step (1 row) and a long prompt or DTW pass (224 rows),
+    // with the real table of 51866 x 1280. Each call uploads the ids first, as the decoder
+    // does. The ids_upload row is that upload alone.
+    for (name, width) in [("embed_x1", Width::One), ("embed_x2", Width::Two)] {
+        if name.contains(&filter) {
+            for n in [1, 224] {
+                rows.push(bench_embed(&gpu, name, width, n)?);
+            }
+        }
+    }
+    if "embed_one".contains(&filter) {
+        rows.push(bench_embed_one(&gpu)?);
+    }
+    if "ids_upload".contains(&filter) {
+        rows.push(bench_ids_upload(&gpu)?);
+    }
+
     println!("{:<20} {:>16} {:>10} {:>14} {:>8}", "kernel", "size", "us", "rate", "% limit");
     for r in &rows {
         println!("{:<20} {:>16} {:>10.1} {:>9.1} {:<4} {:>7.0}%", r.name, r.size, r.t.us, r.rate.0, r.rate.1, r.pct);
@@ -123,6 +140,70 @@ fn bench_bias_gelu(gpu: &Gpu, name: &str, width: Width, rows: usize, d: usize) -
     Ok(Row {
         name: name.into(),
         size: format!("{rows}x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+fn bench_embed(gpu: &Gpu, name: &str, width: Width, n: usize) -> Result<Row, GpuError> {
+    let (vocab, d, n_ctx) = (51866, 1280, 448);
+    let mut plan = ArenaPlan::new();
+    let tok = plan.add(DType::F16, &[vocab, d]);
+    let pos = plan.add(DType::F32, &[n_ctx, d]);
+    let ids_t = plan.add(DType::I32, &[n_ctx]);
+    let out = plan.add(DType::F16, &[n_ctx, d]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &tok, &vec![f16::from_f32(0.25); vocab * d])?;
+    arena.upload(gpu, &pos, &vec![0.5f32; n_ctx * d])?;
+    // Ids spread over the table, so the rows come from all over the 133 MB.
+    let ids: Vec<u32> = (0..n as u32).map(|i| (i * 7919) % vocab as u32).collect();
+    let t = time_on_stream(gpu, 3, 50, || embed_with(gpu, &arena, &ids, &ids_t, &tok, &pos, 0, &out, width))?;
+    // Read one table row (f16) and one position row (f32), write one row (f16).
+    let bytes = (n * d * (2 + 4 + 2)) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{n}x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+fn bench_embed_one(gpu: &Gpu) -> Result<Row, GpuError> {
+    let (vocab, d, n_ctx) = (51866, 1280, 448);
+    let mut plan = ArenaPlan::new();
+    let tok = plan.add(DType::F16, &[vocab, d]);
+    let pos = plan.add(DType::F32, &[n_ctx, d]);
+    let out = plan.add(DType::F16, &[1, d]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &tok, &vec![f16::from_f32(0.25); vocab * d])?;
+    arena.upload(gpu, &pos, &vec![0.5f32; n_ctx * d])?;
+    let mut i = 0u32;
+    let t = time_on_stream(gpu, 3, 50, || {
+        i = (i + 7919) % vocab as u32;
+        embed_one(gpu, &arena, i, &tok, &pos, 0, &out)
+    })?;
+    let bytes = (d * (2 + 4 + 2)) as u64;
+    Ok(Row {
+        name: "embed_one".into(),
+        size: format!("1x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+fn bench_ids_upload(gpu: &Gpu) -> Result<Row, GpuError> {
+    let mut plan = ArenaPlan::new();
+    let ids_t = plan.add(DType::I32, &[448]);
+    let arena = Arena::new(gpu, &plan)?;
+    let host = vec![0i32; 448];
+    let t = time_on_stream(gpu, 3, 50, || arena.upload(gpu, &ids_t, &host))?;
+    let bytes = (448 * 4) as u64;
+    Ok(Row {
+        name: "ids_upload".into(),
+        size: "448 i32".into(),
         t,
         rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
         pct: pct_of_memory_limit(bytes, &t, gpu.info()),

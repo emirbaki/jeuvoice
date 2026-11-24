@@ -383,6 +383,72 @@ pub mod device {
         }
     }
 
+    // ---- Token embedding (lesson 8: docs/cuda-lessons/08-decoder.md) ----
+    // out[i][c] = tok[ids[i]][c] + pos[i][c]. A gather: each row reads a different row of
+    // the embedding table, chosen by the token id.
+
+    /// One element per thread: `out[i][c] = tok[ids[i]][c] + pos[i][c]` for `n` rows of
+    /// `d` values. `pos` starts at the first position of the rows.
+    ///
+    /// # Safety
+    /// `ids` is valid for `n` values, each one a row of `tok`. `tok` rows, `pos` and `out`
+    /// are valid for `d` values per row. `out` does not overlap the inputs.
+    #[kernel]
+    pub unsafe fn embed_f16(ids: *const i32, tok: *const f16, pos: *const f32, out: *mut f16, n: usize, d: usize) {
+        let i = thread::index_1d().get();
+        if i >= n * d {
+            return;
+        }
+        let (row, c) = (i / d, i % d);
+        // SAFETY: row < n, c < d, and ids[row] is a row of tok (the host checked it).
+        unsafe {
+            let id = *ids.add(row) as usize;
+            let v = *tok.add(id * d + c) as f32 + *pos.add(i);
+            *out.add(i) = v as f16;
+        }
+    }
+
+    /// As `embed_f16`, with two neighbor values per thread: one `[f16; 2]` of `tok`, one
+    /// `[f32; 2]` of `pos` and one `[f16; 2]` of `out`. `d2` counts pairs.
+    ///
+    /// # Safety
+    /// As `embed_f16` with `d = 2 * d2`. `tok` and `out` are 4-byte aligned, `pos` 8-byte.
+    #[kernel]
+    pub unsafe fn embed_f16x2(ids: *const i32, tok: *const [f16; 2], pos: *const [f32; 2], out: *mut [f16; 2], n: usize, d2: usize) {
+        let i = thread::index_1d().get();
+        if i >= n * d2 {
+            return;
+        }
+        let (row, c) = (i / d2, i % d2);
+        // SAFETY: row < n, c < d2, and ids[row] is a row of tok (the host checked it).
+        unsafe {
+            let id = *ids.add(row) as usize;
+            let t = *tok.add(id * d2 + c);
+            let p = *pos.add(i);
+            *out.add(i) = [(t[0] as f32 + p[0]) as f16, (t[1] as f32 + p[1]) as f16];
+        }
+    }
+
+    /// One row with the id as a launch argument: `out[c] = tok[id][c] + pos[c]`. A decoder
+    /// step has one token, so it needs no ids upload (and no wait for that copy).
+    ///
+    /// # Safety
+    /// `tok` is valid for row `id` of `d2` pairs, `pos` and `out` for `d2` pairs. `tok`
+    /// and `out` are 4-byte aligned, `pos` 8-byte. `out` does not overlap the inputs.
+    #[kernel]
+    pub unsafe fn embed_one_f16x2(id: u32, tok: *const [f16; 2], pos: *const [f32; 2], out: *mut [f16; 2], d2: usize) {
+        let c = thread::index_1d().get();
+        if c >= d2 {
+            return;
+        }
+        // SAFETY: c < d2, and row `id` of tok exists (the host checked it).
+        unsafe {
+            let t = *tok.add(id as usize * d2 + c);
+            let p = *pos.add(c);
+            *out.add(c) = [(t[0] as f32 + p[0]) as f16, (t[1] as f32 + p[1]) as f16];
+        }
+    }
+
     // ---- LayerNorm (lesson 2: docs/cuda-lessons/02-layernorm.md) ----
     // y = (x - mean) / sqrt(var + eps) * gamma + beta, one block of ROW_BLOCK threads per row.
     // Two-pass: first the mean, then the variance of (x - mean). The one-pass form

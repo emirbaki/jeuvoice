@@ -384,3 +384,16 @@ The example `dump_whisper_rs` runs `WhisperRs` with the app's parameters and wri
 ### The no-speech prob in whisper.cpp
 
 whisper.cpp computes the no-speech prob from row 0 of `state->logits` (line 7154). The prompt decode fills only its last row. So row 0 holds the raw logits of the last 1-token decode, or zeros in a new state. Measured: the first window of each clip gives 1.93e-5 (a zero row: 1/51866 with f32 sum error). The second window of my_voice2 gives 1.5e-10 (the last step of window 1). The port copies this behavior, because criterion 1 compares with whisper.cpp.
+
+### The token embedding (Task 7, 2026-11-25)
+
+`ops::embed` (many rows, the ids uploaded after a host check) and `ops::embed_one` (one row, the id as a launch argument). `Tensor::rows(start, n)` gives a view of rows. It panics when the row does not start on the 256-byte arena alignment, so the alignment rules of the other kernels still hold. Medians of 3 runs of `gpu-bench embed` and `ids_upload` (table 51866 x 1280):
+
+| Row | 1 row | 224 rows |
+|---|---|---|
+| `embed_x1` (with the ids upload) | 19.7 µs | 25.1 µs |
+| `embed_x2` (with the ids upload) | 17.6 µs | 26.2 µs |
+| `embed_one` (id as an argument) | 9.0 µs | — |
+| `ids_upload` alone (448 `i32`) | 10.0 µs | — |
+
+The upload and its wait cost more than the kernel. A decoder step uses `embed_one`. Lesson 8, part A, has the details.
