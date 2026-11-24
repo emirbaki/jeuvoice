@@ -30,17 +30,17 @@ fn tol_for(tap: &str) -> Tol {
 /// grows through the 32 blocks. PyTorch itself in fp16 (measured 2026-11-24) against the
 /// same fp32 reference, next to ours:
 ///
-/// | clip | tap | PyTorch fp16 | ours |
+/// | clip | tap | PyTorch fp16 | ours (FlashTc attention) |
 /// |---|---|---|---|
-/// | my_voice | block_31 | 0.56%, mean 0.00221 | 0.53%, mean 0.00210 |
-/// | my_voice | ln_post | 1.03%, mean 0.00385 | 1.08%, mean 0.00378 |
-/// | my_voice2 | block_31 | 0.75%, mean 0.00264 | 0.65%, mean 0.00193 |
-/// | my_voice2 | ln_post | 0.75%, mean 0.00372 | 0.75%, mean 0.00304 |
-/// | ses_001_0007 | block_31 | 0.61%, mean 0.00311 | 0.56%, mean 0.00310 |
-/// | ses_001_0007 | ln_post | 2.04%, mean 0.00693 | 2.37%, mean 0.00714 |
+/// | my_voice | block_31 | 0.56%, mean 0.00221 | 0.53%, mean 0.00225 |
+/// | my_voice | ln_post | 1.03%, mean 0.00385 | 1.14%, mean 0.00409 |
+/// | my_voice2 | block_31 | 0.75%, mean 0.00264 | 0.45%, mean 0.00166 |
+/// | my_voice2 | ln_post | 0.75%, mean 0.00372 | 0.50%, mean 0.00275 |
+/// | ses_001_0007 | block_31 | 0.61%, mean 0.00311 | 0.52%, mean 0.00293 |
+/// | ses_001_0007 | ln_post | 2.04%, mean 0.00693 | 1.80%, mean 0.00653 |
 ///
-/// (ses_001_0007 ln_post was 2.06% before the attention scale moved into the GEMM. The
-/// 8.4 s clip is mostly padding silence, where fp16 differs most. The margin is thin there.)
+/// (With AttnKind::Naive, ses_001_0007 ln_post was 2.37%: Naive stores the scores as f16,
+/// FlashTc keeps them in f32 registers.)
 ///
 /// The bad values sit in the same rows in both. The limits are the worst PyTorch fp16 value
 /// with a margin. Shallow taps allow no value out of tolerance.

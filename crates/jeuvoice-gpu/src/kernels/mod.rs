@@ -28,6 +28,12 @@ const TC_LDB: usize = TC_BN + 8;
 /// Values for each block of `log10_max_f32`: 8 for each of the `ROW_BLOCK` threads.
 pub const LOG_MAX_CHUNK: usize = ROW_BLOCK as usize * 8;
 pub const FLASH_D: usize = 64;
+/// The tensor-core flash attention: query rows per block (4 warps of 16) and keys per tile.
+pub const FTC_ROWS: usize = 64;
+pub const FTC_KEYS: usize = 64;
+pub const FTC_THREADS: u32 = 128;
+/// The shared row stride of the K and V tiles: 64 + 8 halfs (144 bytes, a multiple of 16).
+const FTC_LD: usize = FLASH_D + 8;
 /// The query rows one flash-attention block owns. The K and V tiles are loaded once for all
 /// of them (lesson 5 shows the difference between 1 and 8).
 pub const FLASH_BR: usize = 8;
@@ -37,6 +43,16 @@ pub const FLASH_BK: usize = 64;
 /// warp read 32 different banks (`t * 33 mod 32 = t`), so the score loop has no conflicts.
 pub const FLASH_LD: usize = FLASH_D + 2;
 const ROW_WARPS: usize = (ROW_BLOCK / 32) as usize;
+
+/// Writes `$body` out once for each listed index, with `$i` a constant in each copy.
+/// A register array indexed by a loop variable goes to local memory (as slow as global
+/// memory) when the compiler does not unroll the loop. With constant indexes the arrays
+/// stay in registers (lesson 5).
+macro_rules! unroll {
+    ($i:ident in [$($n:literal),*] $body:block) => {
+        $( { #[allow(non_upper_case_globals)] const $i: usize = $n; $body } )*
+    };
+}
 
 /// 16 bytes (8 f16 values) with 16-byte alignment. The width of a load comes from the
 /// alignment of the element type: a plain `[u32; 4]` (4-byte aligned) compiles to four
@@ -1526,6 +1542,166 @@ pub mod device {
             }
             mi += 1;
         }
+    }
+
+    /// Flash attention on tensor cores (lesson 5): `out = softmax(scale · Q·Kᵀ) · V` for one
+    /// head per `blockIdx.y`, with head size 64.
+    ///
+    /// One block of `FTC_THREADS` (4 warps) takes `FTC_ROWS` query rows, 16 per warp. Each warp
+    /// keeps its Q slice as 8 A fragments in registers. For each tile of `FTC_KEYS` keys:
+    /// 1. the block copies the K and V tiles to shared memory (zeros past `seq`);
+    /// 2. `S = Q·Kᵀ` with mma: K rows are keys, so a plain `ldmatrix_x4` gives the B fragment;
+    /// 3. the online softmax on the S registers: a row lives in the 4 lanes of a group, so
+    ///    its max and its sum take two `shuffle_xor` steps (1 and 2);
+    /// 4. `O += P·V` with mma: the S accumulator layout (rows g, g+8, columns 2t, 2t+1) is the
+    ///    A fragment layout, so P goes from the S registers straight into A fragments. V uses
+    ///    `ldmatrix_x4_trans`.
+    ///
+    /// # Safety
+    /// `q`, `k`, `v`, `out` are `[heads, seq, 64]`, and `out` overlaps none of the others.
+    /// The grid is `(ceil(seq / FTC_ROWS), heads)` with `FTC_THREADS` threads.
+    #[kernel]
+    pub unsafe fn flash_attn_tc_f16(q: *const f16, k: *const f16, v: *const f16, out: *mut f16, seq: usize, scale: f32) {
+        static mut SK3: SharedArray<f16, { FTC_KEYS * FTC_LD }, 16> = SharedArray::UNINIT;
+        static mut SV3: SharedArray<f16, { FTC_KEYS * FTC_LD }, 16> = SharedArray::UNINIT;
+        let tid = thread::threadIdx_x() as usize;
+        let lane = tid % 32;
+        let (g, t) = (lane / 4, lane % 4);
+        let base = thread::blockIdx_y() as usize * seq * FLASH_D;
+        let row0 = thread::blockIdx_x() as usize * FTC_ROWS + (tid / 32) * 16;
+        // SAFETY: raw pointers to the shared tiles (no reference to the statics).
+        let (sk, sv) = unsafe { ((*(&raw mut SK3)).as_mut_ptr(), (*(&raw mut SV3)).as_mut_ptr()) };
+
+        // 1. This warp's Q slice as A fragments: qa[ks] covers head dims ks*8 .. ks*8+8.
+        let mut qa = [[0u32; 2]; 8];
+        unroll!(KS in [0, 1, 2, 3, 4, 5, 6, 7] {
+            unroll!(H in [0, 1] {
+                let r = row0 + g + H * 8;
+                let c = KS * 8 + 2 * t;
+                if r < seq {
+                    // SAFETY: r < seq and c + 1 < 64, inside this head of Q.
+                    qa[KS][H] = unsafe { pack_h2(*q.add(base + r * FLASH_D + c), *q.add(base + r * FLASH_D + c + 1)) };
+                }
+            });
+        });
+
+        let mut o = [[0.0f32; 4]; 8];
+        // The running max and sum of rows g (index 0) and g + 8 (index 1).
+        let mut m = [f32::NEG_INFINITY; 2];
+        let mut l = [0.0f32; 2];
+        let mut key0 = 0;
+        while key0 < seq {
+            // 2. Copy the K and V tiles: 64 keys x 8 chunks of 8 halfs, 4 chunks per thread.
+            let mut i = 0;
+            while i < 4 {
+                let qi = tid + i * FTC_THREADS as usize;
+                let (r, c8) = (qi / 8, (qi % 8) * 8);
+                let key = key0 + r;
+                let off = base + key * FLASH_D + c8;
+                // SAFETY: load_chunk8 reads only inside row `key` of this head when key < seq.
+                // The stores are inside SK3 and SV3, 16-byte aligned.
+                unsafe {
+                    *(sk.add(r * FTC_LD + c8) as *mut Q16) = load_chunk8(k.wrapping_add(off), key < seq, c8, FLASH_D);
+                    *(sv.add(r * FTC_LD + c8) as *mut Q16) = load_chunk8(v.wrapping_add(off), key < seq, c8, FLASH_D);
+                }
+                i += 1;
+            }
+            thread::sync_threads();
+
+            // 3. S = Q·Kᵀ: 8 key tiles of 8, each over the 8 head-dim steps.
+            let mut s = [[0.0f32; 4]; 8];
+            unroll!(NT in [0, 1, 2, 3, 4, 5, 6, 7] {
+                let kr = NT * 8 + (lane % 8);
+                // SAFETY: kr < 64 and the columns stay inside the 64 head dims of the row.
+                // Every lane reaches these calls.
+                let (b0, b1) = unsafe {
+                    (
+                        cuda_device::wmma::ldmatrix_x4(sk.add(kr * FTC_LD + (lane / 8) * 8) as *const u32),
+                        cuda_device::wmma::ldmatrix_x4(sk.add(kr * FTC_LD + 32 + (lane / 8) * 8) as *const u32),
+                    )
+                };
+                unroll!(KS in [0, 1, 2, 3] {
+                    // SAFETY: all 32 lanes run these calls with their own fragments.
+                    unsafe {
+                        s[NT] = cuda_device::wmma::mma_m16n8k8_f32_f16(s[NT], qa[KS], b0[KS]);
+                        s[NT] = cuda_device::wmma::mma_m16n8k8_f32_f16(s[NT], qa[KS + 4], b1[KS]);
+                    }
+                });
+            });
+
+            // 4. The online softmax, per row half H (row g + 8H).
+            unroll!(H in [0, 1] {
+                let mut mx = f32::NEG_INFINITY;
+                unroll!(NT in [0, 1, 2, 3, 4, 5, 6, 7] {
+                    unroll!(JJ in [0, 1] {
+                        let key = key0 + NT * 8 + 2 * t + JJ;
+                        let val = if key < seq { s[NT][2 * H + JJ] * scale } else { f32::NEG_INFINITY };
+                        s[NT][2 * H + JJ] = val;
+                        mx = mx.max(val);
+                    });
+                });
+                mx = mx.max(f32::from_bits(warp::shuffle_xor(mx.to_bits(), 1)));
+                mx = mx.max(f32::from_bits(warp::shuffle_xor(mx.to_bits(), 2)));
+                let m_new = m[H].max(mx);
+                // exp(-inf) = 0: the first tile drops the empty start values.
+                let alpha = libm::expf(m[H] - m_new);
+                let mut sum = 0.0f32;
+                unroll!(NT in [0, 1, 2, 3, 4, 5, 6, 7] {
+                    unroll!(JJ in [0, 1] {
+                        let p = libm::expf(s[NT][2 * H + JJ] - m_new);
+                        s[NT][2 * H + JJ] = p;
+                        sum += p;
+                    });
+                });
+                sum += f32::from_bits(warp::shuffle_xor(sum.to_bits(), 1));
+                sum += f32::from_bits(warp::shuffle_xor(sum.to_bits(), 2));
+                l[H] = l[H] * alpha + sum;
+                m[H] = m_new;
+                unroll!(DT in [0, 1, 2, 3, 4, 5, 6, 7] {
+                    o[DT][2 * H] *= alpha;
+                    o[DT][2 * H + 1] *= alpha;
+                });
+            });
+
+            // 5. O += P·V. Key tile NT is one k step: P from the S registers is its A fragment.
+            unroll!(NT in [0, 1, 2, 3, 4, 5, 6, 7] {
+                let pa = [pack_h2(s[NT][0] as f16, s[NT][1] as f16), pack_h2(s[NT][2] as f16, s[NT][3] as f16)];
+                let vr = NT * 8 + (lane % 8);
+                // SAFETY: vr < 64 and the columns stay inside the row. Every lane reaches these.
+                let (vb0, vb1) = unsafe {
+                    (
+                        cuda_device::wmma::ldmatrix_x4_trans(sv.add(vr * FTC_LD + (lane / 8) * 8) as *const u32),
+                        cuda_device::wmma::ldmatrix_x4_trans(sv.add(vr * FTC_LD + 32 + (lane / 8) * 8) as *const u32),
+                    )
+                };
+                unroll!(DT in [0, 1, 2, 3] {
+                    // SAFETY: all 32 lanes run these calls with their own fragments.
+                    unsafe {
+                        o[DT] = cuda_device::wmma::mma_m16n8k8_f32_f16(o[DT], pa, vb0[DT]);
+                        o[DT + 4] = cuda_device::wmma::mma_m16n8k8_f32_f16(o[DT + 4], pa, vb1[DT]);
+                    }
+                });
+            });
+            // The next copy overwrites the tiles: wait until every warp is done with them.
+            thread::sync_threads();
+            key0 += FTC_KEYS;
+        }
+
+        // Write O / l: rows g and g + 8, head dims DT*8 + 2t and + 1.
+        unroll!(H in [0, 1] {
+            let r = row0 + g + H * 8;
+            if r < seq {
+                let inv = 1.0 / l[H];
+                unroll!(DT in [0, 1, 2, 3, 4, 5, 6, 7] {
+                    let c = DT * 8 + 2 * t;
+                    // SAFETY: r < seq and c + 1 < 64, and each output has one owner lane.
+                    unsafe {
+                        *out.add(base + r * FLASH_D + c) = (o[DT][2 * H] * inv) as f16;
+                        *out.add(base + r * FLASH_D + c + 1) = (o[DT][2 * H + 1] * inv) as f16;
+                    }
+                });
+            }
+        });
     }
 
     // ---- The log-mel spectrogram (lesson 7: docs/cuda-lessons/07-mel.md) ----

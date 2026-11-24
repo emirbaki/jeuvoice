@@ -343,3 +343,17 @@ Plan: `docs/superpowers/plans/2026-11-24-rust-cuda-tensor-cores.md`.
 | cuBLAS | 287–364 µs | 13.5–17.1 TFLOP/s |
 
 The product keeps cuBLAS for GEMM.
+
+### Tensor-core flash attention
+
+`flash_attn_tc_f16` (`AttnKind::FlashTc`): `Q·Kᵀ` and `P·V` with `mma.sync.m16n8k8`, the online softmax on the accumulator registers, and P passed from the S accumulators straight into A fragments (FlashAttention-2).
+
+| Attention (20 x 1500 x 64) | Time |
+|---|---|
+| `Naive` (cuBLAS + softmax) | 2.49 ms |
+| `Flash` (scalar) | 26.6 ms |
+| `FlashTc`, loops not unrolled | 6.8 ms (80 `ld.local`, 136 `st.local`) |
+| **`FlashTc`, with `unroll!`** | **0.90–0.92 ms** (no local memory) |
+
+- **Local memory finding:** an array indexed by a loop variable goes to local memory when the compiler does not unroll the loop. The `unroll!` macro in `kernels/mod.rs` writes the body out with constant indexes.
+- The encoder now uses `FlashTc`: one 30 s window takes **176.4 ms** (it was 252 ms). The reference test passes on all 3 clips, with fewer values out of tolerance than `Naive` (f32 scores in registers).

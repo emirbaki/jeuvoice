@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Attention rows: the encoder's attention, 20 heads of 1500 rows.
-    for (name, kind) in [("attention_naive_f16", AttnKind::Naive), ("attention_flash_f16", AttnKind::Flash)] {
+    for (name, kind) in [("attention_naive_f16", AttnKind::Naive), ("attention_flash_f16", AttnKind::Flash), ("attention_flash_tc_f16", AttnKind::FlashTc)] {
         if name.contains(&filter) {
             rows.push(bench_attention(&gpu, name, kind, 20, 1500)?);
         }

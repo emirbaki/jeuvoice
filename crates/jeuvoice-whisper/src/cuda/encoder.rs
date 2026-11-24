@@ -12,8 +12,8 @@
 //! ```
 //!
 //! All activations are time first (`[time, channels]`), so each bias runs along the last
-//! dimension. Attention uses `AttnKind::Naive` (cuBLAS): on the RTX 3050 Ti it is 10 times
-//! faster than the flash kernel of lesson 5.
+//! dimension. Attention uses `AttnKind::FlashTc` (tensor-core flash attention, lesson 5): on
+//! the RTX 3050 Ti it takes 0.90 ms per layer, `AttnKind::Naive` (cuBLAS) 2.49 ms.
 
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
@@ -110,7 +110,7 @@ impl Encoder {
         let activation_bytes = plan.total_bytes() - weight_bytes;
         let arena = Arena::new(gpu, &plan)?;
         w.upload(gpu, &arena, model)?;
-        Ok(Encoder { arena, w, a, weight_bytes, activation_bytes, attn: AttnKind::Naive })
+        Ok(Encoder { arena, w, a, weight_bytes, activation_bytes, attn: AttnKind::FlashTc })
     }
 
     /// The arena and the `[n_mels, 3000]` `F16` mel input tensor. `GpuMel::window_into`
@@ -119,7 +119,7 @@ impl Encoder {
         (&self.arena, &self.a.mel)
     }
 
-    /// Chooses the attention kernel (default `AttnKind::Naive`). For tests and lesson 5.
+    /// Chooses the attention kernel (default `AttnKind::FlashTc`). For tests and lesson 5.
     pub fn set_attention(&mut self, kind: AttnKind) {
         self.attn = kind;
     }

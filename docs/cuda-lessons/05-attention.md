@@ -89,6 +89,54 @@ Flash 26 ms'de 26,2 ms × 1,76 GHz ≈ 46 milyon devir harcıyor. Yapılan iş 5
 1. **Doluluk.** Blok 64 thread (2 warp) ve ~20 KB shared memory kullanıyor. Bir SM'de 100 KB shared var → 5 blok → **10 warp / 48**. Yani SM'lerin %80'i boş. Shared bellek gecikmesini saklayacak warp yok.
 2. **Skaler FMA.** Klasik yolun GEMM'leri cuBLAS'ta **tensor core** kullanır: aynı komutta 1024 çarpma-toplama. Flash bizim yazdığımız gibi skaler FMA kullanır: 1 çarpma-toplama. Ders 4'teki farkın aynısı.
 
+### 4.4. Tensor core'lu flash attention (26,2 → 0,90 ms)
+
+Ders 4'te `mma.sync.m16n8k8` ile kendi GEMM'imizi yazdık (`gemm_tc_f16`). Aynı komutu attention'a uyguladık: `flash_attn_tc_f16` (`AttnKind::FlashTc`). Bu, FlashAttention-2 makalesinin düzenidir.
+
+**Düzen:**
+
+- Bir blok = 4 warp = 64 sorgu satırı. Her warp 16 satır alır.
+- Her warp kendi Q dilimini (16 × 64) **bir kez** register'a, 8 tane A fragment'i olarak yükler.
+- Her 64 anahtarlık döşeme için:
+  1. Blok K ve V döşemelerini shared memory'ye kopyalar (16 baytlık okumalar, `seq` dışı sıfır).
+  2. `S = Q·Kᵀ`: K'nin satırları anahtarlardır. B fragment'i `B[2t, 2t+1][g]` = `K[g][2t, 2t+1]` ister, bu da K satırının içinde yan yana duran iki değerdir. Yani `.trans` **olmadan** düz `ldmatrix_x4` yeter.
+  3. Online softmax, doğrudan S register'larında. Bir satırın 16 değeri bir gruptaki 4 şeride dağılmıştır. Satır maksimumu ve toplamı için iki `shuffle_xor` (1 ve 2) yeter.
+  4. `O += P·V`: **en güzel hile burada.** `m16n8` toplayıcısının düzeni (satır g ve g+8, sütun 2t ve 2t+1), `m16n8k8` A fragment'inin düzeniyle aynıdır. Yani olasılıklar `P` hiç belleğe yazılmaz: S register'larından doğrudan f16'ya paketlenip A fragment'i olur. V için `ldmatrix_x4_trans`.
+
+#### İlk ölçüm: 6,8 ms. Neden?
+
+İlk sürüm doğruydu (bütün testler geçti), ama 6,8 ms sürdü: skaler flash'tan 3,9 kat hızlı, naive'den 2,7 kat **yavaş**. PTX'e baktık:
+
+| Kernel | `ld.local` | `st.local` | `mma.sync` |
+|---|---|---|---|
+| `gemm_tc2_f16` | 0 | 0 | 32 |
+| `flash_attn_tc_f16` (ilk sürüm) | **80** | **136** | 16 |
+
+**Local memory**, thread'e özel ama aslında global bellekte (DRAM'de) duran bir alandır. Register'a sığmayan ya da **indeksi derleme anında bilinmeyen** diziler oraya gider. `s[nt][2*h + jj]` gibi döngü değişkeniyle indekslenen bir dizi, derleyici döngüyü açmazsa (unroll) register'da kalamaz. GEMM kernel'inde döngüler küçüktü ve derleyici onları kendisi açtı (32 `mma`). Flash'ta açmadı (sadece 16 `mma`, gerisi döngü).
+
+**Çözüm:** `unroll!` makrosu. Döngü gövdesini her indeks için bir kez, sabit indeksle yazar:
+
+```rust
+macro_rules! unroll {
+    ($i:ident in [$($n:literal),*] $body:block) => {
+        $( { const $i: usize = $n; $body } )*
+    };
+}
+
+unroll!(NT in [0, 1, 2, 3, 4, 5, 6, 7] {
+    s[NT] = mma_m16n8k8_f32_f16(s[NT], qa[KS], b0[KS]);
+});
+```
+
+Sonuç:
+
+| Kernel | `ld.local` | `st.local` | `mma.sync` | Süre |
+|---|---|---|---|---|
+| `flash_attn_tc_f16` (döngüler açık değil) | 80 | 136 | 16 | 6,8 ms |
+| `flash_attn_tc_f16` (`unroll!`) | **0** | **0** | **128** | **0,90–0,92 ms** |
+
+Tek bir değişiklik, 7,5 kat hız. **Ders:** tensor core kernel'lerinde bütün fragment ve toplayıcı dizileri register'da kalmalı. PTX'te `ld.local` görüyorsan, önce onu düzelt.
+
 ## 5. Kartın sınırı ve ne kadar yaklaştık
 
 | Yol | Süre | Hız | Tensor sınırının yüzdesi | 90 MB skor matrisi |
@@ -96,12 +144,14 @@ Flash 26 ms'de 26,2 ms × 1,76 GHz ≈ 46 milyon devir harcıyor. Yapılan iş 5
 | `attention_naive_f16` | **2,48 ms** | 4,6 TF/s | %31 | yazılır ve 3 kez okunur |
 | `attention_flash_f16` (1 satır/blok) | 36,4 ms | 0,3 TF/s | %2 | hiç yok |
 | `attention_flash_f16` (8 satır/blok, ILP) | 26,2 ms | 0,4 TF/s | %3 | hiç yok |
+| `attention_flash_tc_f16` (döngüler açık değil) | 6,8 ms | 1,7 TF/s | %11 | hiç yok |
+| **`attention_flash_tc_f16` (`unroll!`)** | **0,90–0,92 ms** | 12,5–12,8 TF/s | %82–84 | hiç yok |
 
-Klasik yol kazanıyor, çünkü onun ağır kısmını **cuBLAS tensor core'ları** yapıyor. Flash ise bizim skaler kernel'imiz. Flash'ın gerçek kazancı (360 MB trafik) bu farkın yanında küçük kalıyor.
+Skaler flash, klasik yola kaybediyordu: klasik yolun ağır kısmını **cuBLAS tensor core'ları** yapıyor. Tensor core'lu flash ise klasik yolu **2,7 kat** geçiyor. Artık iki kazancı birden alıyor: tensor core hızı **ve** 90 MB'lık skor matrisinin hiç yazılmaması (360 MB bellek trafiği).
 
-**Karar:** Phase 1a ve 1b'de `AttnKind::Naive` kullanılır. Flash, tensor core'lu bir sürüm yazıldığında anlamlı olur (`mma.sync.m16n8k8`, ders 4'ün 5. alıştırması; `ptx_asm` engeli çözülünce).
+**Karar:** encoder artık `AttnKind::FlashTc` kullanıyor. Bir 30 saniyelik pencere 252 ms'den **176 ms**'ye indi. Doğruluk da arttı: flash skorları f32 register'larda tutar, klasik yol ise f16 olarak bellekte saklar. Encoder testinde `ses_001_0007`'nin `ln_post` değerleri %2,37 yerine %1,80 oranında toleransın dışında.
 
-Bu dersin asıl kazancı şu: "flash attention daha hızlıdır" cümlesi **tek başına doğru değildir**. Doğrusu: "flash attention ara belleği siler; kazancı, matris çarpımını tensor core'larda yaptığınız sürece ortaya çıkar."
+Bu dersin asıl kazancı şu: "flash attention daha hızlıdır" cümlesi **tek başına doğru değildir**. Doğrusu: "flash attention ara belleği siler; kazancı, matris çarpımını tensor core'larda yaptığınız ve fragment'leri register'da tuttuğunuz sürece ortaya çıkar."
 
 ## 6. PTX ve Nsight'ta neye bakmalı
 
@@ -128,5 +178,6 @@ ncu --set full -k regex:flash -o fla target\release\gpu-bench.exe attention
 2. **Sekiz satır yerine 16.** `FLASH_BR = 16`. Register sayısı ikiye katlanır (`acc`, `m`, `l` 16'şar). Hangi noktada `ld.local` görünür ve hız düşer? PTX'ten kontrol et.
 3. **`acc` döngüsünü kaydır.** `SP` yerine üsleri register'da tut (thread `t` yalnızca kendi anahtarının üssünü bilir). Bu, ikinci shared okumasını siler mi? Neden zor?
 4. **Küçük `seq`.** `seq = 448` (decoder boyu) ile ölç. Skor matrisi 90 MB değil 8 MB olur. Flash yine kaybediyor mu? Nerede kazanmaya başlar?
-5. **Tensor core.** Ders 4'ün 5. alıştırmasındaki `mma` kernel'ini attention'a uygula: `queries · keysᵀ` fragment'larla. Flash'ın klasik yolu geçtiği noktayı ölç.
+5. **Tensor core'lu flash'ı hızlandır.** `flash_attn_tc_f16`'da K ve V kopyası ile `mma` sırayla çalışır. Bir sonraki döşemeyi register'a önceden yükle (ders 4'teki `gemm_tc_pre_f16` gibi). Kazanç ders 4'tekinden büyük mü? Neden? (İpucu: bu kernel döşeme başına warp başına 128 `mma` yapar, GEMM 32.)
+6. **`unroll!` olmadan.** `unroll!`'lardan sadece birini (örneğin softmax'taki) geri `while` döngüsüne çevir. PTX'te `ld.local` sayısı ve süre ne oluyor? Hangi dizi local memory'ye düşüyor?
 6. **`split_heads` / `merge_heads` maliyeti.** Bunlar ayrı kernel'ler; toplam süreye etkisi ne? `[1500, 1280]` için ölç.

@@ -6,7 +6,7 @@ use half::f16;
 
 use super::{grid_elems, softmax_rows};
 use crate::blas::{Blas, Op};
-use crate::kernels::{FLASH_BR, FLASH_D};
+use crate::kernels::{FLASH_BR, FLASH_D, FTC_ROWS, FTC_THREADS};
 use crate::{Arena, DType, Gpu, GpuError, Tensor};
 
 /// How `attention` computes the result.
@@ -17,6 +17,9 @@ pub enum AttnKind {
     /// One flash-attention kernel: online softmax, K and V tiles in shared memory, and
     /// `scratch` is not touched.
     Flash,
+    /// Flash attention on tensor cores (`mma.sync.m16n8k8`): 64 query rows per block.
+    /// `scratch` is not touched.
+    FlashTc,
 }
 
 /// The attention scale `1 / sqrt(64)`.
@@ -69,6 +72,19 @@ pub fn attention(
             softmax_rows(gpu, arena, scratch, 1.0, None)?;
             // out[h] = probs[h] · v[h]
             blas.gemm_f16_batched(gpu, &ss, Op::N, seq * seq, &vs, Op::N, stride, &os, stride, seq, FLASH_D, seq, heads, 1.0, 0.0)?;
+        }
+        AttnKind::FlashTc => {
+            let (qs, ks, vs, os) = (arena.slice::<f16>(q), arena.slice::<f16>(k), arena.slice::<f16>(v), arena.slice::<f16>(out));
+            let cfg = LaunchConfig {
+                grid_dim: (grid_elems(seq.div_ceil(FTC_ROWS)), grid_elems(heads), 1),
+                block_dim: (FTC_THREADS, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            // SAFETY: one block per 64 query rows and head, FTC_THREADS threads, shapes checked above.
+            unsafe {
+                gpu.kernels()?
+                    .flash_attn_tc_f16(gpu.stream(), cfg, qs.as_ptr().cast(), ks.as_ptr().cast(), vs.as_ptr().cast(), os.as_mut_ptr().cast(), seq, ATTN_SCALE)
+            }?;
         }
         AttnKind::Flash => {
             let (qs, ks, vs, os) = (arena.slice::<f16>(q), arena.slice::<f16>(k), arena.slice::<f16>(v), arena.slice::<f16>(out));

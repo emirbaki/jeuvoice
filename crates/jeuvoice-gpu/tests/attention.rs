@@ -92,7 +92,7 @@ fn attention_matches_reference() {
     let q = rnd(heads * seq * D, 61, 1.0);
     let k = rnd(heads * seq * D, 62, 1.0);
     let v = rnd(heads * seq * D, 63, 1.0);
-    for kind in [AttnKind::Naive, AttnKind::Flash] {
+    for kind in [AttnKind::Naive, AttnKind::Flash, AttnKind::FlashTc] {
         let (got, want) = run(&gpu, kind, &q, &k, &v, heads, seq);
         assert_close(&format!("attention {kind:?} {heads}x{seq}"), &got, &want, Tol { abs: 3e-3, rel: 2e-2 });
     }
@@ -105,7 +105,7 @@ fn attention_single_row() {
     let q = rnd(D, 64, 1.0);
     let k = rnd(D, 65, 1.0);
     let v = rnd(D, 66, 1.0);
-    for kind in [AttnKind::Naive, AttnKind::Flash] {
+    for kind in [AttnKind::Naive, AttnKind::Flash, AttnKind::FlashTc] {
         let (got, want) = run(&gpu, kind, &q, &k, &v, 1, 1);
         assert_close(&format!("attention {kind:?} 1x1"), &got, &want, Tol { abs: 3e-3, rel: 2e-2 });
     }
@@ -122,6 +122,8 @@ fn attention_flash_matches_naive_big() {
     let naive = run_raw(&gpu, AttnKind::Naive, &q, &k, &v, heads, seq);
     let flash = run_raw(&gpu, AttnKind::Flash, &q, &k, &v, heads, seq);
     assert_close("attention flash vs naive 20x1500", &flash, &naive, Tol { abs: 3e-3, rel: 2e-2 });
+    let tc = run_raw(&gpu, AttnKind::FlashTc, &q, &k, &v, heads, seq);
+    assert_close("attention flash-tc vs naive 20x1500", &tc, &naive, Tol { abs: 3e-3, rel: 2e-2 });
 }
 
 #[test]
@@ -158,15 +160,21 @@ fn attention_large_scores_stay_finite() {
     let (heads, seq) = (2, 16);
     let q = vec![32.0f32; heads * seq * D];
     let v = rnd(heads * seq * D, 61, 1.0);
-    let got = run_raw(&gpu, AttnKind::Naive, &q, &q, &v, heads, seq);
-    assert!(got.iter().all(|x| x.is_finite()), "inf or NaN in the attention output");
+    for kind in [AttnKind::Naive, AttnKind::FlashTc] {
+        check_uniform(&run_raw(&gpu, kind, &q, &q, &v, heads, seq), &v, heads, seq, kind);
+    }
+}
+
+/// Every key has the same score, so each output row is the mean of v over the keys.
+fn check_uniform(got: &[f32], v: &[f32], heads: usize, seq: usize, kind: AttnKind) {
+    assert!(got.iter().all(|x| x.is_finite()), "{kind:?}: inf or NaN in the attention output");
     let want: Vec<f32> = (0..heads * seq * D)
         .map(|i| {
             let (h, c) = (i / (seq * D), i % D);
             (0..seq).map(|s| f16::from_f32(v[(h * seq + s) * D + c]).to_f32()).sum::<f32>() / seq as f32
         })
         .collect();
-    assert_close("attention with large scores", &got, &want, Tol { abs: 3e-3, rel: 2e-2 });
+    assert_close(&format!("attention with large scores {kind:?}"), got, &want, Tol { abs: 3e-3, rel: 2e-2 });
 }
 
 #[test]
