@@ -37,7 +37,10 @@ fn tol_for(tap: &str) -> Tol {
 /// | my_voice2 | block_31 | 0.75%, mean 0.00264 | 0.65%, mean 0.00193 |
 /// | my_voice2 | ln_post | 0.75%, mean 0.00372 | 0.75%, mean 0.00304 |
 /// | ses_001_0007 | block_31 | 0.61%, mean 0.00311 | 0.56%, mean 0.00310 |
-/// | ses_001_0007 | ln_post | 2.04%, mean 0.00693 | 2.06%, mean 0.00689 |
+/// | ses_001_0007 | ln_post | 2.04%, mean 0.00693 | 2.37%, mean 0.00714 |
+///
+/// (ses_001_0007 ln_post was 2.06% before the attention scale moved into the GEMM. The
+/// 8.4 s clip is mostly padding silence, where fp16 differs most. The margin is thin there.)
 ///
 /// The bad values sit in the same rows in both. The limits are the worst PyTorch fp16 value
 /// with a margin. Shallow taps allow no value out of tolerance.

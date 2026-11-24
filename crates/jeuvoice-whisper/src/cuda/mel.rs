@@ -39,7 +39,9 @@ pub struct GpuMel {
 impl GpuMel {
     /// Uploads the DFT matrix and `filters` (`[128, 201]`, from the model file).
     pub fn new(gpu: &Gpu, filters: &[f32]) -> Result<GpuMel, WhisperError> {
-        assert_eq!(filters.len(), N_MEL * N_BINS, "GpuMel: filters must be [128, 201]");
+        if filters.len() != N_MEL * N_BINS {
+            return Err(WhisperError::ModelLoad(format!("the mel filters have {} values, not 128 x 201", filters.len())));
+        }
         let mut plan = ArenaPlan::new();
         let t_dft = plan.add(DType::F32, &[N_FFT, 2 * N_BINS]);
         let t_filters = plan.add(DType::F32, &[N_MEL, N_BINS]);

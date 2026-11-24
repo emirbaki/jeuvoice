@@ -17,7 +17,7 @@
 
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
-    ATTN_SCALE, AttnKind, Layout, add_into, add_rows, attention, bias_add, bias_gelu, conv1d_with_layout, layernorm, merge_heads,
+    AttnKind, Layout, add_into, add_rows, attention, bias_add, bias_gelu, conv1d_with_layout, layernorm, merge_heads,
     split_heads,
 };
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, Tensor};
@@ -78,6 +78,7 @@ impl Encoder {
     /// Plans the weights and the activations in one arena, allocates it, and uploads the
     /// encoder weights of `model`.
     pub fn load(gpu: &Gpu, model: &GgmlModel) -> Result<Encoder, WhisperError> {
+        model.check_gpu_encoder()?;
         let mut plan = ArenaPlan::new();
         let w = EncoderWeights::plan(&mut plan, model)?;
         let weight_bytes = plan.total_bytes();
@@ -173,7 +174,6 @@ impl Encoder {
             split_heads(gpu, ar, &a.q, &a.qh)?;
             split_heads(gpu, ar, &a.k, &a.kh)?;
             split_heads(gpu, ar, &a.v, &a.vh)?;
-            debug_assert_eq!(ATTN_SCALE, 0.125, "the attention op scales by 1/sqrt(64)");
             attention(gpu, ar, blas, &a.qh, &a.kh, &a.vh, &a.oh, &a.scores, attn)?;
             merge_heads(gpu, ar, &a.oh, &a.att)?;
             linear(&a.att, &b.o_w, &a.proj, n_ctx, d, d)?;

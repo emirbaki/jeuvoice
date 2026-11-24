@@ -148,3 +148,36 @@ fn split_and_merge_heads() {
         }
     }
 }
+
+#[test]
+fn attention_large_scores_stay_finite() {
+    // Review finding: q = k = 32 everywhere gives a raw score of 64 * 32 * 32 = 65536, past
+    // the f16 limit of 65504. After the 1/8 scale it is 8192, which f16 holds. All keys have
+    // the same score, so each output row is the mean of v over the keys.
+    let gpu = Gpu::open(0).unwrap();
+    let (heads, seq) = (2, 16);
+    let q = vec![32.0f32; heads * seq * D];
+    let v = rnd(heads * seq * D, 61, 1.0);
+    let got = run_raw(&gpu, AttnKind::Naive, &q, &q, &v, heads, seq);
+    assert!(got.iter().all(|x| x.is_finite()), "inf or NaN in the attention output");
+    let want: Vec<f32> = (0..heads * seq * D)
+        .map(|i| {
+            let (h, c) = (i / (seq * D), i % D);
+            (0..seq).map(|s| f16::from_f32(v[(h * seq + s) * D + c]).to_f32()).sum::<f32>() / seq as f32
+        })
+        .collect();
+    assert_close("attention with large scores", &got, &want, Tol { abs: 3e-3, rel: 2e-2 });
+}
+
+#[test]
+#[should_panic(expected = "divide by 64")]
+fn merge_heads_rejects_a_bad_width() {
+    // Review finding: y [4, 100] gives heads = 1, so h is [1, 4, 64] (256 values), but y has
+    // 400. Without the check the kernel reads and writes past the tensors.
+    let gpu = Gpu::open(0).unwrap();
+    let mut plan = ArenaPlan::new();
+    let h = plan.add(DType::F16, &[1, 4, D]);
+    let y = plan.add(DType::F16, &[4, 100]);
+    let arena = Arena::new(&gpu, &plan).unwrap();
+    merge_heads(&gpu, &arena, &h, &y).unwrap();
+}

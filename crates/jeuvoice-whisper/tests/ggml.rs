@@ -125,3 +125,25 @@ fn reads_large_v3_turbo() {
         eprintln!("{:<45} {:?} {:?}", t.name, t.dtype, t.shape);
     }
 }
+
+#[test]
+fn rejects_a_huge_tensor() {
+    // Review finding: four dimensions of 2^30 overflow the element count. A plain error,
+    // not a panic or a wrapped size.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("huge.bin");
+    write_file(&path, &[Rec { name: "big", shape: &[1 << 30, 1 << 30, 1 << 30, 1 << 30], ttype: 1, data: Vec::new() }]);
+    assert!(matches!(GgmlModel::open(&path), Err(WhisperError::ModelLoad(_))));
+}
+
+#[test]
+fn checks_the_encoder_shape() {
+    // Review finding: the GPU encoder supports large-v3-turbo shapes only. The tiny file
+    // has 2 mel bands, so the check gives a plain error that names the field.
+    let dir = tempfile::tempdir().unwrap();
+    let m = GgmlModel::open(&tiny(dir.path(), 1)).unwrap();
+    match m.check_gpu_encoder() {
+        Err(WhisperError::ModelLoad(why)) => assert!(why.contains("mel"), "{why}"),
+        other => panic!("a 2-band model must be rejected, got {other:?}"),
+    }
+}

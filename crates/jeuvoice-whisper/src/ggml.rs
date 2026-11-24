@@ -171,8 +171,12 @@ impl GgmlModel {
                 t => return Err(bad(format!("tensor {name} has type {t}. Only f32 and f16 models are supported, not quantized ones"))),
             };
             ne.reverse();
-            let numel: u64 = ne.iter().map(|&d| d as u64).product();
-            let data_len = numel * dtype.size();
+            // Checked: a corrupt record must give an error, not a wrapped size.
+            let data_len = ne
+                .iter()
+                .try_fold(dtype.size(), |n, &d| n.checked_mul(d as u64))
+                .filter(|&n| usize::try_from(n).is_ok())
+                .ok_or_else(|| bad(format!("tensor {name} is too large: {ne:?}")))?;
             let data_offset = r.inner.stream_position().map_err(|e| bad(e.to_string()))?;
             if data_offset + data_len > file_len {
                 return Err(bad(format!("the model file ends early in tensor {name}")));
@@ -183,6 +187,26 @@ impl GgmlModel {
         }
 
         Ok(GgmlModel { hparams, mel_filters: (n_mel, n_fft, filters), vocab, tensors, path: path.to_path_buf() })
+    }
+
+    /// Checks that the GPU encoder can run this model: the large-v3-turbo encoder shapes
+    /// (128 mel bands with 201 filter bins, 1500 positions, heads of 64, at least one layer).
+    pub fn check_gpu_encoder(&self) -> Result<(), WhisperError> {
+        let h = &self.hparams;
+        let fail = |what: String| Err(bad(format!("the GPU path supports Whisper large-v3 models only: {what}")));
+        if h.n_mels != 128 || self.mel_filters.0 != 128 || self.mel_filters.1 != 201 {
+            return fail(format!("{} mel bands with {}x{} filters, not 128 with 128x201", h.n_mels, self.mel_filters.0, self.mel_filters.1));
+        }
+        if h.n_audio_ctx != 1500 {
+            return fail(format!("{} audio positions, not 1500", h.n_audio_ctx));
+        }
+        if h.n_audio_head <= 0 || h.n_audio_state != 64 * h.n_audio_head {
+            return fail(format!("width {} with {} heads, not heads of 64", h.n_audio_state, h.n_audio_head));
+        }
+        if h.n_audio_layer <= 0 {
+            return fail(format!("{} encoder layers", h.n_audio_layer));
+        }
+        Ok(())
     }
 
     pub fn tensor(&self, name: &str) -> Option<&GgmlTensor> {

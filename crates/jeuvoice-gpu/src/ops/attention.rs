@@ -61,10 +61,12 @@ pub fn attention(
                 arena.slice::<f16>(scratch),
             );
             let stride = seq * FLASH_D;
-            // scores[h] = q[h] · k[h]ᵀ
-            blas.gemm_f16_batched(gpu, &qs, Op::N, stride, &ks, Op::T, stride, &ss, seq * seq, seq, seq, FLASH_D, heads, 1.0, 0.0)?;
+            // scores[h] = scale · q[h] · k[h]ᵀ. The scale goes into the GEMM: cuBLAS applies it
+            // in f32 before it rounds to f16. An unscaled score can pass the f16 limit (65504)
+            // and become inf, and then the softmax gives NaN.
+            blas.gemm_f16_batched(gpu, &qs, Op::N, stride, &ks, Op::T, stride, &ss, seq * seq, seq, seq, FLASH_D, heads, ATTN_SCALE, 0.0)?;
             // The softmax over the last dimension of the whole batch: [heads * seq, seq].
-            softmax_rows(gpu, arena, scratch, ATTN_SCALE, None)?;
+            softmax_rows(gpu, arena, scratch, 1.0, None)?;
             // out[h] = probs[h] · v[h]
             blas.gemm_f16_batched(gpu, &ss, Op::N, seq * seq, &vs, Op::N, stride, &os, stride, seq, FLASH_D, seq, heads, 1.0, 0.0)?;
         }
@@ -107,8 +109,9 @@ pub fn split_heads(gpu: &Gpu, arena: &Arena, x: &Tensor, y: &Tensor) -> Result<(
 
 /// `[heads, seq, 64]` to `[seq, heads * 64]`.
 pub fn merge_heads(gpu: &Gpu, arena: &Arena, h: &Tensor, y: &Tensor) -> Result<(), GpuError> {
-    assert_eq!(y.dtype(), DType::F16, "merge_heads takes F16 tensors");
+    assert!(y.dtype() == DType::F16 && h.dtype() == DType::F16, "merge_heads takes F16 tensors");
     assert_eq!(y.shape().len(), 2, "merge_heads: out must be [seq, heads * 64]");
+    assert_eq!(y.shape()[1] % FLASH_D, 0, "merge_heads: the second dimension must divide by 64");
     let (seq, heads) = (y.shape()[0], y.shape()[1] / FLASH_D);
     assert_eq!(h.shape(), &[heads, seq, FLASH_D], "merge_heads: in must be [heads, seq, 64]");
     let n = y.numel();
