@@ -505,3 +505,25 @@ So criterion 1 (WER against whisper.cpp) counts one substitution and one deletio
 | 6. The app transcribes on the CPU without CUDA | works | — | `load_with` falls back on `ModelLoad`; the no-GPU load is a test | yes (two tests, no manual UI run) |
 
 Criterion 1 is the one near tie of my_voice2 window 1. PyTorch f32 prefers "uy" at p 0.5448 against "u" at 0.4528, so the CudaWhisper token is the model answer and whisper.cpp is the outlier (it accumulates its matmuls in f16). Only the user can change a criterion.
+
+### The app path and the package (Task 13, 2026-11-25)
+
+`LazyWhisper` holds `Arc<dyn Transcriber>` and the device flag. The app tries `CudaWhisper` only when `JEUVOICE_CUDA_WHISPER=1` and the build has the new `cuda-kernels` feature, and any load error (`WhisperError::ModelLoad`) falls back to whisper.cpp. Five tests hold the choice and the fallback, with the loaders as parameters so no model is needed.
+
+`packaging\windows\collect.ps1` builds the release exe with `scripts\cargo.cmd oxide build -- -p jeuvoice-app --release --features cuda-kernels`. The PTX is inside the exe (the kernel entry names are in the binary) and no `.ptx` file sits next to it. The exe starts and stays up with and without the variable on the development machine. The build takes about 9 minutes.
+
+### Lesson 9: the DTW median filter (Task 15, 2026-11-25)
+
+One window of DTW (6 alignment heads, 130 tokens, 1500 audio positions), measured in release by `dtw_cpu_cost_of_one_window`:
+
+| Stage | Before | After |
+|---|---|---|
+| normalize over the tokens | 3.25 ms | 2.32 ms |
+| median filter, width 7 | 67.3 ms | **3.71 ms** |
+| cost matrix, all stages | 75.2 ms | 8.02 ms |
+| DTW path and backtrace | 2.03 ms | 1.86 ms |
+| together | 77.2 ms | **9.9 ms** |
+
+The filter sorted a fresh `Vec` of seven values for 1.17 million positions. A 19-comparator sorting network (Knuth 5.3.4) needs no allocation and no comparison function, and the reflect padding moved to the two row ends. The output is identical to a plain sort (a random-row test from 8 to 1500 positions), and the real-model `t_dtw` still matches whisper.cpp (median 0 cs, max 4 cs).
+
+DTW stays on the CPU: about 1% of a transcription, and the end-to-end difference sits under the run-to-run spread of the GPU clock (1.305 to 1.927 s over four runs of one clip). Lesson 9 gives the reasoning and the exercises.
