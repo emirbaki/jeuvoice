@@ -4,10 +4,10 @@ Date: 2026-11-25. Written by the previous agent for the next agent. Read `AGENTS
 
 ## 1. Start here
 
-1. Switch to the branch: `git switch rust-cuda-phase1b`. It has 23 commits on top of `main`. It is **not merged and not pushed**. Merge and push only when the user says so.
-2. Run the plain tests: `scripts\cargo.cmd test`. Expected: 405 pass, 0 fail.
+1. Switch to the branch: `git switch rust-cuda-phase1b`. It has 27 commits on top of `main`. It is **not merged and not pushed**. Merge and push only when the user says so.
+2. Run the plain tests: `scripts\cargo.cmd test`. Expected: 407 pass, 0 fail.
 3. Run the GPU kernel tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-gpu`. Expected: 93 pass.
-4. Run the Whisper GPU tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-whisper --features cuda-kernels`. Expected: 69 pass (the rest are `#[ignore]`).
+4. Run the Whisper GPU tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-whisper --features cuda-kernels`. Expected: 70 pass (the rest are `#[ignore]`).
 5. Run the real-model tests one file at a time, with `--release --test-threads 1` (the card has 4 GB):
    `scripts\cargo.cmd oxide test -- -p jeuvoice-whisper --features cuda-kernels --release --test cuda_transcribe -- --ignored --nocapture --test-threads 1`
    and the same for `cuda_decoder` and `cuda_encoder`.
@@ -22,7 +22,7 @@ The plan: `docs/superpowers/plans/2026-11-25-rust-cuda-phase1b-decoder.md` (16 t
 | 0 to 12 | fixtures, mel fix, vocab, token rules, window loop, token times, DTW, embed and attention kernels, logits GEMM, GPU decoder, CudaWhisper, the comparison tool | done |
 | 13 | the app path and the package | done, `8af4c63` |
 | 14 | close the gaps (the f32 residual stream) | done, `278f3af` (criterion 1 open, see 3) |
-| 15 | lesson 9, docs, the branch review | lesson and docs done (`17c5f5e`); the review findings are in section 4 |
+| 15 | lesson 9, docs, the branch review | done: lesson `17c5f5e`, review fixes `ac897d8`, docs `7d33b53` |
 
 ## 3. The open criterion: 1, the WER against whisper.cpp
 
@@ -32,7 +32,7 @@ The plan: `docs/superpowers/plans/2026-11-25-rust-cuda-phase1b-decoder.md` (16 t
 | 2. Median word-start difference | 50 ms | — | 0 ms | yes |
 | 3. Time of the 69 s set | 4.3 s | 3.954 s | 2.813 s | yes |
 | 4. Peak VRAM (whole card, peak minus idle) | not more than whisper.cpp | 2157 MiB | 1798 MiB | yes |
-| 5. The tests and the real-model tests with CudaWhisper | all pass | - | 69 + 4 real-model | yes |
+| 5. The tests and the real-model tests with CudaWhisper | all pass | - | 70 + 4 real-model | yes |
 | 6. The app transcribes on the CPU without CUDA | works | — | two tests (the fallback and the no-GPU load) | yes (no manual UI run) |
 
 Criterion 1 is **one token** of my_voice2 window 1:
@@ -50,7 +50,7 @@ The user was asked and decided: **go on with Task 13 first**. The decision about
 
 ## 4. What is left
 
-1. **The review findings** of Task 15 (a fresh reviewer read the branch). Fix each Critical or Important item with a test that fails first. List the Minor ones as deferred, in `docs/development-log.md`.
+1. **The review is done** (`docs/development-log.md`, "The branch review"): no Critical, two Important fixed with tests, the minors listed as deferred. Read that list before changing the decoder.
 2. **The merge.** Ask the user before `git push` / a merge to `main`.
 3. **The Phase 1b handoff for Phase 2.** If the user accepts criterion 1 as "explained", Phase 1 is done and the next work is Phase 2 (the OmniVoice Qwen3-0.6B backbone): write its plan from the spec, Phase 2 section.
 4. **Optional: the manual UI check of criterion 6.** Run the app with `CUDA_VISIBLE_DEVICES=-1` and `JEUVOICE_CUDA_WHISPER=1`, transcribe one file, and see the result come from whisper.cpp on the CPU.
