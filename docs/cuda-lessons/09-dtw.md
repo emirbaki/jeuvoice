@@ -125,6 +125,8 @@ Tek pencere 9,9 ms. 4 pencerelik test setinde yaklaşık **40 ms**, yani 3,9 san
 
 Uçtan uca ölçüm bunu doğruluyor: aynı klibi DTW açık ve kapalı koşturduk (`dtw_cost_in_a_transcription` testi). Sonuçlar 1,305 s ile 1,927 s arasında **sıçradı**, DTW'li koşular DTW'sizlerden yavaş çıkmadı. Yani DTW'nin maliyeti, GPU saat hızının koşudan koşuya oynamasının (yaklaşık ±0,1 s) altında kalıyor.
 
+Aynı şey `scripts\compare-whisper.ps1` tablosunda da görünüyor: medyan filtresini düzelttikten sonra 69 s'lik set 3,877 s'den 2,813 s'ye indi, ama aynı dakikalarda whisper.cpp 4,007 s'den 3,954 s'ye indi. Yani iki koşu arasındaki farkın büyük kısmı kartın saat hızıdır, tek başına bu değişiklik değil. Güvenilir sayı, bölüm 4'teki tek pencere ölçümüdür (77,2 → 9,9 ms).
+
 Bu yüzden DTW CPU'da kalıyor:
 
 1. **İş küçük.** 190 bin hücrelik bir dinamik programlama. Bir GPU kernel'i için çekirdek başına yeterli paralellik yok: DP zinciri çaprazda **seri**dir, ancak dalga cephesi (anti-diyagonal) ile paralelleşir ve o zaman her adımda senkronizasyon gerekir.
