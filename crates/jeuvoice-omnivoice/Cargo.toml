@@ -1,0 +1,27 @@
+[package]
+name = "jeuvoice-omnivoice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The OmniVoice text-to-speech main model (Qwen3-0.6B and masked iterative decoding) on the Rust CUDA kernels."
+
+[dependencies]
+serde_json = "1"
+fancy-regex = "0.14"
+unicode-normalization = "0.1"
+unicode-general-category = "1"
+half.workspace = true
+jeuvoice-gpu = { path = "../jeuvoice-gpu", optional = true }
+
+[features]
+# The GPU path on the Rust kernels. Build and test it only with scripts\cargo.cmd oxide ...
+# Without the feature, the config, the weight index and the paths still build and test.
+cuda-kernels = ["dep:jeuvoice-gpu"]
+
+[dev-dependencies]
+tempfile.workspace = true
+safetensors.workspace = true
+
+[[example]]
+name = "render_tokens"
+required-features = ["cuda-kernels"]

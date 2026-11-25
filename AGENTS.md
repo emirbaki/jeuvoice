@@ -2,7 +2,7 @@
 
 Rules and commands for coding agents in this repo. Read this first.
 
-**Current work:** the Rust CUDA inference project, Phase 1b (the Whisper decoder), on the branch `rust-cuda-phase1b`. Read `docs/superpowers/handoff/2026-11-25-rust-cuda-phase1b-handoff.md` for where it stopped and what comes next. The older handoff `docs/superpowers/handoff/2026-11-24-rust-cuda-handoff.md` has the history of Phase 0 and 1a.
+**Current work:** the Rust CUDA inference project, Phase 2 (the OmniVoice main model). The plan is `docs/superpowers/plans/2026-11-25-rust-cuda-phase2-omnivoice.md`; it has the model facts and the criteria. Phase 1 is merged on `main`; the history is in `docs/superpowers/handoff/2026-11-25-rust-cuda-phase1b-handoff.md` and, for Phase 0 and 1a, in `docs/superpowers/handoff/2026-11-24-rust-cuda-handoff.md`. Phase 1 criterion 1 (one near tie, our token matches the f32 model) is recorded in `docs/phase1-criterion-1-tie.md`.
 
 ## The project
 

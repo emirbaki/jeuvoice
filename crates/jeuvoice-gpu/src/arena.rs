@@ -70,7 +70,21 @@ impl Arena {
         Ok(Arena { buf, stream: Arc::clone(gpu.stream()) })
     }
 
-    /// The device memory of `t`, typed as `T`.
+    /// As `slice`, but the offset may fall off the 256-byte alignment: for a tensor that a
+    /// scalar kernel reads value by value (the token ids, the audio mask, the valid lengths).
+    /// Never pass the result to cuBLAS or to a kernel with vectorised loads.
+    ///
+    /// # Panics
+    /// If `T` does not match `t.dtype`, or `t` does not fit in this arena.
+    pub fn slice_unaligned<T: Element>(&self, t: &Tensor) -> DevSlice<'_, T> {
+        assert_eq!(T::DTYPE, t.dtype, "tensor type mismatch");
+        // Tensor::new checked that offset + bytes does not overflow.
+        assert!(t.offset + t.bytes() <= self.buf.len(), "tensor is outside this arena");
+        DevSlice { ptr: self.buf.cu_deviceptr() + t.offset as u64, len: t.numel(), _arena: PhantomData }
+    }
+
+    /// The device memory of `t`, typed as `T`, on the 256-byte alignment the vectorised
+    /// kernels and cuBLAS need.
     ///
     /// # Panics
     /// If `T` does not match `t.dtype`, or `t` does not fit in this arena. Both are
@@ -81,6 +95,27 @@ impl Arena {
         // Tensor::new checked that offset + bytes does not overflow.
         assert!(t.offset + t.bytes() <= self.buf.len(), "tensor is outside this arena");
         DevSlice { ptr: self.buf.cu_deviceptr() + t.offset as u64, len: t.numel(), _arena: PhantomData }
+    }
+
+    /// As `download`, with an offset that may fall off the 256-byte alignment: for a row block
+    /// of the logits, where a row is not a multiple of 256 bytes.
+    ///
+    /// # Panics
+    /// If `T` does not match `t.dtype`.
+    pub fn download_unaligned<T: Element>(&self, gpu: &Gpu, t: &Tensor) -> Result<Vec<T>, GpuError> {
+        let src = self.slice_unaligned::<T>(t);
+        gpu.ctx().bind_to_thread()?;
+        let stream = gpu.stream();
+        let mut out = Vec::<T>::with_capacity(src.len());
+        let bytes = src.len() * std::mem::size_of::<T>();
+        // SAFETY: `out` has capacity for `bytes`. The sync makes the copy finish before
+        // `set_len`, and every byte is then written.
+        unsafe {
+            check(sys::cuMemcpyDtoHAsync_v2(out.as_mut_ptr().cast(), src.ptr, bytes, stream.cu_stream()))?;
+            stream.synchronize()?;
+            out.set_len(src.len());
+        }
+        Ok(out)
     }
 
     /// Copy `data` into `t`. Returns when the copy is done.

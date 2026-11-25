@@ -1531,6 +1531,537 @@ pub mod device {
         out
     }
 
+    // ---- RoPE and the per-head RMSNorm (lesson 10: docs/cuda-lessons/10-rope-qk-norm.md) ----
+    // The Qwen3 backbone rotates every query and key head with RoPE before the attention, and
+    // normalises each head with its own RMSNorm. Both work on rows of 128 values.
+
+    /// `w[i] = w[i] / sqrt(mean(x²) + eps) · w[i]` over each row of `c` columns, in place, with
+    /// f32 math. One block of `ROW_BLOCK` threads per row, as `rmsnorm_f16`, but the weight is
+    /// f32 (the model keeps `q_norm` and `k_norm` in f32).
+    ///
+    /// # Safety
+    /// `x` is valid for `rows * d` f16 values, `w` for `d` f32 values. The grid has one block
+    /// per row and `ROW_BLOCK` threads.
+    #[kernel]
+    pub unsafe fn rmsnorm_rows_f16(x: *mut f16, w: *const f32, d: usize, eps: f32) {
+        let base = thread::blockIdx_x() as usize * d;
+        let tid = thread::threadIdx_x() as usize;
+        let mut sum = 0.0f32;
+        let mut c = tid;
+        while c < d {
+            // SAFETY: c < d, one block per row.
+            let v = unsafe { *x.add(base + c) } as f32;
+            sum += v * v;
+            c += ROW_BLOCK as usize;
+        }
+        let scale = 1.0 / (block_sum(sum) / d as f32 + eps).sqrt();
+        let mut c = tid;
+        while c < d {
+            // SAFETY: each (row, c) belongs to exactly one thread.
+            unsafe {
+                let v = *x.add(base + c) as f32 * scale * *w.add(c);
+                *x.add(base + c) = v as f16;
+            }
+            c += ROW_BLOCK as usize;
+        }
+    }
+
+    /// Rotary position embedding with the *half-split* pairs of Qwen: the pair is `(i, i + d/2)`
+    /// of a head and rotates by `pos · inv_freq[i]`. One thread per pair.
+    ///
+    /// `inv_freq` holds `theta^(-2i/d)` for `i` in `0..d/2`, computed once on the host.
+    ///
+    /// # Safety
+    /// `x` is valid for `rows * heads * d` f16 values, `positions` for `rows` i32 values and
+    /// `inv_freq` for `d / 2` f32 values. `d` is even. `n` is `rows * heads * d/2`, the exact
+    /// work-item count: the grid is rounded up and a thread at or past `n` returns.
+    #[kernel]
+    pub unsafe fn rope_half_f16(x: *mut f16, positions: *const i32, inv_freq: *const f32, heads: usize, d: usize, n: usize) {
+        let i = thread::index_1d().get() as usize;
+        // The grid is rounded up to a whole block, so this guard owns the tail.
+        if i >= n {
+            return;
+        }
+        let pairs = d / 2;
+        let row = i / (heads * pairs);
+        let pair = i % pairs;
+        let base = i / pairs * d + pair;
+        // SAFETY: every thread below `n` owns a pair, so row < rows and
+        // pair < d/2. The two halves are inside the same head.
+        unsafe {
+            let pos = *positions.add(row) as f32;
+            let angle = pos * *inv_freq.add(pair);
+            let (s, c) = (libm::sinf(angle), libm::cosf(angle));
+            let a = *x.add(base) as f32;
+            let b = *x.add(base + pairs) as f32;
+            *x.add(base) = (a * c - b * s) as f16;
+            *x.add(base + pairs) = (a * s + b * c) as f16;
+        }
+    }
+
+    /// Rotary position embedding on `[rows, heads, 128]` f16 in place with *interleaved* pairs:
+    /// the pair is `(2i, 2i+1)`, the form of GPT-J. Qwen uses `rope_half_f16` instead; this one
+    /// stays for lesson 10, which compares the two layouts. One thread per pair.
+    ///
+    /// # Safety
+    /// As `rope_half_f16`.
+    #[kernel]
+    pub unsafe fn rope_f16(x: *mut f16, positions: *const i32, inv_freq: *const f32, heads: usize, d: usize, n: usize) {
+        let i = thread::index_1d().get() as usize;
+        // The grid is rounded up to a whole block, so this guard owns the tail.
+        if i >= n {
+            return;
+        }
+        let pairs = d / 2;
+        let row = i / (heads * pairs);
+        let pair = i % pairs;
+        // SAFETY: every thread below `n` owns a pair, so row < rows and
+        // pair < pairs. The pair starts at 2 * pair inside the head.
+        unsafe {
+            let pos = *positions.add(row) as f32;
+            let angle = pos * *inv_freq.add(pair);
+            let (s, c) = (libm::sinf(angle), libm::cosf(angle));
+            let base = i * 2;
+            let a = *x.add(base) as f32;
+            let b = *x.add(base + 1) as f32;
+            *x.add(base) = (a * c - b * s) as f16;
+            *x.add(base + 1) = (a * s + b * c) as f16;
+        }
+    }
+
+    /// The sum of `v` over four warps (128 threads). `block_sum` needs exactly `ROW_BLOCK`
+    /// threads, so a kernel with a 128 wide row uses this one.
+    #[device]
+    pub fn block_sum_4(v: f32) -> f32 {
+        static mut SLOTS: SharedArray<f32, 4> = SharedArray::UNINIT;
+        let tid = thread::threadIdx_x() as usize;
+        let w = warp::reduce_sum_f32(v);
+        if warp::lane_id() == 0 {
+            // SAFETY: only lane 0 of warp k writes slot k, and tid / 32 < 4.
+            unsafe { SLOTS[tid / 32] = w };
+        }
+        thread::sync_threads();
+        // SAFETY: the barrier above separates these reads from the writes.
+        let total = unsafe { SLOTS[0] + SLOTS[1] + SLOTS[2] + SLOTS[3] };
+        thread::sync_threads();
+        total
+    }
+
+    /// The fast `rmsnorm_rows_f16` for a row of at most 128 values: one block of 128 threads
+    /// per row, the value of a thread in a register, so `x` is read once and written once.
+    /// `rmsnorm_rows_f16` reads `x` twice and runs 256 threads for a 128 wide row.
+    ///
+    /// # Safety
+    /// `x` is valid for `rows * d` f16 values with `d <= 128`, `w` for `d` f32 values. The
+    /// grid has one block per row and 128 threads.
+    #[kernel]
+    pub unsafe fn rmsnorm_rows_f16_small(x: *mut f16, w: *const f32, d: usize, eps: f32) {
+        let base = thread::blockIdx_x() as usize * d;
+        let c = thread::threadIdx_x() as usize;
+        // SAFETY: c < 128 and d <= 128, so either c is inside the row or this thread has no
+        // value; the register keeps it for the write.
+        let mut v = 0.0f32;
+        let inside = c < d;
+        if inside {
+            v = unsafe { *x.add(base + c) } as f32;
+        }
+        let scale = 1.0 / (block_sum_4(v * v) / d as f32 + eps).sqrt();
+        if inside {
+            // SAFETY: as above. The value comes from the register, not a second read.
+            unsafe { *x.add(base + c) = (v * scale * *w.add(c)) as f16 };
+        }
+    }
+
+    /// Rotary position embedding with the half-split pairs of Qwen3, and the sine and cosine of
+    /// a pair computed once per row and kept in shared memory: all heads of a row share the
+    /// same angles. One block of `d/2` threads per row, and each thread walks the heads.
+    ///
+    /// # Safety
+    /// `x` is valid for `rows * heads * d` f16 values, `positions` for `rows` i32 values and
+    /// `inv_freq` for `d / 2` f32 values. `d` is even and at most 128.
+    #[kernel]
+    pub unsafe fn rope_half_f16_shared(x: *mut f16, positions: *const i32, inv_freq: *const f32, heads: usize, d: usize) {
+        static mut ANG: SharedArray<f32, 128> = SharedArray::UNINIT; // sin and cos of one pair
+        let row = thread::blockIdx_x() as usize;
+        let pair = thread::threadIdx_x() as usize;
+        let pairs = d / 2;
+        // SAFETY: row < rows and pair < d/2, so both reads are inside their tensors.
+        let (pos, freq) = unsafe { (*positions.add(row) as f32, *inv_freq.add(pair)) };
+        let angle = pos * freq;
+        // SAFETY: two slots per pair, and pair < pairs = d/2 <= 64.
+        unsafe {
+            ANG[2 * pair] = libm::sinf(angle);
+            ANG[2 * pair + 1] = libm::cosf(angle);
+        }
+        thread::sync_threads();
+        // SAFETY: the barrier separates the shared writes from these reads.
+        let (s, c) = unsafe { (ANG[2 * pair], ANG[2 * pair + 1]) };
+        let mut h = 0;
+        while h < heads {
+            let base = ((row * heads + h) * d) + pair;
+            // SAFETY: the head and the pair are inside the row, and this thread owns the pair.
+            unsafe {
+                let a = *x.add(base) as f32;
+                let b = *x.add(base + pairs) as f32;
+                *x.add(base) = (a * c - b * s) as f16;
+                *x.add(base + pairs) = (a * s + b * c) as f16;
+            }
+            h += 1;
+        }
+    }
+
+    // ---- The guided peak of the decode (lesson 12: docs/cuda-lessons/12-masked-decoding.md) ----
+    // The engine evaluates log_softmax((1+g)c - g*u) per (position, codebook), keeps the mask
+    // id in the normaliser and skips it in the argmax. A block of 256 threads owns one pair,
+    // so a decode step moves 13.4 KiB to the host instead of the 13.4 MiB logits.
+
+    /// The guided peak of every `(position, codebook)` pair, one block of 256 threads per pair.
+    ///
+    /// # Safety
+    /// `c` and `u` are valid for `pairs / codebooks + 1` planes of `width` f32 values, `conf`
+    /// for `pairs` f32 and `pick` for `pairs` i32. `width >= codebooks * vocab`, `vocab > mask_id`
+    /// and the blocks of `v += 256` stay inside the `vocab` values of their pair. The kernel
+    /// checks its block index and the host checks the sizes.
+    #[kernel]
+    pub unsafe fn guide_peak_f32(
+        c: *const f32,
+        u: *const f32,
+        conf: *mut f32,
+        pick: *mut i32,
+        pairs: usize,
+        width: usize,
+        vocab: usize,
+        codebooks: usize,
+        mask_id: usize,
+        guidance: f32,
+    ) {
+        static mut TOP: SharedArray<f32, 256> = SharedArray::UNINIT;
+        static mut BEST: SharedArray<f32, 256> = SharedArray::UNINIT;
+        static mut AT: SharedArray<i32, 256> = SharedArray::UNINIT;
+        let pair = thread::blockIdx_x() as usize;
+        if pair >= pairs {
+            return;
+        }
+        let tid = thread::threadIdx_x() as usize;
+        let base = (pair / codebooks) * width + (pair % codebooks) * vocab;
+        let mut top = f32::NEG_INFINITY;
+        let mut best = f32::NEG_INFINITY;
+        let mut at = 0i32;
+        let mut v = tid;
+        // SAFETY: every `v` below `vocab` is inside the row of this pair, and the two planes
+        // have the same shape.
+        unsafe {
+            while v < vocab {
+                let value = (1.0 + guidance) * *c.add(base + v) - guidance * *u.add(base + v);
+                if value > top {
+                    top = value;
+                }
+                if v != mask_id && value > best {
+                    best = value;
+                    at = v as i32;
+                }
+                v += 256;
+            }
+            // SAFETY: one slot per thread, and the barriers separate the writes from the reads.
+            TOP[tid] = top;
+            BEST[tid] = best;
+            AT[tid] = at;
+        }
+        thread::sync_threads();
+        let mut stride = 128;
+        while stride > 0 {
+            if tid < stride {
+                // SAFETY: `tid + stride < 256` while stride halves from 128, and the barrier
+                // below separates this merge from the next round.
+                unsafe {
+                    let other_top = TOP[tid + stride];
+                    if other_top > TOP[tid] {
+                        TOP[tid] = other_top;
+                    }
+                    let (other_best, other_at) = (BEST[tid + stride], AT[tid + stride]);
+                    if other_best > BEST[tid] || (other_best == BEST[tid] && other_at < AT[tid]) {
+                        BEST[tid] = other_best;
+                        AT[tid] = other_at;
+                    }
+                }
+            }
+            thread::sync_threads();
+            stride /= 2;
+        }
+        let mut sum = 0.0f32;
+        let mut v = tid;
+        let top = unsafe { TOP[0] };
+        // SAFETY: as the first pass: every `v` below `vocab` is inside the row.
+        unsafe {
+            while v < vocab {
+                let value = (1.0 + guidance) * *c.add(base + v) - guidance * *u.add(base + v);
+                sum += libm::expf(value - top);
+                v += 256;
+            }
+        }
+        let total = block_sum(sum);
+        if tid == 0 {
+            // SAFETY: `pair` is below `pairs`, and both outputs have one value per pair.
+            unsafe {
+                *conf.add(pair) = BEST[0] - (libm::logf(total) + top);
+                *pick.add(pair) = AT[0];
+            }
+        }
+    }
+    // ---- SwiGLU (lesson 11: docs/cuda-lessons/11-swiglu.md) ----
+
+    /// `silu(x) = x / (1 + exp(-x))` in f32. For a very negative `x`, `exp(-x)` is `inf` and
+    /// the quotient is 0, which is the right limit and not a NaN.
+    #[device]
+    pub fn silu(v: f32) -> f32 {
+        v / (1.0 + libm::expf(-v))
+    }
+
+    /// `out[i] = silu(gate[i]) · up[i]`, one element per thread.
+    ///
+    /// # Safety
+    /// All three pointers are valid for `n` f16 values. `out` may be `gate`: a thread reads
+    /// its element before it writes it.
+    #[kernel]
+    pub unsafe fn swiglu_f16(gate: *const f16, up: *const f16, out: *mut f16, n: usize) {
+        let i = thread::index_1d().get();
+        if i >= n {
+            return;
+        }
+        // SAFETY: i < n for all three.
+        unsafe {
+            let g = *gate.add(i) as f32;
+            let u = *up.add(i) as f32;
+            *out.add(i) = (silu(g) * u) as f16;
+        }
+    }
+
+    /// As `swiglu_f16`, with two neighbor elements per thread as one `[f16; 2]`. `n2` counts
+    /// pairs.
+    ///
+    /// # Safety
+    /// All three pointers are valid for `n2` pairs and 4-byte aligned. `out` may be `gate`.
+    #[kernel]
+    pub unsafe fn swiglu_f16x2(gate: *const [f16; 2], up: *const [f16; 2], out: *mut [f16; 2], n2: usize) {
+        let i = thread::index_1d().get();
+        if i >= n2 {
+            return;
+        }
+        // SAFETY: i < n2 for all three, and the pair is read before it is written.
+        unsafe {
+            let g = *gate.add(i);
+            let u = *up.add(i);
+            *out.add(i) = [(silu(g[0] as f32) * u[0] as f32) as f16, (silu(g[1] as f32) * u[1] as f32) as f16];
+        }
+    }
+
+    /// `out[t] = Σ_c table[ids[c][t] + vocab·c]`: the audio embedding of OmniVoice, the sum of
+    /// the 8 codebook embeddings of a frame. One thread per output column.
+    ///
+    /// # Safety
+    /// `ids` is valid for `codebooks * rows` i32 values, `table` for `codebooks * vocab` rows
+    /// of `d` f16 values, and `out` for `rows * d` f16 values. An id is inside `0..vocab`.
+    /// The grid has one thread per output value.
+    #[kernel]
+    pub unsafe fn embed_audio_sum_f16(ids: *const i32, table: *const f16, out: *mut f16, rows: usize, d: usize, codebooks: usize, vocab: usize) {
+        let i = thread::index_1d().get() as usize;
+        if i >= rows * d {
+            return;
+        }
+        let (t, col) = (i / d, i % d);
+        let mut sum = 0.0f32;
+        let mut c = 0;
+        while c < codebooks {
+            // SAFETY: c < codebooks, t < rows, and the row (id + vocab·c) is inside the table
+            // because the ids come from the decode loop.
+            unsafe {
+                let id = *ids.add(c * rows + t) as usize;
+                sum += *table.add((id + vocab * c) * d + col) as f32;
+            }
+            c += 1;
+        }
+        // SAFETY: i < rows * d and out has that many values.
+        unsafe { *out.add(i) = sum as f16 };
+    }
+
+    /// `out[t] = Σ_c table[ids[c][t] + vocab·c]` where `mask[t] != 0`, else
+    /// `text[ids[0][t]]`: the mixed embedding of OmniVoice, where a position is either an audio
+    /// frame (the 8 codebook tables summed) or a text token.
+    ///
+    /// # Safety
+    /// `ids` is valid for `codebooks * rows` i32 values, `mask` for `rows`, `text` for `vocab`
+    /// rows of `d` values per codebook and `out` for `rows * d`. An id is inside its table.
+    #[kernel]
+    pub unsafe fn embed_mixed_f16(
+        ids: *const i32,
+        mask: *const i32,
+        text: *const f16,
+        audio: *const f16,
+        out: *mut f16,
+        rows: usize,
+        d: usize,
+        codebooks: usize,
+        vocab: usize,
+    ) {
+        let i = thread::index_1d().get() as usize;
+        if i >= rows * d {
+            return;
+        }
+        let (t, col) = (i / d, i % d);
+        // SAFETY: t < rows, so mask and ids are inside, and every id is inside its table.
+        unsafe {
+            let v = if *mask.add(t) != 0 {
+                let mut sum = 0.0f32;
+                let mut c = 0;
+                while c < codebooks {
+                    let id = *ids.add(c * rows + t) as usize;
+                    sum += *audio.add((id + vocab * c) * d + col) as f32;
+                    c += 1;
+                }
+                sum
+            } else {
+                *text.add(*ids.add(t) as usize * d + col) as f32
+            };
+            *out.add(i) = v as f16;
+        }
+    }
+
+    /// `y[i] = x[i] / sqrt(mean(x_row²) + eps) · w[col]` with `x` f32 and `y` f16: the
+    /// RMSNorm of Qwen3 on the f32 residual stream. One block of `ROW_BLOCK` threads per row.
+    ///
+    /// # Safety
+    /// `x` is valid for `rows * d` f32, `w` for `d` f32 and `y` for `rows * d` f16. `y` does
+    /// not overlap `x`. The grid has one block per row and `ROW_BLOCK` threads.
+    #[kernel]
+    pub unsafe fn rmsnorm_f32in_f16out(x: *const f32, w: *const f32, y: *mut f16, d: usize, eps: f32) {
+        let base = thread::blockIdx_x() as usize * d;
+        let tid = thread::threadIdx_x() as usize;
+        let mut sum = 0.0f32;
+        let mut c = tid;
+        while c < d {
+            // SAFETY: c < d, one block per row.
+            let v = unsafe { *x.add(base + c) };
+            sum += v * v;
+            c += ROW_BLOCK as usize;
+        }
+        let scale = 1.0 / (block_sum(sum) / d as f32 + eps).sqrt();
+        let mut c = tid;
+        while c < d {
+            // SAFETY: each (row, c) belongs to exactly one thread.
+            unsafe {
+                let v = *x.add(base + c) * scale * *w.add(c);
+                *y.add(base + c) = v as f16;
+            }
+            c += ROW_BLOCK as usize;
+        }
+    }
+
+    /// `dst[.., h] = src[.., h / g]`: one thread per output value, for the key and value heads
+    /// of the grouped-query attention (`g` query heads share one key head). The flat head
+    /// index walks the batches first, so a batch keeps its own heads.
+    ///
+    /// # Safety
+    /// `src` is valid for `batches * heads_kv * row_len` f16 values and `dst` for `n` f16
+    /// values with `n == batches * heads_q * row_len` and `heads_q % heads_kv == 0`. The
+    /// tensors do not overlap.
+    #[kernel]
+    pub unsafe fn repeat_heads_f16(src: *const f16, dst: *mut f16, n: usize, row_len: usize, heads_q: usize, heads_kv: usize) {
+        let i = thread::index_1d().get() as usize;
+        if i >= n {
+            return;
+        }
+        // SAFETY: the source head of a batch is below heads_kv, so the read is inside src; the
+        // write is inside dst.
+        unsafe {
+            let head = i / row_len;
+            let group = heads_q / heads_kv;
+            let b = head / heads_q;
+            let hq = head % heads_q;
+            let src_head = b * heads_kv + hq / group;
+            *dst.add(i) = *src.add(src_head * row_len + i % row_len);
+        }
+    }
+
+    /// The padding mask of a bidirectional attention: for the head of a batch, a score past
+    /// the valid length of that batch is `-inf`, and a row that is itself past the valid
+    /// length keeps only its diagonal. `score` is `[batches·heads][t][t]` f16 in place.
+    ///
+    /// # Safety
+    /// `score` is valid for `batches * heads * t * t` f16 values and `valid` for `batches`
+    /// i32 values (each at most `t`). One thread per score value.
+    #[kernel]
+    pub unsafe fn attn_pad_mask_f16(score: *mut f16, valid: *const i32, t: usize, heads: usize, batches: usize) {
+        let i = thread::index_1d().get() as usize;
+        if i >= batches * heads * t * t {
+            return;
+        }
+        // The score tensor holds `batches * heads * t * t` values; `heads` counts one batch.
+        // SAFETY: the caller launches one thread per value of the whole tensor.
+        unsafe {
+            let row = (i / t) % t; // the query position
+            let col = i % t; // the key position
+            let bh = i / (t * t);
+            let b = bh / heads;
+            let valid_b = *valid.add(b) as usize;
+            let keep = if row < valid_b { col < valid_b } else { col == row };
+            if !keep {
+                *score.add(i) = f16::from_bits(0xFC00); // -inf in f16
+            }
+        }
+    }
+
+    /// `dst[b][h][t] = src[(b·t + t)][h·d .. h·d + d]`: the row-major projection output into
+    /// the head layout of the attention.
+    ///
+    /// # Safety
+    /// `src` is valid for `batches * t * heads * d` f16 values and `dst` for the same count,
+    /// which is `n`. They do not overlap. One thread per value, and a thread at or past `n`
+    /// returns.
+    #[kernel]
+    pub unsafe fn to_heads_f16(src: *const f16, dst: *mut f16, t: usize, heads: usize, d: usize, n: usize) {
+        let i = thread::index_1d().get() as usize;
+        // The grid is rounded up to a whole block, so this guard owns the tail.
+        if i >= n {
+            return;
+        }
+        let total = t * heads * d;
+        let b = i / total;
+        let rest = i % total;
+        let h = rest / (t * d);
+        let pos = (rest / d) % t;
+        let col = rest % d;
+        // SAFETY: the source row (b·t + pos) and the head column h·d + col are inside src for
+        // every i below batches·t·heads·d, and dst has the same size.
+        unsafe {
+            let src_row = b * t + pos;
+            *dst.add(i) = *src.add(src_row * heads * d + h * d + col);
+        }
+    }
+
+    /// The inverse of `to_heads_f16`.
+    ///
+    /// # Safety
+    /// As `to_heads_f16`.
+    #[kernel]
+    pub unsafe fn from_heads_f16(src: *const f16, dst: *mut f16, t: usize, heads: usize, d: usize, n: usize) {
+        let i = thread::index_1d().get() as usize;
+        // The grid is rounded up to a whole block, so this guard owns the tail.
+        if i >= n {
+            return;
+        }
+        let total = t * heads * d;
+        let b = i / total;
+        let rest = i % total;
+        let h = rest / (t * d);
+        let pos = (rest / d) % t;
+        let col = rest % d;
+        // SAFETY: as `to_heads_f16`, with the two pointers swapped.
+        unsafe {
+            let dst_row = b * t + pos;
+            *dst.add(dst_row * heads * d + h * d + col) = *src.add(i);
+        }
+    }
+
     // ---- Attention (lesson 5: docs/cuda-lessons/05-attention.md) ----
 
     /// Flash attention: online softmax, K and V tiles in shared memory, no score matrix in

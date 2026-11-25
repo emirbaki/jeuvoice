@@ -7,7 +7,7 @@ use jeuvoice_gpu::bench::{Timing, pct_of_memory_limit, pct_of_tensor_limit, time
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
     AttnKind, ConvKind, DecodeAttnKind, ProbsOut, attention_decode_with, decode_split_scratch, GemmKind, LayerNormKind, SoftmaxKind, Width, attention, bias_gelu_with, conv1d, embed_one, embed_with, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive,
-    softmax_rows_with,
+    BidirScratch, RopeKind, SwigluKind, attention_bidir, embed_audio_sum, rmsnorm_rows, rmsnorm_rows_naive, rope_with, softmax_rows_with, swiglu_with,
 };
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
 
@@ -33,7 +33,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (m, n, k) in [(1500, 1280, 1280), (1500, 5120, 1280), (4096, 1024, 1024)] {
         let name = "gemm_f16".to_string();
         if name.contains(&filter) {
-            rows.push(bench_gemm(&gpu, m, n, k)?);
+            rows.push(bench_gemm(&gpu, "gemm_f16", m, n, k)?);
+        }
+    }
+
+    // The production shapes of one OmniVoice pass: 2 rows of 486 positions (972 rows).
+    for (name, m, n, k) in [
+        ("gemm_q", 972usize, 2048usize, 1024usize),
+        ("gemm_kv", 972, 1024, 1024),
+        ("gemm_o", 972, 1024, 2048),
+        ("gemm_gate_up", 972, 3072, 1024),
+        ("gemm_down", 972, 1024, 3072),
+        ("gemm_head_f32out", 972, 8200, 1024),
+    ] {
+        if name.contains(&filter) {
+            rows.push(if name.ends_with("f32out") {
+                bench_gemm_f32out(&gpu, name, m, n, k)?
+            } else {
+                bench_gemm(&gpu, name, m, n, k)?
+            });
         }
     }
 
@@ -41,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // step: it reads the whole 133 MB table, so it shows the memory limit of a step.
     if "gemm_f16_f32out".contains(&filter) {
         for m in [1, 7] {
-            rows.push(bench_gemm_f32out(&gpu, m, 51866, 1280)?);
+            rows.push(bench_gemm_f32out(&gpu, "gemm_f16_f32out", m, 51866, 1280)?);
         }
     }
 
@@ -137,6 +155,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if "ids_upload".contains(&filter) {
         rows.push(bench_ids_upload(&gpu)?);
+    }
+
+    // RoPE and the per-head RMSNorm rows of the Qwen3 backbone (Phase 2, lesson 10).
+    // 8 MB in and 8 MB out: big enough that the 4 MB L2 does not hold the tensor.
+    for (name, kind) in [
+        ("rope_f16", RopeKind::HalfSplitShared),
+        ("rope_f16_naive", RopeKind::HalfSplit),
+        ("rope_f16_interleaved", RopeKind::Interleaved),
+    ] {
+        if name.contains(&filter) {
+            rows.push(bench_rope(&gpu, name, kind, 2000, 16, 128)?);
+        }
+    }
+    for (name, naive) in [("rmsnorm_rows_f16", false), ("rmsnorm_rows_naive", true)] {
+        if name.contains(&filter) {
+            rows.push(bench_rmsnorm_rows(&gpu, name, naive, 32_000, 128)?);
+        }
+    }
+    // The bidirectional GQA attention of one OmniVoice pass: 2 rows, 16 heads of 128, 486 positions.
+    for (name, valid) in [
+        ("attention_bidir_f16", None),
+        ("attention_bidir_padded_f16", Some([486i32, 214i32])),
+    ] {
+        if name.contains(&filter) {
+            rows.push(bench_attention_bidir(&gpu, name, 16, 486, 128, valid)?);
+        }
+    }
+    // The guided peak of one decode step: 428 positions of 8 codebooks of 1025 tokens.
+    if "guide_peak_f32".contains(&filter) {
+        rows.push(bench_guide_peak(&gpu, "guide_peak_f32", 428 * 8, 8200, 1025, 8)?);
+    }    // The 8-codebook audio embedding of one pass: [8, 486] ids into [8200, 1024].
+    if "embed_audio_sum_f16".contains(&filter) {
+        rows.push(bench_embed_audio(&gpu, "embed_audio_sum_f16", 486, 1024)?);
+    }
+    // SwiGLU on the MLP buffer of one pass: [486, 3072], read gate and up, write out.
+    for (name, kind) in [("swiglu_f16", SwigluKind::Two), ("swiglu_f16_x1", SwigluKind::One)] {
+        if name.contains(&filter) {
+            rows.push(bench_swiglu(&gpu, name, kind, 486, 3072)?);
+            // The production pass has two rows of 486 positions.
+            rows.push(bench_swiglu(&gpu, name, kind, 972, 3072)?);
+        }
     }
 
     println!("{:<20} {:>16} {:>10} {:>14} {:>8}", "kernel", "size", "us", "rate", "% limit");
@@ -410,7 +469,7 @@ fn bench_conv1d(gpu: &Gpu, name: &str, kind: ConvKind, c_in: usize, c_out: usize
     })
 }
 
-fn bench_gemm_f32out(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, GpuError> {
+fn bench_gemm_f32out(gpu: &Gpu, name: &str, m: usize, n: usize, k: usize) -> Result<Row, GpuError> {
     let blas = Blas::load(gpu)?;
     let mut plan = ArenaPlan::new();
     let x = plan.add(DType::F16, &[m, k]);
@@ -424,7 +483,7 @@ fn bench_gemm_f32out(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, Gpu
     // A few rows: the table read sets the time, so the limit is the memory.
     let bytes = (n * k * 2 + m * k * 2 + m * n * 4) as u64;
     Ok(Row {
-        name: "gemm_f16_f32out".into(),
+        name: name.into(),
         size: format!("{m}x{n}x{k}"),
         t,
         rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
@@ -432,7 +491,127 @@ fn bench_gemm_f32out(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, Gpu
     })
 }
 
-fn bench_gemm(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, GpuError> {
+/// RoPE rotates in place: read and write every value once.
+fn bench_rope(gpu: &Gpu, name: &str, kind: RopeKind, rows: usize, heads: usize, d: usize) -> Result<Row, GpuError> {
+    let mut plan = ArenaPlan::new();
+    let x = plan.add(DType::F16, &[rows, heads, d]);
+    let p = plan.add(DType::I32, &[rows]);
+    let f = plan.add(DType::F32, &[d / 2]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &x, &vec![f16::from_f32(0.5); rows * heads * d])?;
+    arena.upload(gpu, &p, &vec![3i32; rows])?;
+    arena.upload(gpu, &f, &jeuvoice_gpu::ops::rope_inv_freq(1_000_000.0, d))?;
+    let t = time_on_stream(gpu, 3, 50, || rope_with(gpu, &arena, &x, &p, &f, kind))?;
+    let bytes = (2 * rows * heads * d * 2) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{rows}x{heads}x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+/// As `bench_rope`, for the per-head RMSNorm.
+fn bench_rmsnorm_rows(gpu: &Gpu, name: &str, naive: bool, rows: usize, d: usize) -> Result<Row, GpuError> {
+    let mut plan = ArenaPlan::new();
+    let x = plan.add(DType::F16, &[rows, d]);
+    let w = plan.add(DType::F32, &[d]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &x, &vec![f16::from_f32(0.5); rows * d])?;
+    arena.upload(gpu, &w, &vec![1.0f32; d])?;
+    let t = time_on_stream(gpu, 3, 50, || {
+        if naive {
+            rmsnorm_rows_naive(gpu, &arena, &x, &w, 1e-6)
+        } else {
+            rmsnorm_rows(gpu, &arena, &x, &w, 1e-6)
+        }
+    })?;
+    let bytes = (2 * rows * d * 2) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{rows}x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+/// The GQA attention of OmniVoice: q·kᵀ, the softmax, then probs·v, per batch and head.
+fn bench_attention_bidir(gpu: &Gpu, name: &str, heads: usize, t_len: usize, d: usize, valid: Option<[i32; 2]>) -> Result<Row, GpuError> {
+    let blas = Blas::load(gpu)?;
+    let mut plan = ArenaPlan::new();
+    let q = plan.add(DType::F16, &[2, heads, t_len, d]);
+    let k = plan.add(DType::F16, &[2, heads / 2, t_len, d]);
+    let v = plan.add(DType::F16, &[2, heads / 2, t_len, d]);
+    let out = plan.add(DType::F16, &[2, heads, t_len, d]);
+    let kx = plan.add(DType::F16, &[2, heads, t_len, d]);
+    let vx = plan.add(DType::F16, &[2, heads, t_len, d]);
+    let scores = plan.add(DType::F16, &[2 * heads, t_len, t_len]);
+    let lens = valid.map(|_| plan.add(DType::I32, &[2]));
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &q, &vec![f16::from_f32(0.01); 2 * heads * t_len * d])?;
+    arena.upload(gpu, &k, &vec![f16::from_f32(0.01); heads * t_len * d])?;
+    arena.upload(gpu, &v, &vec![f16::from_f32(0.01); heads * t_len * d])?;
+    let scratch = BidirScratch { kx: &kx, vx: &vx, scores: &scores };
+    if let (Some(v), Some(t)) = (valid, lens.as_ref()) {
+        arena.upload(gpu, t, &v)?;
+    }
+    let t = time_on_stream(gpu, 3, 10, || attention_bidir(gpu, &arena, &blas, &q, &k, &v, &out, BidirScratch { kx: &kx, vx: &vx, scores: &scores }, lens.as_ref()))?;
+    let _ = scratch;
+    // Two products of q·kᵀ and probs·v per batch and head.
+    let flops = 4 * (2 * heads * t_len * t_len * d) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("2x{heads}x{t_len}x{d}{}", if valid.is_some() { " padded" } else { "" }),
+        t,
+        rate: (flops as f64 / (t.us * 1e-6) / 1e12, "TF/s"),
+        pct: pct_of_tensor_limit(flops, &t, gpu.info()),
+    })
+}
+
+/// The audio embedding reads eight table rows per frame and writes one row.
+fn bench_embed_audio(gpu: &Gpu, name: &str, rows: usize, d: usize) -> Result<Row, GpuError> {
+    let mut plan = ArenaPlan::new();
+    let ids = plan.add(DType::I32, &[8, rows]);
+    let table = plan.add(DType::F16, &[8 * 1025, d]);
+    let out = plan.add(DType::F16, &[rows, d]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &ids, &vec![7i32; 8 * rows])?;
+    arena.upload(gpu, &table, &vec![f16::from_f32(0.01); 8 * 1025 * d])?;
+    let t = time_on_stream(gpu, 3, 50, || embed_audio_sum(gpu, &arena, &ids, &table, &out))?;
+    // Eight reads and one write per output value.
+    let bytes = (9 * rows * d * 2) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{rows}x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+/// SwiGLU reads gate and up and writes out: three tensors of the same size.
+fn bench_swiglu(gpu: &Gpu, name: &str, kind: SwigluKind, rows: usize, d: usize) -> Result<Row, GpuError> {
+    let mut plan = ArenaPlan::new();
+    let gate = plan.add(DType::F16, &[rows, d]);
+    let up = plan.add(DType::F16, &[rows, d]);
+    let out = plan.add(DType::F16, &[rows, d]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &gate, &vec![f16::from_f32(0.5); rows * d])?;
+    arena.upload(gpu, &up, &vec![f16::from_f32(0.25); rows * d])?;
+    let t = time_on_stream(gpu, 3, 50, || swiglu_with(gpu, &arena, &gate, &up, &out, kind))?;
+    let bytes = (3 * rows * d * 2) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{rows}x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+fn bench_gemm(gpu: &Gpu, name: &str, m: usize, n: usize, k: usize) -> Result<Row, GpuError> {
     let blas = Blas::load(gpu)?;
     let mut plan = ArenaPlan::new();
     let x = plan.add(DType::F16, &[m, k]);
@@ -445,10 +624,35 @@ fn bench_gemm(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, GpuError> 
     let t = time_on_stream(gpu, 3, 20, || blas.gemm_f16(gpu, &xs, Op::N, &ws, Op::T, &ys, m, n, k, 1.0, 0.0))?;
     let flops = 2 * (m * n * k) as u64;
     Ok(Row {
-        name: "gemm_f16".into(),
+        name: name.into(),
         size: format!("{m}x{n}x{k}"),
         t,
         rate: (flops as f64 / (t.us * 1e-6) / 1e12, "TF/s"),
         pct: pct_of_tensor_limit(flops, &t, gpu.info()),
+    })
+}
+
+/// The guided peak of the decode: one block per (position, codebook) pair, two logit planes of
+/// `vocab` values read per pair.
+fn bench_guide_peak(gpu: &Gpu, name: &str, pairs: usize, width: usize, vocab: usize, codebooks: usize) -> Result<Row, GpuError> {
+    let positions = pairs / codebooks;
+    let mut plan = ArenaPlan::new();
+    let c = plan.add(DType::F32, &[positions, width]);
+    let u = plan.add(DType::F32, &[positions, width]);
+    let conf = plan.add(DType::F32, &[pairs]);
+    let pick = plan.add(DType::I32, &[pairs]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &c, &vec![0.01f32; positions * width])?;
+    arena.upload(gpu, &u, &vec![0.02f32; positions * width])?;
+    let t = time_on_stream(gpu, 3, 20, || {
+        jeuvoice_gpu::ops::guide_peak(gpu, &arena, &c, &u, &conf, &pick, pairs, width, vocab, codebooks, 1024, 2.5)
+    })?;
+    let bytes = 2 * pairs * vocab * 4;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{pairs} pairs of {vocab}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: bytes as f64 / (t.us * 1e-6) / (gpu.info().mem_bandwidth_gbs * 1e9) * 100.0,
     })
 }

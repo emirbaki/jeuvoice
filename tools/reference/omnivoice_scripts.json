@@ -1,0 +1,21 @@
+{
+  "language": "tr",
+  "speed": 1.0,
+  "comment": "The voice prompt is the first 8 s of my_voice.ogg with the transcript of its Whisper fixture for that part. The model recommends a 3 to 10 s prompt.",
+  "scripts": [
+    {
+      "id": "s1",
+      "text": "Kitabın kapağını açtı ve ilk sayfayı okumaya başladı. Odanın sessizliğinde yalnızca sayfaların hışırtısı duyuluyordu."
+    },
+    {
+      "id": "s2",
+      "text": "Sabah erkenden kalkıp sahile indi. Dalgaların sesi bütün şehri uyandırıyor, martılar rüzgârda süzülüyordu."
+    },
+    {
+      "id": "s3",
+      "text": "Yıllarca biriktirdiği notları masaya yaydı. Her birinin üstünde eski bir tarih, birkaç satır ve bir isim vardı."
+    }
+  ],
+  "ref_text": "17. yüzyıl İspanyası'nda edebiyat düşkünü bir macera perest, günümüzde ise klasikleşmiş bir yazar.",
+  "ref_audio": "target\\reference\\omnivoice\\prompt8.wav"
+}

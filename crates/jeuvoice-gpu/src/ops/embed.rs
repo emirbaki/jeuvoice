@@ -190,3 +190,35 @@ pub fn embed_with(
     }
     Ok(())
 }
+/// `out[t] = Σ_c table[ids[c][t] + vocab·c]` for the codebooks of OmniVoice. `ids` is
+/// `I32 [codebooks, rows]`, `table` is `F16 [codebooks·vocab, d]` and `out` is `F16 [rows, d]`.
+///
+/// The ids are the output of the decode loop, so an id outside its codebook is a bug in this
+/// crate, not user input.
+///
+/// # Panics
+/// On a wrong dtype or shape, or a table that does not hold whole codebooks.
+pub fn embed_audio_sum(gpu: &Gpu, arena: &Arena, ids: &Tensor, table: &Tensor, out: &Tensor) -> Result<(), GpuError> {
+    assert_eq!(ids.dtype(), DType::I32, "embed_audio_sum: ids must be I32");
+    assert_eq!(table.dtype(), DType::F16, "embed_audio_sum: the table must be F16");
+    assert_eq!(out.dtype(), DType::F16, "embed_audio_sum: out must be F16");
+    assert_eq!(ids.shape().len(), 2, "embed_audio_sum: ids must be [codebooks, rows]");
+    assert_eq!(out.shape().len(), 2, "embed_audio_sum: out must be [rows, d]");
+    assert_eq!(table.shape().len(), 2, "embed_audio_sum: the table must be [rows, d]");
+    let (codebooks, rows) = (ids.shape()[0], ids.shape()[1]);
+    let d = out.shape()[1];
+    assert_eq!(out.shape()[0], rows, "embed_audio_sum: out needs one row per frame");
+    assert_eq!(table.shape()[1], d, "embed_audio_sum: the table and out must have the same width");
+    assert_eq!(table.shape()[0] % codebooks, 0, "embed_audio_sum: the table rows do not divide by {codebooks} codebooks");
+    let vocab = table.shape()[0] / codebooks;
+    assert!(vocab > 1024, "embed_audio_sum: a codebook of {vocab} rows has no mask id");
+    if rows == 0 || d == 0 {
+        return Ok(());
+    }
+    let (is, ts, os) = (arena.slice::<i32>(ids), arena.slice::<f16>(table), arena.slice::<f16>(out));
+    let cfg = LaunchConfig::for_num_elems(grid_elems(rows * d));
+    // SAFETY: one thread per output element, ids has codebooks * rows values, the table has
+    // codebooks * vocab rows of d values, and out is its own tensor.
+    unsafe { gpu.kernels()?.embed_audio_sum_f16(gpu.stream(), cfg, is.as_ptr(), ts.as_ptr().cast(), os.as_mut_ptr().cast(), rows, d, codebooks, vocab) }?;
+    Ok(())
+}

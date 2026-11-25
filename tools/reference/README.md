@@ -59,3 +59,29 @@ The decoder test feeds the PyTorch encoder output into the Rust decoder, so it c
 | `enc_out` | `[1500, 1280]` | the fp32 encoder output |
 | `logits32`, `logits16` | `[T - 2, 51866]` | the logits after each token from the third on |
 | `align32`, `align16` | `[6, Td, 1500]` | the cross-attention softmax of the 6 alignment heads |
+
+## Make the OmniVoice reference files (Phase 2)
+
+The model files are already on this machine: the `k2-fsa/OmniVoice` snapshot in the Hugging Face cache and the LoRA adapter in the app data folder. Nothing is downloaded.
+
+```powershell
+engine\.venv\Scripts\python.exe -I tools\reference\omnivoice_reference.py
+```
+
+It reads `tools\reference\omnivoice_scripts.json` (3 Turkish scripts, the 8 s voice prompt `target\reference\omnivoice\prompt8.wav` and its transcript) and writes into `target\reference\omnivoice\`, which is not committed:
+
+| File | Content |
+|---|---|
+| `<id>.det.npz` | the deterministic tokens `[8, T]`, the prompt frames `[8, T_ref]`, the text, the language, the target length |
+| `<id>.product.npz` | the same from the product mode (`position_temperature` 5.0) |
+| `s1.taps.safetensors` | `embed` and `hidden_00` … `hidden_27` `[T, 1024]` f32 of the first pass, and `cond_logits_00` / `uncond_logits_00` `[8, T_target, 1025]` |
+
+The deterministic mode (`position_temperature` 0, `class_temperature` 0) repeats exactly. The product mode does not: the Gumbel noise on the position score changes which positions are unmasked first, and the tokens differ on almost every position. Compare the product mode by frame count only.
+
+The engine baseline, stage by stage, with the peak VRAM of the card:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\tts-baseline.ps1
+```
+
+The audio tokenizer runs on the CPU, as in the engine. With it on the GPU beside the model the 4 GB card thrashes and one render takes 202 s instead of 6 s. A voice prompt longer than about 10 s has the same effect (the model recommends 3 to 10 s).

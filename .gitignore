@@ -11,3 +11,5 @@ graphify-out/
 .oxide-artifacts/
 *.ptx
 *.ll
+/out/
+*.bin

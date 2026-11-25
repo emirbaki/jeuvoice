@@ -18,6 +18,9 @@ Kernel'ler Rust ile yazılır ve NVIDIA'nın **cuda-oxide** derleyicisi onları 
 | 7 | [Log-mel spektrogram: matris çarpımı olarak DFT](07-mel.md) | hazır |
 | 8 | [Decoder: token gömme, KV cache ve decoder attention](08-decoder.md) | hazır |
 | 9 | [Kelime zamanları: hizalama başları ve DTW](09-dtw.md) | hazır |
+| 10 | [RoPE ve kafa başına RMSNorm (Qwen3)](10-rope-qk-norm.md) | hazır |
+| 11 | [SwiGLU](11-swiglu.md) | hazır |
+| 12 | [Maskeli yinelemeli çözme (OmniVoice)](12-masked-decoding.md) | hazır |
 
 ## Çalıştırma
 
