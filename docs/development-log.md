@@ -527,3 +527,20 @@ One window of DTW (6 alignment heads, 130 tokens, 1500 audio positions), measure
 The filter sorted a fresh `Vec` of seven values for 1.17 million positions. A 19-comparator sorting network (Knuth 5.3.4) needs no allocation and no comparison function, and the reflect padding moved to the two row ends. The output is identical to a plain sort (a random-row test from 8 to 1500 positions), and the real-model `t_dtw` still matches whisper.cpp (median 0 cs, max 4 cs).
 
 DTW stays on the CPU: about 1% of a transcription, and the end-to-end difference sits under the run-to-run spread of the GPU clock (1.305 to 1.927 s over four runs of one clip). Lesson 9 gives the reasoning and the exercises.
+
+### The branch review (Task 15, 2026-11-25)
+
+A fresh reviewer read the whole branch against `main`. No Critical finding. Two Important findings, both fixed with a test that failed first:
+
+1. **A model that is not large-v3-turbo was accepted.** Whisper large-v3 has the same vocabulary, encoder shape and width, so nothing caught it, and the DTW pass would have used the large-v3-turbo alignment heads on the wrong model: every word time wrong, in silence. `GgmlModel::check_large_v3_turbo` now checks the layer counts, width and vocabulary, and both `GpuWhisper::load` and `Decoder::load` call it. Tests: `ggml::a_model_that_is_not_large_v3_turbo_is_rejected`, and the real model in `reads_large_v3_turbo`.
+2. **The app GPU setting did not reach the CUDA path.** With `JEUVOICE_CUDA_WHISPER=1` and "use the GPU" off, the app still ran on the GPU. `load_with` needs both now. Test: `app::the_gpu_setting_off_skips_the_cuda_path`.
+
+Deferred minors:
+
+- `decode/window.rs`: with `language = "auto"` and audio under 100 ms the port detects a language first, where whisper.cpp returns before the detection. The same place skips DTW for `n_audio <= 7`, so windows of 80 to 140 ms keep `t0` where whisper.cpp has `t_dtw`.
+- `decode/vocab.rs`: `token_bytes` and `token_text_lossy` index the table raw, so a hand-made id at or above `n_vocab` panics. The Task 7 ruling says a bad id is a program bug, not user input.
+- `cuda/transcriber.rs`: an `.expect` on the reply sender (unreachable while `&self` lives), and a panicked job leaves `GpuWhisper` partly written for the next job. It gives a `Transcribe` error, not a hang.
+- Two measurement tests cannot fail by design: `dtw_cost_in_a_transcription` and `decoder_timing`. They print numbers.
+- The fallback `eprintln!` in the app is invisible in a windowed release build.
+
+Checked and already correct: `collect.ps1` asserts and copies `cublas64_13.dll` and `cublasLt64_13.dll`.
