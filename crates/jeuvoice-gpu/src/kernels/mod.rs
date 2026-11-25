@@ -1722,6 +1722,35 @@ pub mod device {
         }
     }
 
+    /// `out[t] = Σ_c table[ids[c][t] + vocab·c]`: the audio embedding of OmniVoice, the sum of
+    /// the 8 codebook embeddings of a frame. One thread per output column.
+    ///
+    /// # Safety
+    /// `ids` is valid for `codebooks * rows` i32 values, `table` for `codebooks * vocab` rows
+    /// of `d` f16 values, and `out` for `rows * d` f16 values. An id is inside `0..vocab`.
+    /// The grid has one thread per output value.
+    #[kernel]
+    pub unsafe fn embed_audio_sum_f16(ids: *const i32, table: *const f16, out: *mut f16, rows: usize, d: usize, codebooks: usize, vocab: usize) {
+        let i = thread::index_1d().get() as usize;
+        if i >= rows * d {
+            return;
+        }
+        let (t, col) = (i / d, i % d);
+        let mut sum = 0.0f32;
+        let mut c = 0;
+        while c < codebooks {
+            // SAFETY: c < codebooks, t < rows, and the row (id + vocab·c) is inside the table
+            // because the ids come from the decode loop.
+            unsafe {
+                let id = *ids.add(c * rows + t) as usize;
+                sum += *table.add((id + vocab * c) * d + col) as f32;
+            }
+            c += 1;
+        }
+        // SAFETY: i < rows * d and out has that many values.
+        unsafe { *out.add(i) = sum as f16 };
+    }
+
     // ---- Attention (lesson 5: docs/cuda-lessons/05-attention.md) ----
 
     /// Flash attention: online softmax, K and V tiles in shared memory, no score matrix in
