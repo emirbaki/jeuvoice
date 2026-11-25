@@ -544,3 +544,30 @@ Deferred minors:
 - The fallback `eprintln!` in the app is invisible in a windowed release build.
 
 Checked and already correct: `collect.ps1` asserts and copies `cublas64_13.dll` and `cublasLt64_13.dll`.
+
+### The OmniVoice reference and the baseline (Phase 2, Task 1, 2026-11-25)
+
+`tools/reference/omnivoice_reference.py` writes the Phase 2 fixtures into `target/reference/omnivoice/` (not committed). The voice prompt is the first 8 s of `tts_lab\data\ref\my_voice.ogg` (186 frames) with the transcript of its Whisper fixture for that part; the scripts are in `tools/reference/omnivoice_scripts.json`.
+
+| Fixture | Content |
+|---|---|
+| `s1..s3.det.npz` | `tokens` `[8, T]` int32 of the deterministic mode (`position_temperature` 0, `class_temperature` 0), the prompt frames `[8, 186]`, the text, the language, the target length |
+| `s1..s3.product.npz` | the same from the product mode (`position_temperature` 5.0, the app settings) |
+| `s1.taps.safetensors` | `embed` and `hidden_00` to `hidden_27` `[486, 1024]` f32 of the first pass, and `cond_logits_00` / `uncond_logits_00` `[8, 214, 1025]` |
+
+The sequence of script s1 is 486 positions: the special and text tokens, the 186 prompt frames and the 214 target frames. The frames are 214, 193 and 196 for s1, s2 and s3 (25 frames per second).
+
+**The engine baseline** (`scripts\tts-baseline.ps1`, three renders of s1, in process, fp16 on the GPU):
+
+| Stage | Time |
+|---|---|
+| model load | 7.2 s |
+| voice prompt | 2.2 s |
+| whole render (8.37 s of audio) | 6.1 s |
+| **the token stage (Phase 2)** | **4.6 s** |
+| the audio decode (Phase 3) | 1.7 s |
+| peak VRAM above idle | 2034 MiB |
+
+The audio tokenizer must stay on the CPU. With the 805 MB tokenizer on the GPU beside the model the card reached 3.9 GB, thrashed, and one render took 202 s instead of 6 s. A 24.6 s voice prompt did the same on its own: the sequence grew from 486 to 1009 positions and the render to 202 s. The model itself recommends a 3 to 10 s prompt.
+
+**Determinism, measured:** the deterministic mode gives the same tokens on a second run. The product mode differs from the deterministic mode on **1689 of 1712** positions of s1, because the Gumbel noise on the position score changes the order in which positions are unmasked, and every later step sees another context. A token-level comparison of the product mode against the engine is therefore not reachable without the same Philox stream and the same kernel rounding; Phase 2 compares the frame count there and leaves the quality judgement to Phase 3 (a listen).

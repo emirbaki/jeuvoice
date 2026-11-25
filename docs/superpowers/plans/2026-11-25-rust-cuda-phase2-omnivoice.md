@@ -51,16 +51,16 @@ Checked in `engine/.venv/Lib/site-packages/omnivoice/models/omnivoice.py` (line 
 
 **Text to frames** (`RuleDurationEstimator`, `utils/duration.py:208-248`): the frame count comes from character weights, scaled by `speed`. Text longer than 30 s is split into 15 s chunks with a cross-fade (`omnivoice.py:186-187, 913-1022`); that path can wait for Phase 3.
 
-**Today's speed** (README, RTX 3050 Ti): model load 25.5 s and 2.4 GB VRAM; 5.6 s of audio in 12.1 s wall time.
+**Today's speed** (README, RTX 3050 Ti): model load 25.5 s and 2.4 GB VRAM; 5.6 s of audio in 12.1 s wall time. **Measured in process on 2026-11-25** (`scripts\tts-baseline.ps1`, the fixtures of Task 1): load 7.2 s, the voice prompt 2.2 s, a render of 8.37 s of audio in 6.1 s, of which the token stage is 4.6 s and the audio decode 1.7 s, and 2034 MiB above idle. The sequence of that script is 486 positions with a 186-frame prompt.
 
 ## Success criteria
 
 Decided with the user before Task 1. The numbers below are the starting proposal; the user can change them, and only the user can.
 
 1. **Tokens**: with the deterministic reference mode (`position_temperature = 0`, `variety = 0`), every audio token of 3 test scripts equals the Python reference, and the frame count matches exactly.
-2. **Product mode** (noise on, `guidance 2.5`, `num_step 32`, `variety 0`): the frame count matches the engine on the same scripts, and at least 99% of the tokens equal it.
-3. **Speed**: a 5.6 s render in **6 s or less** (the engine: 12.1 s), measured with `bench::time_on_stream` plus the loop's host time.
-4. **VRAM**: 2.0 GB or less for the weights and activations (the engine: 2.4 GB), on a 4 GB card.
+2. **Product mode** (noise on, `guidance 2.5`, `num_step 32`, `variety 0`): **the frame count matches the engine** on the same scripts. A token share is not reachable: measured on 2026-11-25, the product mode differs from the deterministic mode on 1689 of 1712 positions, because the Gumbel noise on the position score changes the unmask order. The quality of the product mode is judged after Phase 3, by ear.
+3. **Speed**: the token stage of the 8.4 s script s1 in **2.3 s or less**, which is half of the engine's measured 4.6 s for the same script (the engine's whole render: 6.1 s), measured with `bench::time_on_stream` plus the loop's host time.
+4. **VRAM**: 2.0 GB or less above idle for the weights and activations (the engine measured 2034 MiB), on a 4 GB card.
 5. **Load**: model plus LoRA in **25 s or less**, LoRA merge included.
 6. The existing tests of the workspace still pass, and the app still renders through the Python engine.
 
