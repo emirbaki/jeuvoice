@@ -13,6 +13,7 @@ mod layernorm;
 mod mel;
 mod rmsnorm;
 mod rope;
+mod swiglu;
 mod softmax;
 pub use attention::{ATTN_SCALE, AttnKind, attention, merge_heads, split_heads};
 pub use attention_decode::{DecodeAttnKind, ProbsOut, attention_decode, attention_decode_with, decode_split_scratch};
@@ -25,6 +26,7 @@ pub use layernorm::{LayerNormKind, layernorm, layernorm_to_f16, layernorm_with};
 pub use rmsnorm::{rmsnorm, rmsnorm_naive};
 pub use rope::{RopeKind, rmsnorm_rows, rmsnorm_rows_naive, rope, rope_inv_freq, rope_with};
 pub use softmax::{SoftmaxKind, softmax_rows, softmax_rows_with};
+pub use swiglu::{SwigluKind, swiglu, swiglu_with};
 
 use crate::{Arena, DType, Gpu, GpuError, Tensor};
 

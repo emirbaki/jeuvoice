@@ -7,7 +7,7 @@ use jeuvoice_gpu::bench::{Timing, pct_of_memory_limit, pct_of_tensor_limit, time
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
     AttnKind, ConvKind, DecodeAttnKind, ProbsOut, attention_decode_with, decode_split_scratch, GemmKind, LayerNormKind, SoftmaxKind, Width, attention, bias_gelu_with, conv1d, embed_one, embed_with, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive,
-    RopeKind, rmsnorm_rows, rmsnorm_rows_naive, rope_with, softmax_rows_with,
+    RopeKind, SwigluKind, rmsnorm_rows, rmsnorm_rows_naive, rope_with, softmax_rows_with, swiglu_with,
 };
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
 
@@ -149,6 +149,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, naive) in [("rmsnorm_rows_f16", false), ("rmsnorm_rows_naive", true)] {
         if name.contains(&filter) {
             rows.push(bench_rmsnorm_rows(&gpu, name, naive, 32_000, 128)?);
+        }
+    }
+    // SwiGLU on the MLP buffer of one pass: [486, 3072], read gate and up, write out.
+    for (name, kind) in [("swiglu_f16", SwigluKind::Two), ("swiglu_f16_x1", SwigluKind::One)] {
+        if name.contains(&filter) {
+            rows.push(bench_swiglu(&gpu, name, kind, 486, 3072)?);
         }
     }
 
@@ -482,6 +488,26 @@ fn bench_rmsnorm_rows(gpu: &Gpu, name: &str, naive: bool, rows: usize, d: usize)
         }
     })?;
     let bytes = (2 * rows * d * 2) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{rows}x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+/// SwiGLU reads gate and up and writes out: three tensors of the same size.
+fn bench_swiglu(gpu: &Gpu, name: &str, kind: SwigluKind, rows: usize, d: usize) -> Result<Row, GpuError> {
+    let mut plan = ArenaPlan::new();
+    let gate = plan.add(DType::F16, &[rows, d]);
+    let up = plan.add(DType::F16, &[rows, d]);
+    let out = plan.add(DType::F16, &[rows, d]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &gate, &vec![f16::from_f32(0.5); rows * d])?;
+    arena.upload(gpu, &up, &vec![f16::from_f32(0.25); rows * d])?;
+    let t = time_on_stream(gpu, 3, 50, || swiglu_with(gpu, &arena, &gate, &up, &out, kind))?;
+    let bytes = (3 * rows * d * 2) as u64;
     Ok(Row {
         name: name.into(),
         size: format!("{rows}x{d}"),

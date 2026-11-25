@@ -1650,8 +1650,7 @@ pub mod device {
         static mut ANG: SharedArray<f32, 128> = SharedArray::UNINIT; // sin and cos of one pair
         let row = thread::blockIdx_x() as usize;
         let pair = thread::threadIdx_x() as usize;
-        let pairs = d / 2;
-        // SAFETY: row < rows and pair < pairs, so both reads are inside their tensors.
+        // SAFETY: row < rows and pair < d/2, so both reads are inside their tensors.
         let (pos, freq) = unsafe { (*positions.add(row) as f32, *inv_freq.add(pair)) };
         let angle = pos * freq;
         // SAFETY: two slots per pair, and pair < pairs = d/2 <= 64.
@@ -1673,6 +1672,53 @@ pub mod device {
                 *x.add(base + 1) = (a * s + b * c) as f16;
             }
             h += 1;
+        }
+    }
+
+    // ---- SwiGLU (lesson 11: docs/cuda-lessons/11-swiglu.md) ----
+
+    /// `silu(x) = x / (1 + exp(-x))` in f32. For a very negative `x`, `exp(-x)` is `inf` and
+    /// the quotient is 0, which is the right limit and not a NaN.
+    #[device]
+    pub fn silu(v: f32) -> f32 {
+        v / (1.0 + libm::expf(-v))
+    }
+
+    /// `out[i] = silu(gate[i]) · up[i]`, one element per thread.
+    ///
+    /// # Safety
+    /// All three pointers are valid for `n` f16 values. `out` may be `gate`: a thread reads
+    /// its element before it writes it.
+    #[kernel]
+    pub unsafe fn swiglu_f16(gate: *const f16, up: *const f16, out: *mut f16, n: usize) {
+        let i = thread::index_1d().get();
+        if i >= n {
+            return;
+        }
+        // SAFETY: i < n for all three.
+        unsafe {
+            let g = *gate.add(i) as f32;
+            let u = *up.add(i) as f32;
+            *out.add(i) = (silu(g) * u) as f16;
+        }
+    }
+
+    /// As `swiglu_f16`, with two neighbor elements per thread as one `[f16; 2]`. `n2` counts
+    /// pairs.
+    ///
+    /// # Safety
+    /// All three pointers are valid for `n2` pairs and 4-byte aligned. `out` may be `gate`.
+    #[kernel]
+    pub unsafe fn swiglu_f16x2(gate: *const [f16; 2], up: *const [f16; 2], out: *mut [f16; 2], n2: usize) {
+        let i = thread::index_1d().get();
+        if i >= n2 {
+            return;
+        }
+        // SAFETY: i < n2 for all three, and the pair is read before it is written.
+        unsafe {
+            let g = *gate.add(i);
+            let u = *up.add(i);
+            *out.add(i) = [(silu(g[0] as f32) * u[0] as f32) as f16, (silu(g[1] as f32) * u[1] as f32) as f16];
         }
     }
 
