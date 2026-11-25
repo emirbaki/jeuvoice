@@ -469,3 +469,26 @@ The 2 different tokens of my_voice2 are one near tie: whisper-rs takes "u" (p 0.
 | 4. Peak VRAM | whisper.cpp | 2147 MiB | 1787 MiB | yes |
 
 Criteria 5 (the tests) and 6 (CPU fallback) need Task 13. The WER errors of my_voice2 are one near tie of the decoder (whisper-rs "u" with p 0.517, CudaWhisper "uy" with p 0.511), which gives "uyla" against "u ile": 2 word errors of 70.
+
+### The f32 residual stream and the near tie (Task 14, 2026-11-25)
+
+Both halves of the model keep the residual stream in f32 now: `x` is `[rows, d]` f32, the LayerNorm reads f32 and writes f16 (`ops::layernorm_to_f16`), the residual add is f32 (`ops::add_into_f32`, `ops::add_into_f32_f32`), the encoder widens the f16 convolution output (`ops::f16_to_f32`), and the token embedding writes f32 (`ops::embed_f32`, `ops::embed_one_f32`). The norm weights and the encoder positional embedding stay f32, as the model file and whisper.cpp store them. whisper.cpp keeps its activations f32 as well.
+
+Agreement with the PyTorch f32 reference, before and after:
+
+| Measurement | Before | After |
+|---|---|---|
+| Decoder step logits, my_voice: max, mean | 0.056, 0.0045 | 0.041, 0.0033 |
+| Decoder step logits, ses_001_0007: max, mean | 0.032, 0.0033 | 0.028, 0.0026 |
+| Encoder block_15, my_voice: max, mean | 0.0046, 0.00034 | 0.0016, 0.00011 |
+| Encoder block_31, my_voice: mean | 0.00225 | 0.00102 |
+| Encoder ln_post, my_voice: max, mean | 3.45, 0.00409 | 1.28, 0.00171 |
+
+Cost: about 12 MiB of VRAM (1799 MiB against 1787 MiB). Criterion 3 reads 3.877 s against the whisper.cpp 4.007 s of the same run, inside the run-to-run spread of this laptop card.
+
+The near tie of my_voice2 window 1 (token 80) does not move: "uy" with p 0.509 after the encoder change (0.511 before). The cause is not our precision:
+
+- whisper.cpp converts its f32 activations to f16 and calls `cublasGemmEx` with half alpha and a half output, so its matmuls accumulate in **f16** (`ggml/src/ggml-cuda/ggml-cuda.cu`, `use_fp16` path). Ours accumulate in f32, so we are closer to the mathematical result.
+- PyTorch f32 (transformers, teacher forced, window 1 of my_voice2) prefers "uy" (id 7493, p 0.5448) over "u" (id 84, p 0.4528). Our token matches the f32 model. whisper.cpp is the outlier at this step.
+
+So criterion 1 (WER against whisper.cpp) counts one substitution and one deletion for a token where we agree with the f32 model. The reference for that check was `target/reference/whisper/my_voice2.win1.rs.json`: the first five segments of the whisper-rs fixture (they end before 3000), because the reference tool refuses a clip longer than one window. That file is not committed.

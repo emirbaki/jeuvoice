@@ -31,3 +31,7 @@ whisper-rs = { workspace = true, features = ["metal"] }
 [[example]]
 name = "compare_whisper"
 required-features = ["cuda-kernels"]
+
+[[example]]
+name = "dump_cuda_tokens"
+required-features = ["cuda-kernels"]

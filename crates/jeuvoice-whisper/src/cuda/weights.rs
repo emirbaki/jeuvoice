@@ -64,21 +64,23 @@ impl EncoderWeights {
 
         let start = plan.total_bytes();
         let mut list: Vec<(String, Tensor)> = Vec::new();
-        let mut add = |name: String, shape: &[usize]| -> Result<Tensor, WhisperError> {
+        // The encoder keeps its residual stream, its positional embedding and its norm
+        // weights in f32, as whisper.cpp does. All other tensors are f16.
+        let mut add = |name: String, dtype: DType, shape: &[usize]| -> Result<Tensor, WhisperError> {
             let src = model.tensor(&name).ok_or_else(|| WhisperError::ModelLoad(format!("the model has no tensor {name}")))?;
             let want: usize = shape.iter().product();
             if src.numel() != want {
                 return Err(WhisperError::ModelLoad(format!("tensor {name} has shape {:?}, expected {shape:?}", src.shape)));
             }
-            let t = plan.add(DType::F16, shape);
+            let t = plan.add(dtype, shape);
             list.push((name, t.clone()));
             Ok(t)
         };
-        let conv1_w = add("encoder.conv1.weight".into(), &[d, n_mels, 3])?;
-        let conv1_b = add("encoder.conv1.bias".into(), &[d])?;
-        let conv2_w = add("encoder.conv2.weight".into(), &[d, d, 3])?;
-        let conv2_b = add("encoder.conv2.bias".into(), &[d])?;
-        let pos = add("encoder.positional_embedding".into(), &[n_ctx, d])?;
+        let conv1_w = add("encoder.conv1.weight".into(), DType::F16, &[d, n_mels, 3])?;
+        let conv1_b = add("encoder.conv1.bias".into(), DType::F16, &[d])?;
+        let conv2_w = add("encoder.conv2.weight".into(), DType::F16, &[d, d, 3])?;
+        let conv2_b = add("encoder.conv2.bias".into(), DType::F16, &[d])?;
+        let pos = add("encoder.positional_embedding".into(), DType::F32, &[n_ctx, d])?;
         let d_mlp = model
             .tensor("encoder.blocks.0.mlp.0.weight")
             .map(|t| t.shape[0])
@@ -87,25 +89,25 @@ impl EncoderWeights {
         for i in 0..n_layer {
             let p = |s: &str| format!("encoder.blocks.{i}.{s}");
             blocks.push(BlockWeights {
-                attn_ln_w: add(p("attn_ln.weight"), &[d])?,
-                attn_ln_b: add(p("attn_ln.bias"), &[d])?,
-                q_w: add(p("attn.query.weight"), &[d, d])?,
-                q_b: add(p("attn.query.bias"), &[d])?,
-                k_w: add(p("attn.key.weight"), &[d, d])?,
-                v_w: add(p("attn.value.weight"), &[d, d])?,
-                v_b: add(p("attn.value.bias"), &[d])?,
-                o_w: add(p("attn.out.weight"), &[d, d])?,
-                o_b: add(p("attn.out.bias"), &[d])?,
-                mlp_ln_w: add(p("mlp_ln.weight"), &[d])?,
-                mlp_ln_b: add(p("mlp_ln.bias"), &[d])?,
-                mlp1_w: add(p("mlp.0.weight"), &[d_mlp, d])?,
-                mlp1_b: add(p("mlp.0.bias"), &[d_mlp])?,
-                mlp2_w: add(p("mlp.2.weight"), &[d, d_mlp])?,
-                mlp2_b: add(p("mlp.2.bias"), &[d])?,
+                attn_ln_w: add(p("attn_ln.weight"), DType::F32, &[d])?,
+                attn_ln_b: add(p("attn_ln.bias"), DType::F32, &[d])?,
+                q_w: add(p("attn.query.weight"), DType::F16, &[d, d])?,
+                q_b: add(p("attn.query.bias"), DType::F16, &[d])?,
+                k_w: add(p("attn.key.weight"), DType::F16, &[d, d])?,
+                v_w: add(p("attn.value.weight"), DType::F16, &[d, d])?,
+                v_b: add(p("attn.value.bias"), DType::F16, &[d])?,
+                o_w: add(p("attn.out.weight"), DType::F16, &[d, d])?,
+                o_b: add(p("attn.out.bias"), DType::F16, &[d])?,
+                mlp_ln_w: add(p("mlp_ln.weight"), DType::F32, &[d])?,
+                mlp_ln_b: add(p("mlp_ln.bias"), DType::F32, &[d])?,
+                mlp1_w: add(p("mlp.0.weight"), DType::F16, &[d_mlp, d])?,
+                mlp1_b: add(p("mlp.0.bias"), DType::F16, &[d_mlp])?,
+                mlp2_w: add(p("mlp.2.weight"), DType::F16, &[d, d_mlp])?,
+                mlp2_b: add(p("mlp.2.bias"), DType::F16, &[d])?,
             });
         }
-        let ln_post_w = add("encoder.ln_post.weight".into(), &[d])?;
-        let ln_post_b = add("encoder.ln_post.bias".into(), &[d])?;
+        let ln_post_w = add("encoder.ln_post.weight".into(), DType::F32, &[d])?;
+        let ln_post_b = add("encoder.ln_post.bias".into(), DType::F32, &[d])?;
 
         let bytes = plan.total_bytes() - start;
         Ok(EncoderWeights {
@@ -131,7 +133,10 @@ impl EncoderWeights {
     pub fn upload(&self, gpu: &Gpu, arena: &Arena, model: &GgmlModel) -> Result<(), WhisperError> {
         for (name, t) in &self.list {
             let src = model.tensor(name).expect("plan checked every name");
-            arena.upload(gpu, t, &model.read_f16(src)?)?;
+            match t.dtype() {
+                DType::F32 => arena.upload(gpu, t, &model.read_f32(src)?)?,
+                _ => arena.upload(gpu, t, &model.read_f16(src)?)?,
+            }
         }
         Ok(())
     }
@@ -224,8 +229,8 @@ impl DecoderWeights {
         for i in 0..n_layer {
             let p = |s: &str| format!("decoder.blocks.{i}.{s}");
             blocks.push(DecoderBlockWeights {
-                attn_ln_w: add(p("attn_ln.weight"), f, &[d])?,
-                attn_ln_b: add(p("attn_ln.bias"), f, &[d])?,
+                attn_ln_w: add(p("attn_ln.weight"), DType::F32, &[d])?,
+                attn_ln_b: add(p("attn_ln.bias"), DType::F32, &[d])?,
                 q_w: add(p("attn.query.weight"), f, &[d, d])?,
                 q_b: add(p("attn.query.bias"), f, &[d])?,
                 k_w: add(p("attn.key.weight"), f, &[d, d])?,
@@ -233,8 +238,8 @@ impl DecoderWeights {
                 v_b: add(p("attn.value.bias"), f, &[d])?,
                 o_w: add(p("attn.out.weight"), f, &[d, d])?,
                 o_b: add(p("attn.out.bias"), f, &[d])?,
-                cross_ln_w: add(p("cross_attn_ln.weight"), f, &[d])?,
-                cross_ln_b: add(p("cross_attn_ln.bias"), f, &[d])?,
+                cross_ln_w: add(p("cross_attn_ln.weight"), DType::F32, &[d])?,
+                cross_ln_b: add(p("cross_attn_ln.bias"), DType::F32, &[d])?,
                 cq_w: add(p("cross_attn.query.weight"), f, &[d, d])?,
                 cq_b: add(p("cross_attn.query.bias"), f, &[d])?,
                 ck_w: add(p("cross_attn.key.weight"), f, &[d, d])?,
@@ -242,16 +247,16 @@ impl DecoderWeights {
                 cv_b: add(p("cross_attn.value.bias"), f, &[d])?,
                 co_w: add(p("cross_attn.out.weight"), f, &[d, d])?,
                 co_b: add(p("cross_attn.out.bias"), f, &[d])?,
-                mlp_ln_w: add(p("mlp_ln.weight"), f, &[d])?,
-                mlp_ln_b: add(p("mlp_ln.bias"), f, &[d])?,
+                mlp_ln_w: add(p("mlp_ln.weight"), DType::F32, &[d])?,
+                mlp_ln_b: add(p("mlp_ln.bias"), DType::F32, &[d])?,
                 mlp1_w: add(p("mlp.0.weight"), f, &[d_mlp, d])?,
                 mlp1_b: add(p("mlp.0.bias"), f, &[d_mlp])?,
                 mlp2_w: add(p("mlp.2.weight"), f, &[d, d_mlp])?,
                 mlp2_b: add(p("mlp.2.bias"), f, &[d])?,
             });
         }
-        let ln_w = add("decoder.ln.weight".into(), f, &[d])?;
-        let ln_b = add("decoder.ln.bias".into(), f, &[d])?;
+        let ln_w = add("decoder.ln.weight".into(), DType::F32, &[d])?;
+        let ln_b = add("decoder.ln.bias".into(), DType::F32, &[d])?;
         let bytes = plan.total_bytes() - start;
         Ok(DecoderWeights { list, bytes, n_vocab, n_ctx, d, n_head, d_mlp, tok, pos, blocks, ln_w, ln_b })
     }

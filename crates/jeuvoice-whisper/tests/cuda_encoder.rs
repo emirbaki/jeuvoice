@@ -71,7 +71,11 @@ fn encoder_matches_reference() {
         }
         let mut taps: Vec<(String, Vec<f32>, Vec<usize>)> = Vec::new();
         enc.run_with_taps(&gpu, &blas, &mut |name: &str, arena: &Arena, t: &Tensor| {
-            let v: Vec<f32> = arena.download::<f16>(&gpu, t).unwrap().iter().map(|x| x.to_f32()).collect();
+            // The residual stream is f32, the convolution taps are f16.
+            let v: Vec<f32> = match t.dtype() {
+                jeuvoice_gpu::DType::F32 => arena.download::<f32>(&gpu, t).unwrap(),
+                _ => arena.download::<f16>(&gpu, t).unwrap().iter().map(|x| x.to_f32()).collect(),
+            };
             taps.push((name.to_string(), v, t.shape().to_vec()));
         })
         .unwrap();

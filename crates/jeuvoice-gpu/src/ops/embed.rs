@@ -51,6 +51,83 @@ pub fn embed_one(gpu: &Gpu, arena: &Arena, id: u32, tok_emb: &Tensor, pos_emb: &
     Ok(())
 }
 
+/// `embed_one` with an `F32` output: the first row of the f32 residual stream of a decoder
+/// step. `out` has one row of `d` columns.
+///
+/// # Panics
+/// If `id` is not below `vocab`, if `pos` is not below `n_ctx`, or on a wrong type or a
+/// different width.
+pub fn embed_one_f32(gpu: &Gpu, arena: &Arena, id: u32, tok_emb: &Tensor, pos_emb: &Tensor, pos: usize, out: &Tensor) -> Result<(), GpuError> {
+    assert_eq!(tok_emb.dtype(), DType::F16, "embed_one_f32: tok_emb must be F16");
+    assert_eq!(pos_emb.dtype(), DType::F32, "embed_one_f32: pos_emb must be F32");
+    assert_eq!(out.dtype(), DType::F32, "embed_one_f32: out must be F32");
+    assert!(tok_emb.shape().len() == 2 && pos_emb.shape().len() == 2 && out.shape().len() == 2, "embed_one_f32: the tensors must be 2-D");
+    let (vocab, d) = (tok_emb.shape()[0], tok_emb.shape()[1]);
+    assert!(pos_emb.shape()[1] == d && out.shape()[1] == d, "embed_one_f32: tok_emb, pos_emb and out must have the same width");
+    assert!(!out.shape().is_empty() && out.shape()[0] >= 1, "embed_one_f32: out needs a row");
+    assert!((id as usize) < vocab, "embed_one_f32: token id {id} is not below the vocab size {vocab}");
+    assert!(pos < pos_emb.shape()[0], "embed_one_f32: position {pos} passes the end ({} positions)", pos_emb.shape()[0]);
+    let (pos_all, out_all, ts) = (arena.slice::<f32>(pos_emb), arena.slice::<f32>(out), arena.slice::<f16>(tok_emb));
+    let ps = pos_all.range(pos * d, d);
+    let os = out_all.range(0, d);
+    // SAFETY: id is a row of tok_emb (checked above), ps and os have d values, and out is a
+    // tensor of its own.
+    unsafe { gpu.kernels()?.embed_one_f32(gpu.stream(), LaunchConfig::for_num_elems(grid_elems(d)), id, ts.as_ptr().cast(), ps.as_ptr(), os.as_mut_ptr(), d) }?;
+    Ok(())
+}
+
+/// `embed` with an `F32` output: the prompt rows of the f32 residual stream.
+///
+/// # Panics
+/// If an id is not below `vocab`, if `pos0 + ids.len()` passes `n_ctx`, if `out` or `ids_t`
+/// has too few rows, or on a wrong type or width.
+#[allow(clippy::too_many_arguments)]
+pub fn embed_f32(
+    gpu: &Gpu,
+    arena: &Arena,
+    ids: &[u32],
+    ids_t: &Tensor,
+    tok_emb: &Tensor,
+    pos_emb: &Tensor,
+    pos0: usize,
+    out: &Tensor,
+) -> Result<(), GpuError> {
+    assert_eq!(tok_emb.dtype(), DType::F16, "embed_f32: tok_emb must be F16");
+    assert_eq!(pos_emb.dtype(), DType::F32, "embed_f32: pos_emb must be F32");
+    assert_eq!(out.dtype(), DType::F32, "embed_f32: out must be F32");
+    assert_eq!(ids_t.dtype(), DType::I32, "embed_f32: ids_t must be I32");
+    assert!(
+        tok_emb.shape().len() == 2 && pos_emb.shape().len() == 2 && out.shape().len() == 2,
+        "embed_f32: tok_emb, pos_emb and out must be 2-D"
+    );
+    let (vocab, d) = (tok_emb.shape()[0], tok_emb.shape()[1]);
+    let n_ctx = pos_emb.shape()[0];
+    assert!(pos_emb.shape()[1] == d && out.shape()[1] == d, "embed_f32: tok_emb, pos_emb and out must have the same width");
+    let n = ids.len();
+    assert!(n <= out.shape()[0], "embed_f32: {n} ids, but out has {} rows", out.shape()[0]);
+    assert!(n <= ids_t.numel(), "embed_f32: {n} ids, but ids_t has room for {}", ids_t.numel());
+    assert!(pos0 + n <= n_ctx, "embed_f32: positions {pos0}..{} pass the end ({n_ctx} positions)", pos0 + n);
+    for &id in ids {
+        assert!((id as usize) < vocab, "embed_f32: token id {id} is not below the vocab size {vocab}");
+    }
+    if n == 0 {
+        return Ok(());
+    }
+    // The ids tensor is planned for the longest batch: fill the rest with 0 (a valid row).
+    let mut host = vec![0i32; ids_t.numel()];
+    for (h, &id) in host.iter_mut().zip(ids) {
+        *h = id as i32;
+    }
+    arena.upload(gpu, ids_t, &host)?;
+    let (is, ts, ps_all, os_all) = (arena.slice::<i32>(ids_t), arena.slice::<f16>(tok_emb), arena.slice::<f32>(pos_emb), arena.slice::<f32>(out));
+    let ps = ps_all.range(pos0 * d, n * d);
+    let os = os_all.range(0, n * d);
+    // SAFETY: the ids are rows of tok_emb (checked above), ps and os have n * d values, and
+    // out is a tensor of its own.
+    unsafe { gpu.kernels()?.embed_f32(gpu.stream(), LaunchConfig::for_num_elems(grid_elems(n * d)), is.as_ptr(), ts.as_ptr().cast(), ps.as_ptr(), os.as_mut_ptr(), n, d) }?;
+    Ok(())
+}
+
 /// `embed` with a chosen width (`One` or `Two`). For lesson 8 and the benchmark.
 #[allow(clippy::too_many_arguments)]
 pub fn embed_with(

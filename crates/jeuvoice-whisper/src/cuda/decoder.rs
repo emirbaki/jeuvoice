@@ -22,7 +22,7 @@
 
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
-    ProbsOut, add_into, attention_decode, bias_add, bias_gelu, decode_split_scratch, embed, embed_one, layernorm,
+    ProbsOut, add_into_f32, attention_decode, bias_add, bias_gelu, decode_split_scratch, embed_f32, embed_one_f32, layernorm_to_f16,
 };
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, Tensor};
 
@@ -101,10 +101,13 @@ impl Decoder {
         if w.blocks.len() <= ALIGNMENT_HEADS.iter().map(|&(l, _)| l).max().unwrap_or(0) {
             return Err(WhisperError::ModelLoad(format!("the decoder has {} blocks, too few for the large-v3-turbo alignment heads", w.blocks.len())));
         }
+        // The residual stream is f32: the LayerNorm reads it and the residual adds write f32.
+        // whisper.cpp keeps its activations f32 too. Rounding the whole residual stream to
+        // f16 at every block flipped one token on a near tie (Task 14).
         let f = DType::F16;
         let n_layer = w.blocks.len();
         let a = Acts {
-            x: plan.add(f, &[n_ctx, d]),
+            x: plan.add(DType::F32, &[n_ctx, d]),
             h: plan.add(f, &[n_ctx, d]),
             q: plan.add(f, &[n_ctx, d]),
             att: plan.add(f, &[n_ctx, d]),
@@ -159,7 +162,7 @@ impl Decoder {
         self.check_batch(tokens.len())?;
         self.past = 0;
         let n = tokens.len();
-        embed(gpu, &self.arena, tokens, &self.a.ids, &self.w.tok, &self.w.pos, 0, &self.a.x.rows(0, n))?;
+        embed_f32(gpu, &self.arena, tokens, &self.a.ids, &self.w.tok, &self.w.pos, 0, &self.a.x.rows(0, n))?;
         self.pass(gpu, blas, n, Mode::Logits)?;
         self.past = n;
         self.logits_of_row(gpu, blas, n - 1)
@@ -174,7 +177,7 @@ impl Decoder {
             return Err(WhisperError::Transcribe(format!("the decoder context is full ({} tokens)", self.w.n_ctx)));
         }
         let p = self.past;
-        embed_one(gpu, &self.arena, token, &self.w.tok, &self.w.pos, p, &self.a.x.rows(0, 1))?;
+        embed_one_f32(gpu, &self.arena, token, &self.w.tok, &self.w.pos, p, &self.a.x.rows(0, 1))?;
         self.pass(gpu, blas, 1, Mode::Logits)?;
         self.past = p + 1;
         self.logits_of_row(gpu, blas, 0)
@@ -189,7 +192,7 @@ impl Decoder {
         let n = tokens.len();
         self.past = 0;
         let mut out = vec![0.0f32; ALIGNMENT_HEADS.len() * n * n_audio];
-        embed(gpu, &self.arena, tokens, &self.a.ids, &self.w.tok, &self.w.pos, 0, &self.a.x.rows(0, n))?;
+        embed_f32(gpu, &self.arena, tokens, &self.a.ids, &self.w.tok, &self.w.pos, 0, &self.a.x.rows(0, n))?;
         self.pass(gpu, blas, n, Mode::Align { n_audio, out: &mut out })?;
         self.past = n;
         Ok(out)
@@ -209,7 +212,7 @@ impl Decoder {
     fn logits_of_row(&self, gpu: &Gpu, blas: &Blas, row: usize) -> Result<Vec<f32>, WhisperError> {
         let (ar, w, a) = (&self.arena, &self.w, &self.a);
         let (x, h) = (a.x.rows(row, 1), a.h.rows(0, 1));
-        layernorm(gpu, ar, &x, &w.ln_w, &w.ln_b, &h, LN_EPS)?;
+        layernorm_to_f16(gpu, ar, &x, &w.ln_w, &w.ln_b, &h, LN_EPS)?;
         blas.gemm_f16_f32out(gpu, &ar.slice(&h), Op::N, &ar.slice(&w.tok), Op::T, &ar.slice(&a.logits), 1, w.n_vocab, w.d, 1.0, 0.0)?;
         Ok(ar.download::<f32>(gpu, &a.logits)?)
     }
@@ -226,7 +229,7 @@ impl Decoder {
 
         for (li, b) in w.blocks.iter().enumerate() {
             // Self-attention: the new K and V rows go into the cache at their positions.
-            layernorm(gpu, ar, &x, &b.attn_ln_w, &b.attn_ln_b, &h, LN_EPS)?;
+            layernorm_to_f16(gpu, ar, &x, &b.attn_ln_w, &b.attn_ln_b, &h, LN_EPS)?;
             linear(&h, &b.q_w, &q, d, d)?;
             bias_add(gpu, ar, &q, &b.q_b)?;
             let (kc, vc) = (a.k_cache[li].rows(p, n), a.v_cache[li].rows(p, n));
@@ -236,10 +239,10 @@ impl Decoder {
             self.attend(gpu, &q, &a.k_cache[li], &a.v_cache[li], &att, p + n, true, None)?;
             linear(&att, &b.o_w, &proj, d, d)?;
             bias_add(gpu, ar, &proj, &b.o_b)?;
-            add_into(gpu, ar, &x, &proj)?;
+            add_into_f32(gpu, ar, &x, &proj)?;
 
             // Cross-attention on the encoder output of this window.
-            layernorm(gpu, ar, &x, &b.cross_ln_w, &b.cross_ln_b, &h, LN_EPS)?;
+            layernorm_to_f16(gpu, ar, &x, &b.cross_ln_w, &b.cross_ln_b, &h, LN_EPS)?;
             linear(&h, &b.cq_w, &q, d, d)?;
             bias_add(gpu, ar, &q, &b.cq_b)?;
             let heads_here: Vec<(usize, usize)> = ALIGNMENT_HEADS.iter().enumerate().filter(|(_, ah)| ah.0 == li).map(|(slot, ah)| (slot, ah.1)).collect();
@@ -250,7 +253,7 @@ impl Decoder {
             self.attend(gpu, &q, &a.ck[li], &a.cv[li], &att, N_AUDIO_CTX, false, probs)?;
             linear(&att, &b.co_w, &proj, d, d)?;
             bias_add(gpu, ar, &proj, &b.co_b)?;
-            add_into(gpu, ar, &x, &proj)?;
+            add_into_f32(gpu, ar, &x, &proj)?;
 
             if matches!(mode, Mode::Align { .. }) && li == last_align_layer {
                 // The DTW pass needs nothing after the last alignment head.
@@ -258,12 +261,12 @@ impl Decoder {
             }
 
             // MLP.
-            layernorm(gpu, ar, &x, &b.mlp_ln_w, &b.mlp_ln_b, &h, LN_EPS)?;
+            layernorm_to_f16(gpu, ar, &x, &b.mlp_ln_w, &b.mlp_ln_b, &h, LN_EPS)?;
             linear(&h, &b.mlp1_w, &mlp, d, d_mlp)?;
             bias_gelu(gpu, ar, &mlp, &b.mlp1_b)?;
             linear(&mlp, &b.mlp2_w, &proj, d_mlp, d)?;
             bias_add(gpu, ar, &proj, &b.mlp2_b)?;
-            add_into(gpu, ar, &x, &proj)?;
+            add_into_f32(gpu, ar, &x, &proj)?;
         }
         Ok(())
     }

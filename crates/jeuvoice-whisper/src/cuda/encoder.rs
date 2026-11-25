@@ -17,8 +17,8 @@
 
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
-    AttnKind, Layout, add_into, add_rows, attention, bias_add, bias_gelu, conv1d_with_layout, layernorm, merge_heads,
-    split_heads,
+    AttnKind, Layout, add_into_f32, add_into_f32_f32, attention, bias_add, bias_gelu, conv1d_with_layout, f16_to_f32, layernorm_to_f16,
+    merge_heads, split_heads,
 };
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, Tensor};
 
@@ -98,7 +98,7 @@ impl Encoder {
             col1: plan.add(f, &[n_mels * 3, N_FRAMES]),
             c1: plan.add(f, &[N_FRAMES, d]),
             col2: plan.add(f, &[d * 3, n_ctx]),
-            x: plan.add(f, &[n_ctx, d]),
+            x: plan.add(DType::F32, &[n_ctx, d]),
             h: plan.add(f, &[n_ctx, d]),
             q: plan.add(f, &[n_ctx, d]),
             k: plan.add(f, &[n_ctx, d]),
@@ -168,15 +168,18 @@ impl Encoder {
         conv1d_with_layout(gpu, ar, blas, &a.mel, Layout::ChannelsFirst, &w.conv1_w, &a.c1, Layout::TimeFirst, 1, &a.col1)?;
         bias_gelu(gpu, ar, &a.c1, &w.conv1_b)?;
         taps("conv1", ar, &a.c1);
-        conv1d_with_layout(gpu, ar, blas, &a.c1, Layout::TimeFirst, &w.conv2_w, &a.x, Layout::TimeFirst, 2, &a.col2)?;
-        bias_gelu(gpu, ar, &a.x, &w.conv2_b)?;
-        taps("conv2", ar, &a.x);
-        add_rows(gpu, ar, &a.x, &w.pos)?;
+        conv1d_with_layout(gpu, ar, blas, &a.c1, Layout::TimeFirst, &w.conv2_w, &a.proj, Layout::TimeFirst, 2, &a.col2)?;
+        bias_gelu(gpu, ar, &a.proj, &w.conv2_b)?;
+        taps("conv2", ar, &a.proj);
+        // The residual stream is f32 from here on, as in whisper.cpp. The convolution writes
+        // f16, so the first rows widen before the positional embedding lands on them.
+        f16_to_f32(gpu, ar, &a.x, &a.proj)?;
+        add_into_f32_f32(gpu, ar, &a.x, &w.pos)?;
         taps("embed", ar, &a.x);
 
         for (i, b) in w.blocks.iter().enumerate() {
             // Self-attention.
-            layernorm(gpu, ar, &a.x, &b.attn_ln_w, &b.attn_ln_b, &a.h, LN_EPS)?;
+            layernorm_to_f16(gpu, ar, &a.x, &b.attn_ln_w, &b.attn_ln_b, &a.h, LN_EPS)?;
             linear(&a.h, &b.q_w, &a.q, n_ctx, d, d)?;
             bias_add(gpu, ar, &a.q, &b.q_b)?;
             linear(&a.h, &b.k_w, &a.k, n_ctx, d, d)?;
@@ -189,18 +192,18 @@ impl Encoder {
             merge_heads(gpu, ar, &a.oh, &a.att)?;
             linear(&a.att, &b.o_w, &a.proj, n_ctx, d, d)?;
             bias_add(gpu, ar, &a.proj, &b.o_b)?;
-            add_into(gpu, ar, &a.x, &a.proj)?;
+            add_into_f32(gpu, ar, &a.x, &a.proj)?;
             // MLP.
-            layernorm(gpu, ar, &a.x, &b.mlp_ln_w, &b.mlp_ln_b, &a.h, LN_EPS)?;
+            layernorm_to_f16(gpu, ar, &a.x, &b.mlp_ln_w, &b.mlp_ln_b, &a.h, LN_EPS)?;
             linear(&a.h, &b.mlp1_w, &a.mlp, n_ctx, d, d_mlp)?;
             bias_gelu(gpu, ar, &a.mlp, &b.mlp1_b)?;
             linear(&a.mlp, &b.mlp2_w, &a.proj, n_ctx, d_mlp, d)?;
             bias_add(gpu, ar, &a.proj, &b.mlp2_b)?;
-            add_into(gpu, ar, &a.x, &a.proj)?;
+            add_into_f32(gpu, ar, &a.x, &a.proj)?;
             taps(&format!("block_{i:02}"), ar, &a.x);
         }
 
-        layernorm(gpu, ar, &a.x, &w.ln_post_w, &w.ln_post_b, &a.out, LN_EPS)?;
+        layernorm_to_f16(gpu, ar, &a.x, &w.ln_post_w, &w.ln_post_b, &a.out, LN_EPS)?;
         taps("ln_post", ar, &a.out);
         Ok(&self.a.out)
     }

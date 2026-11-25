@@ -461,8 +461,84 @@ pub mod device {
         }
     }
 
-    // ---- Decoder attention (lesson 8, part B: docs/cuda-lessons/08-decoder.md) ----
-    // out[r] = softmax(scale * q[r] k^T) v for each head, with q, k, v and out in the
+    /// `embed_one_f16x2` with an f32 output: the f32 residual stream of the decoder.
+    ///
+    /// # Safety
+    /// `tok` has the row `id` (the host checked it), `pos` and `out` have `d2` pairs.
+    #[kernel]
+    pub unsafe fn embed_one_f32(id: u32, tok: *const f16, pos: *const f32, out: *mut f32, d: usize) {
+        let c = thread::index_1d().get() as usize;
+        if c >= d {
+            return;
+        }
+        // SAFETY: c < d, and row `id` of tok exists (the host checked it).
+        unsafe { *out.add(c) = *tok.add(id as usize * d + c) as f32 + *pos.add(c) };
+    }
+
+    /// `embed_f16` with an f32 output.
+    ///
+    /// # Safety
+    /// As `embed_f16`, with `out` f32.
+    #[kernel]
+    pub unsafe fn embed_f32(ids: *const i32, tok: *const f16, pos: *const f32, out: *mut f32, n: usize, d: usize) {
+        let i = thread::index_1d().get();
+        if i >= n * d {
+            return;
+        }
+        let (row, c) = (i / d, i % d);
+        // SAFETY: row < n, c < d, and ids[row] is a row of tok (the host checked it).
+        unsafe {
+            let id = *ids.add(row) as usize;
+            *out.add(i) = *tok.add(id * d + c) as f32 + *pos.add(i);
+        }
+    }
+
+    /// `acc[i] += x[i]` with an f32 accumulator and an f16 addend: the residual add of the
+    /// f32 residual stream.
+    ///
+    /// # Safety
+    /// `acc` is valid for `n` f32 values and `x` for `n` f16 values. They do not overlap.
+    #[kernel]
+    pub unsafe fn add_f16_into_f32(acc: *mut f32, x: *const f16, n: usize) {
+        let i = thread::index_1d().get();
+        if i >= n {
+            return;
+        }
+        // SAFETY: i < n, and the two tensors are different arena tensors.
+        unsafe { *acc.add(i) += *x.add(i) as f32 };
+    }
+
+    /// `dst[i] = src[i]` with an f32 destination and an f16 source: the first rows of the f32
+    /// residual stream, written by a kernel that produces f16 (the encoder convolutions).
+    ///
+    /// # Safety
+    /// `dst` is valid for `n` f32 values and `src` for `n` f16 values. They do not overlap.
+    #[kernel]
+    pub unsafe fn f16_to_f32(dst: *mut f32, src: *const f16, n: usize) {
+        let i = thread::index_1d().get();
+        if i >= n {
+            return;
+        }
+        // SAFETY: i < n, and the two tensors are different arena tensors.
+        unsafe { *dst.add(i) = *src.add(i) as f32 };
+    }
+
+    /// `acc[i] += x[i]` with both f32: the positional embedding of the encoder, which the
+    /// model also keeps in f32.
+    ///
+    /// # Safety
+    /// Both tensors are valid for `n` f32 values and do not overlap.
+    #[kernel]
+    pub unsafe fn add_f32_into_f32(acc: *mut f32, x: *const f32, n: usize) {
+        let i = thread::index_1d().get();
+        if i >= n {
+            return;
+        }
+        // SAFETY: i < n, and the two tensors are different arena tensors.
+        unsafe { *acc.add(i) += *x.add(i) };
+    }
+
+    // ---- Decoder attention (lesson 8, part B: docs/cuda-lessons/08-decoder.md) ----    // out[r] = softmax(scale * q[r] k^T) v for each head, with q, k, v and out in the
     // [rows, ld] layout of the GEMM outputs and the KV cache. Head h is columns 64h..64h+64.
 
     /// The naive decoder attention: one block of `ROW_BLOCK` threads per (query row,
@@ -944,7 +1020,8 @@ pub mod device {
     /// # Safety
     /// As `layernorm_regs_f32`.
     #[kernel]
-    pub unsafe fn layernorm_regs_f16(x: *const f16, gamma: *const f16, beta: *const f16, y: *mut f16, d: usize, eps: f32) {        let base = thread::blockIdx_x() as usize * d;
+    pub unsafe fn layernorm_regs_f16(x: *const f16, gamma: *const f16, beta: *const f16, y: *mut f16, d: usize, eps: f32) {
+        let base = thread::blockIdx_x() as usize * d;
         let tid = thread::threadIdx_x() as usize;
         let step = ROW_BLOCK as usize;
         let mut v = [0.0f32; MAX_COLS_PER_THREAD];
@@ -1050,6 +1127,59 @@ pub mod device {
                     let o0 = (v[2 * j] - mean) * inv * g[0] as f32 + b[0] as f32;
                     let o1 = (v[2 * j + 1] - mean) * inv * g[1] as f32 + b[1] as f32;
                     *y.add(base + c) = [o0 as f16, o1 as f16];
+                }
+            }
+            j += 1;
+        }
+    }
+
+    /// As `layernorm_regs_f32`, with an f16 output: the LayerNorm of the f32 residual stream
+    /// feeds an f16 GEMM. Gamma and beta stay f32, as the model stores them.
+    ///
+    /// # Safety
+    /// `x` is valid for `rows * d` f32, `gamma` and `beta` for `d` f32, `y` for `rows * d`
+    /// f16, `y` overlaps none of them, and `d <= ROW_BLOCK * MAX_COLS_PER_THREAD`. The grid
+    /// has one block per row and `ROW_BLOCK` threads.
+    #[kernel]
+    pub unsafe fn layernorm_f32in_f16out(x: *const f32, gamma: *const f32, beta: *const f32, y: *mut f16, d: usize, eps: f32) {
+        let base = thread::blockIdx_x() as usize * d;
+        let tid = thread::threadIdx_x() as usize;
+        let step = ROW_BLOCK as usize;
+        let mut v = [0.0f32; MAX_COLS_PER_THREAD];
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            let c = tid + j * step;
+            if c < d {
+                // SAFETY: c < d, one block per row.
+                v[j] = unsafe { *x.add(base + c) };
+            }
+            j += 1;
+        }
+        let mut s = 0.0f32;
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            s += v[j];
+            j += 1;
+        }
+        let mean = block_sum(s) / d as f32;
+        let mut s = 0.0f32;
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            if tid + j * step < d {
+                let t = v[j] - mean;
+                s += t * t;
+            }
+            j += 1;
+        }
+        let inv = 1.0 / (block_sum(s) / d as f32 + eps).sqrt();
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            let c = tid + j * step;
+            if c < d {
+                // SAFETY: each (row, c) belongs to exactly one thread.
+                unsafe {
+                    let o = (v[j] - mean) * inv * *gamma.add(c) + *beta.add(c);
+                    *y.add(base + c) = o as f16;
                 }
             }
             j += 1;

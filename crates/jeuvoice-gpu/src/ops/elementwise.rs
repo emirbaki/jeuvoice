@@ -92,3 +92,55 @@ pub fn add_into(gpu: &Gpu, arena: &Arena, acc: &Tensor, x: &Tensor) -> Result<()
 pub fn add_rows(gpu: &Gpu, arena: &Arena, x: &Tensor, rows_src: &Tensor) -> Result<(), GpuError> {
     add_into(gpu, arena, x, rows_src)
 }
+
+/// In place `acc = acc + x` with an `F32` accumulator and an `F16` addend: the residual add
+/// of the f32 residual stream (Phase 1b). The sum stays f32, so the rounding of a whole block
+/// does not touch it.
+pub fn add_into_f32(gpu: &Gpu, arena: &Arena, acc: &Tensor, x: &Tensor) -> Result<(), GpuError> {
+    assert_eq!(acc.dtype(), DType::F32, "add_into_f32: acc must be F32");
+    assert_eq!(x.dtype(), DType::F16, "add_into_f32: x must be F16");
+    assert_eq!(acc.shape(), x.shape(), "add_into_f32: shapes differ");
+    assert_ne!(acc.offset(), x.offset(), "add_into_f32: acc and x must be different tensors");
+    let n = acc.numel();
+    if n == 0 {
+        return Ok(());
+    }
+    let (a, b) = (arena.slice::<f32>(acc), arena.slice::<f16>(x));
+    // SAFETY: n elements in each tensor, one thread per element, and the tensors differ.
+    unsafe { gpu.kernels()?.add_f16_into_f32(gpu.stream(), LaunchConfig::for_num_elems(grid_elems(n)), a.as_mut_ptr(), b.as_ptr().cast(), n) }?;
+    Ok(())
+}
+
+/// `dst = src` with an `F32` destination and an `F16` source: the first rows of the f32
+/// residual stream, when the kernel that makes them writes f16.
+pub fn f16_to_f32(gpu: &Gpu, arena: &Arena, dst: &Tensor, src: &Tensor) -> Result<(), GpuError> {
+    assert_eq!(dst.dtype(), DType::F32, "f16_to_f32: dst must be F32");
+    assert_eq!(src.dtype(), DType::F16, "f16_to_f32: src must be F16");
+    assert_eq!(dst.numel(), src.numel(), "f16_to_f32: element counts differ");
+    assert_ne!(dst.offset(), src.offset(), "f16_to_f32: dst and src must be different tensors");
+    let n = dst.numel();
+    if n == 0 {
+        return Ok(());
+    }
+    let (d, s) = (arena.slice::<f32>(dst), arena.slice::<f16>(src));
+    // SAFETY: n elements in each tensor, one thread per element, and the tensors differ.
+    unsafe { gpu.kernels()?.f16_to_f32(gpu.stream(), LaunchConfig::for_num_elems(grid_elems(n)), d.as_mut_ptr(), s.as_ptr().cast(), n) }?;
+    Ok(())
+}
+
+/// In place `acc = acc + x` with both `F32`: the positional embedding of the encoder, which
+/// the model keeps in f32.
+pub fn add_into_f32_f32(gpu: &Gpu, arena: &Arena, acc: &Tensor, x: &Tensor) -> Result<(), GpuError> {
+    assert_eq!(acc.dtype(), DType::F32, "add_into_f32_f32: acc must be F32");
+    assert_eq!(x.dtype(), DType::F32, "add_into_f32_f32: x must be F32");
+    assert_eq!(acc.shape(), x.shape(), "add_into_f32_f32: shapes differ");
+    assert_ne!(acc.offset(), x.offset(), "add_into_f32_f32: acc and x must be different tensors");
+    let n = acc.numel();
+    if n == 0 {
+        return Ok(());
+    }
+    let (a, b) = (arena.slice::<f32>(acc), arena.slice::<f32>(x));
+    // SAFETY: n elements in each tensor, one thread per element, and the tensors differ.
+    unsafe { gpu.kernels()?.add_f32_into_f32(gpu.stream(), LaunchConfig::for_num_elems(grid_elems(n)), a.as_mut_ptr(), b.as_ptr(), n) }?;
+    Ok(())
+}
