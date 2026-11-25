@@ -144,3 +144,63 @@ fn the_hidden_states_match_the_reference() {
     }
     assert!(failures.is_empty(), "these taps are further from the f32 model than twice the fp16 run: {failures:?}");
 }
+
+/// The two-row pass of a decode step: the conditioned row is the layout, the unconditioned
+/// row is the target frames alone. The engine records both sets of logits.
+#[test]
+#[ignore = "needs the GPU, the OmniVoice checkpoint, the adapter and the s1 taps fixture"]
+fn both_rows_match_the_reference() {
+    let gpu = Gpu::open(0).unwrap();
+    let blas = Blas::load(&gpu).unwrap();
+    let dir = model_dir(&default_cache_root(), std::env::var("JEUVOICE_OMNIVOICE_MODEL").ok().as_deref()).unwrap();
+    let cfg = OmniVoiceConfig::from_file(&dir.join("config.json")).unwrap();
+    let appdata = std::env::var("APPDATA").ok();
+    let models = data_models_dir(None, appdata.as_deref()).unwrap();
+    let w = OmniVoiceWeights::load(&gpu, &dir, adapter_dir(&models).as_deref(), &cfg).unwrap();
+
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/reference/omnivoice");
+    let taps = reference(base.join("s1.taps.safetensors").to_str().unwrap());
+    let taps32 = reference(base.join("f32/s1.taps.safetensors").to_str().unwrap());
+    let (t, target) = (taps["ids0"].len() / 8, 214usize);
+    let ids0: Vec<i32> = taps["ids0"].iter().map(|&v| v as i32).collect();
+    let mask0: Vec<i32> = taps["audio_mask0"].iter().map(|&v| v as i32).collect();
+    let codebooks = 8usize;
+    let width = cfg.audio_head_rows();
+    let vocab = cfg.audio_vocab_size;
+
+    let mut ids = vec![cfg.audio_mask_id as i32; 2 * codebooks * t];
+    let mut mask = vec![0i32; 2 * t];
+    ids[..codebooks * t].copy_from_slice(&ids0);
+    mask[..t].copy_from_slice(&mask0);
+    for c in 0..codebooks {
+        for p in 0..target {
+            ids[(codebooks + c) * t + p] = ids0[c * t + t - target + p];
+        }
+    }
+    mask[t..t + target].fill(1);
+    forward(&w, &cfg, &gpu, &blas, &ids, &mask, 2, t, Some(&[t as i32, target as i32]), &mut |_, _, _| {}).unwrap();
+
+    let logits: Vec<f32> = w.arena.download::<f32>(&gpu, &w.act.logits.prefix_as(&[2 * t, width])).unwrap();
+    for (name, start, tap) in [("cond", t - target, "cond_logits_00"), ("uncond", t, "uncond_logits_00")] {
+        let want = &taps32[tap];
+        let mut agree = 0usize;
+        let mut max = 0.0f32;
+        for p in 0..target {
+            for c in 0..codebooks {
+                let ours = &logits[(start + p) * width + c * vocab..][..vocab];
+                let theirs = &want[(c * target + p) * vocab..][..vocab];
+                let a = ours.iter().enumerate().max_by(|x, y| x.1.total_cmp(y.1)).unwrap().0;
+                let b = theirs.iter().enumerate().max_by(|x, y| x.1.total_cmp(y.1)).unwrap().0;
+                if a == b {
+                    agree += 1;
+                }
+                for (x, y) in ours.iter().zip(theirs) {
+                    max = max.max((x - y).abs());
+                }
+            }
+        }
+        let total = codebooks * target;
+        eprintln!("{name}: argmax {agree}/{total} ({:.1}%), max_abs {max:.4}", agree as f64 / total as f64 * 100.0);
+        assert!(agree as f64 / total as f64 >= 0.98, "{name}: the argmax agrees on {:.1}%", agree as f64 / total as f64 * 100.0);
+    }
+}

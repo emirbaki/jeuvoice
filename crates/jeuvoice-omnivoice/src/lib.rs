@@ -8,8 +8,13 @@
 //! behind the `cuda-kernels` feature.
 
 pub mod config;
+pub mod decode;
+pub mod duration;
+mod duration_table;
 pub mod index;
+mod lang;
 pub mod lora;
+pub mod text;
 #[cfg(feature = "cuda-kernels")]
 pub mod forward;
 #[cfg(feature = "cuda-kernels")]

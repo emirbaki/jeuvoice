@@ -71,7 +71,7 @@ Decided with the user before Task 1. The numbers below are the starting proposal
 3. The **attention mask**: bidirectional over the real positions, diagonal-only on padding, and the unconditioned row built from the *last* `target_len` tokens only.
 4. The **8-codebook embedding**: the offset `1025 · c` and the sum, not the mean, and the prompt frames' codebooks in the `[8, T]` order of the file.
 5. **GQA**: 16 q heads against 8 kv heads, the pair `h / 2`, and qk-norm before RoPE, not after.
-6. **RoPE**: the pair layout (interleaved `(2i, 2i+1)`, not the split-half form), `theta = 1e6`, and the position offsets of the prompt and the target.
+6. **RoPE**: the half-split pair `(i, i + d/2)` (Hugging Face `rotate_half`), **not** the interleaved `(2i, 2i+1)` form. Measured on 2026-11-25: the interleaved layout agreed on 111 of 1712 logits (6.5%), the half-split one on 1692 (98.8%). Also `theta = 1e6` and the positions of the prompt and the target.
 7. **f16 against the reference**: where f16 weights and activations lose enough to flip a token. Measure the logit difference per layer, do not guess.
 8. The **LoRA merge**: scale `alpha / r = 2.0`, `W + scale · B · A`, and the replaced `audio_embeddings` and `audio_heads` overriding the base tensors.
 

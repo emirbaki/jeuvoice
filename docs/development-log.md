@@ -596,3 +596,21 @@ The logits agree with the f32 model on **1692 of 1712** argmax (98.8%), max_abs 
 
 **The time:** one pass of the real batch shape (`[2, 486]`) is **112 ms** after the first (the first pays the cuBLAS and module setup, 656 ms). At `num_step = 32` the token stage would be about 3.6 s against the 2.3 s criterion, so the GEMMs and the copies are Task 12's work.
 
+
+### The text path and the masked decode (Phase 2, Tasks 11 and 9, 2026-11-25)
+
+The text path (`src/text.rs`, `src/duration.rs`, `src/lang.rs`, `src/duration_table.rs`) mirrors `_prepare_inference_inputs` and `RuleDurationEstimator`. The Qwen3 tokenizer is a byte-level BPE written in the crate, because the machine has no network and the `tokenizers` crate is not cached: `tokenizer.json` gives the vocab, the merges, the added tokens and the GPT-2 pre-split regex, and `fancy-regex` runs the pattern verbatim (it needs a lookahead). The language and duration tables are generated from the engine's Python by `tools/reference/gen_tables.py`.
+
+**The layout matches the engine exactly.** `tests/text.rs` builds the sequence of the three scripts from the text, the prompt frames and the frame count, and compares it with vectors from the engine (`tools/reference/gen_text_vectors.py`): the step-0 ids and the audio mask of s1 are identical value for value (8 x 486), and the style block and the frame estimate match on all three scripts (214, 193, 196 frames).
+
+**The decode is deterministic and correct per position, but the trajectory is chaotic.** The schedule matches the engine's counts for the three scripts. Two runs give the same tokens. Against the tokens of the engine:
+
+| Script | we vs the fp16 engine | we vs the f32 engine | the engine fp16 vs its own f32 |
+|---|---|---|---|
+| s1 | 19.8% | 23.7% | 20.0% |
+| s2 | 14.6% | 27.1% | 14.9% |
+| s3 | 13.6% | 22.2% | 14.1% |
+
+The cause is measured, not guessed. The score of a position is `log_prob_max - 5 * codebook`, and the six best positions of the first step score -0.0703, -0.0724, -0.0997, -0.1018, -0.1184 and -0.1209: a 0.002 gap at the top, and 0.05 across the six. Any difference of arithmetic (f16 against f32 weights, a different GEMM order) reorders them, and a different order changes what every later step sees. **The engine cannot reproduce itself across a dtype change**, so criterion 1 ("identical tokens on 3 scripts") is not reachable by an independent implementation. Our share is within 0.3 points of the engine's own fp16-vs-f32 share, and against the f32 model we keep more of its tokens than the fp16 engine does. The per-position prediction is accurate: 98.9% argmax on the first pass (both rows).
+
+**The time:** s1 takes 4.6 s for 214 frames (s2 3.9 s, s3 3.8 s) against the 2.3 s criterion. The forward pass is about 112 ms of each of the 32 steps (3.6 s); the guided peak over 2 x 8 x 214 rows of 1025 values on the CPU adds about 1 s. Task 12 must move the guidance to the GPU and find the rest.
