@@ -72,7 +72,9 @@ Write-Host "JeuVoice Windows bundle -> $OutDir"
 
 $exe = Join-Path $Repo 'target\release\jeuvoice-app.exe'
 if (-not $SkipBuild) {
-    & (Join-Path $Repo 'scripts\cargo.cmd') build --release -p jeuvoice-app
+    # The oxide command, so the PTX of the Rust GPU kernels goes into the exe. The app then
+    # runs CudaWhisper with JEUVOICE_CUDA_WHISPER=1 and whisper.cpp otherwise.
+    & (Join-Path $Repo 'scripts\cargo.cmd') oxide build -- -p jeuvoice-app --release --features cuda-kernels
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 }
 Assert-File $exe 'the release exe (run the build without -SkipBuild)'
