@@ -10,6 +10,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
@@ -31,13 +32,16 @@ struct Job {
 /// A message from the worker to the caller of `transcribe`.
 enum Msg {
     Progress(f32),
-    Done(Result<Transcript, WhisperError>),
+    /// The transcript and the number of windows that fell back to a higher temperature.
+    Done(Result<(Transcript, usize), WhisperError>),
 }
 
 pub struct CudaWhisper {
     /// `None` only while `drop` runs.
     jobs: Mutex<Option<Sender<Job>>>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    /// The fallback windows of the last transcription (watch item W2 of the plan).
+    last_fallbacks: AtomicUsize,
 }
 
 impl CudaWhisper {
@@ -57,7 +61,14 @@ impl CudaWhisper {
             let _ = worker.join();
             return Err(e);
         }
-        Ok(CudaWhisper { jobs: Mutex::new(Some(jobs_tx)), worker: Mutex::new(Some(worker)) })
+        Ok(CudaWhisper { jobs: Mutex::new(Some(jobs_tx)), worker: Mutex::new(Some(worker)), last_fallbacks: AtomicUsize::new(0) })
+    }
+
+    /// The windows of the last transcription that fell back to a temperature above 0. For
+    /// the measurement tool.
+    #[doc(hidden)]
+    pub fn last_fallback_windows(&self) -> usize {
+        self.last_fallbacks.load(Ordering::Relaxed)
     }
 }
 
@@ -101,14 +112,15 @@ fn worker(path: &Path, ready: &Sender<Result<(), WhisperError>>, jobs: &Receiver
     }
 }
 
-fn run_job(vocab: &Vocab, gw: &mut GpuWhisper, job: &Job) -> Result<Transcript, WhisperError> {
+fn run_job(vocab: &Vocab, gw: &mut GpuWhisper, job: &Job) -> Result<(Transcript, usize), WhisperError> {
     gw.set_audio(&job.samples)?;
     let params = DecodeParams { language: job.language.clone(), ..DecodeParams::default() };
     let reply = &job.reply;
     let t = transcribe_tokens(gw, vocab, &job.samples, &params, &mut |p| {
         let _ = reply.send(Msg::Progress(p));
     })?;
-    Ok(to_transcript(vocab, &t))
+    let fallbacks = t.windows.iter().filter(|w| w.attempts > 1).count();
+    Ok((to_transcript(vocab, &t), fallbacks))
 }
 
 /// The words of a transcription, with the token rule of `WhisperRs::transcribe`: skip the
@@ -151,7 +163,8 @@ impl Transcriber for CudaWhisper {
                 Err(_) => break Err(WhisperError::Transcribe("the GPU worker stopped".into())),
             }
         };
-        let t = result?;
+        let (t, fallbacks) = result?;
+        self.last_fallbacks.store(fallbacks, Ordering::Relaxed);
         call(1.0);
         if panicked {
             return Err(WhisperError::Transcribe("the progress callback panicked".into()));

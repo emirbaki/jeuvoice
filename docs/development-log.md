@@ -450,3 +450,22 @@ Against the whisper-rs fixtures (release, `--test-threads 1`):
 | ses_001_0007 | 1 (0) | 52 / 52 | all | 0 cs, 2 cs | 20 / 20 |
 
 The 2 different tokens of my_voice2 are one near tie: whisper-rs takes "u" (p 0.517), we take "uy" (p 0.511), and the next token joins the two again ("uyla" against "u ile"). fp16 rounding decides such a tie.
+
+### The Phase 1 criteria, first measurement (Task 12, 2026-11-25)
+
+`scripts\compare-whisper.ps1` runs `examples/compare_whisper.rs` once for each backend, in its own process, and samples the VRAM of the whole card every 100 ms (peak minus idle). Times are the median of runs 2 to 4 of each clip. The WER aligns the words with Levenshtein after the Turkish lower case and with no punctuation (`jeuvoice_whisper::compare`).
+
+| Clip | Audio | Words rs / cuda | WER | Median start diff | Time rs | Time cuda | Fallbacks cuda |
+|---|---|---|---|---|---|---|---|
+| my_voice.ogg | 27.0 s | 43 / 43 | 0.00% | 0 ms | 1.181 s | 0.969 s | 0 |
+| my_voice2.mp4 | 33.6 s | 70 / 69 | 2.86% (S 1, D 1) | 0 ms | 1.912 s | 1.369 s | 0 |
+| ses_001_0007.wav | 8.4 s | 20 / 20 | 0.00% | 0 ms | 0.767 s | 0.483 s | 0 |
+
+| Criterion | Limit | whisper.cpp | CudaWhisper | Pass |
+|---|---|---|---|---|
+| 1. WER on each file | 2% | — | worst 2.86% | **no** |
+| 2. Median word-start difference | 50 ms | — | 0 ms | yes |
+| 3. Time of the 69 s set | 4.3 s | 3.861 s | 2.820 s | yes |
+| 4. Peak VRAM | whisper.cpp | 2147 MiB | 1787 MiB | yes |
+
+Criteria 5 (the tests) and 6 (CPU fallback) need Task 13. The WER errors of my_voice2 are one near tie of the decoder (whisper-rs "u" with p 0.517, CudaWhisper "uy" with p 0.511), which gives "uyla" against "u ile": 2 word errors of 70.

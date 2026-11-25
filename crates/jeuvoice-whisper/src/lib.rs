@@ -2,6 +2,8 @@
 //! (through `whisper-rs`) that returns words with times.
 #[cfg(feature = "cuda-kernels")]
 pub mod cuda;
+#[doc(hidden)]
+pub mod compare;
 pub mod decode;
 pub mod ggml;
 pub mod mel_cpu;
