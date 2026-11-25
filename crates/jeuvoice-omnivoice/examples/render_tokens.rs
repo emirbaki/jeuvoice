@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let id = std::env::args().nth(1).unwrap_or_else(|| "s1".into());
     let out = PathBuf::from(std::env::args().nth(2).unwrap_or_else(|| format!("{id}.bin")));
     let mode = std::env::args().nth(3).unwrap_or_else(|| "det".into());
+    let warm: usize = std::env::args().nth(4).and_then(|v| v.parse().ok()).unwrap_or(0);
 
     let vectors = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/text_vectors.json");
     let data: serde_json::Value = serde_json::from_slice(&std::fs::read(&vectors)?)?;
@@ -58,15 +59,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         position_temperature: if mode == "product" { 5.0 } else { 0.0 },
         ..Params::default()
     };
-    let render = Instant::now();
-    let mut step_started = Instant::now();
-    let tokens = decode(&w, &cfg, &gpu, &blas, &layout, prompt_len, frames, &params, &mut |step, total| {
-        if step == 0 || step + 1 == total || (step + 1) % 8 == 0 {
-            eprintln!("step {}/{total}: {:.0} ms", step + 1, step_started.elapsed().as_secs_f64() * 1e3);
+    // The criterion-3 protocol: the product mode, warm, the median of the timed runs, and the
+    // GPU clock recorded next to every run. The first `warm` renders are not counted.
+    let mut times = Vec::new();
+    let mut last = None;
+    for run in 0..=warm {
+        let mut step_started = Instant::now();
+        let render = Instant::now();
+        let tokens = decode(&w, &cfg, &gpu, &blas, &layout, prompt_len, frames, &params, &mut |step, total| {
+            if step + 1 == total {
+                eprintln!("run {run} step {}/{total}: {:.0} ms", step + 1, step_started.elapsed().as_secs_f64() * 1e3);
+            }
+            step_started = Instant::now();
+        })?;
+        let seconds = render.elapsed().as_secs_f64();
+        if run >= warm {
+            let clock = std::process::Command::new("nvidia-smi")
+                .args(["--query-gpu=clocks.sm,power.draw,temperature.gpu", "--format=csv,noheader"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|_| "clock unknown".into());
+            eprintln!("run {run}: {seconds:.3} s [{clock}]");
+            times.push(seconds);
         }
-        step_started = Instant::now();
-    })?;
-    let seconds = render.elapsed().as_secs_f64();
+        last = Some(tokens);
+    }
+    times.sort_by(|a, b| a.total_cmp(b));
+    let seconds = times[times.len() / 2];
+    let tokens = last.expect("at least one run");
     let bytes: Vec<u8> = tokens.ids.iter().flat_map(|v| v.to_le_bytes()).collect();
     if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir)?;

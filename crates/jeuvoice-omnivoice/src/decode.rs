@@ -281,8 +281,9 @@ mod gpu {
             mask[..target_len].fill(1);
             forward(w, cfg, gpu, blas, &ids[..codebooks * target_len], &mask[..target_len], 1, target_len, None, None, &mut |_, _, _| {})?;
 
-            if params.mode == Mode::Product {
-                // The full planes, for the top-k filter and the Gumbel noise of the token.
+            if params.mode == Mode::Product && params.class_temperature > 0.0 {
+                // The top-k token sampling needs the full distribution, so this branch (which
+                // the app never takes at variety 0) reads the planes and samples on the host.
                 let cond_rows = download_rows(w, gpu, target, target_len)?;
                 let uncond_rows = download_rows(w, gpu, 0, target_len)?;
                 let (cond, uncond) = (&cond_rows[..], &uncond_rows[..]);
@@ -302,17 +303,14 @@ mod gpu {
                             &mut y,
                             &mut rng,
                         );
-                        let mut score = confidence - c as f32 * params.layer_penalty;
-                        if params.position_temperature > 0.0 {
-                            score = score / params.position_temperature + rng.gumbel();
-                        }
-                        scores[index] = score;
+                        scores[index] = confidence - c as f32 * params.layer_penalty;
                         picks[index] = token;
                     }
                 }
             }
-            // The deterministic mode reads the guided peak that the kernel computes.
-            if params.mode == Mode::Deterministic {
+            // The guided peak of the kernel serves the deterministic mode and the variety-0
+            // product mode: the argmax token and the unfiltered peak are the same.
+            if params.mode == Mode::Deterministic || params.class_temperature <= 0.0 {
             // 2. The guided peak on the GPU: one block per (position, codebook) pair. The two
             //    logit planes stay on the device, so a step moves 13.4 KiB to the host.
             let pairs = codebooks * target_len;
@@ -345,6 +343,16 @@ mod gpu {
                 }
             }
 
+            }
+            // The position noise of the product mode, drawn once per masked pair in
+            // codebook-major order, so one seed is repeatable. With temperature 0 the score is
+            // untouched, and the product mode gives exactly the deterministic tokens.
+            if params.mode == Mode::Product && params.position_temperature > 0.0 {
+                for index in 0..codebooks * target_len {
+                    if tokens[index] == mask_id as i32 {
+                        scores[index] = scores[index] / params.position_temperature + rng.gumbel();
+                    }
+                }
             }
             // 4. The `k` most confident positions among the still masked ones.
             let mut candidates: Vec<usize> = (0..codebooks * target_len).filter(|&i| tokens[i] == mask_id as i32).collect();
@@ -444,5 +452,14 @@ mod tests {
         let outside = (0..20).any(|i| seen[i] > 0 && i != 3 && i != 11);
         assert!(!outside, "a token outside the top two was drawn: {seen:?}");
         assert!(seen[3] > 0 && seen[11] > 0, "both of the top two must appear: {seen:?}");
+    }
+    #[test]
+    fn the_gumbel_stream_is_repeatable() {
+        let mut a = Rng(42);
+        let mut b = Rng(42);
+        for draw in 0..8 {
+            assert_eq!(a.gumbel(), b.gumbel(), "draw {draw}");
+        }
+        assert!(Rng(1).gumbel().is_finite());
     }
 }

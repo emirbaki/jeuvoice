@@ -922,3 +922,25 @@ holds (a second run gives the same tokens).
 Criterion 3 is now **2.55 s against 2.3 s**: about 0.25 s short. The step is 77.4 ms; reaching
 2.3 s needs about 72 ms per step, which is within reach of D6 (fused QKV and gate/up, 84 fewer
 GEMM calls per pass) or E3.
+
+### P2, the measurement protocol (2026-11-25)
+
+The user chose **product vs product** for criterion 3, because the engine's 4.6 s baseline was
+taken in the product mode (`scripts/tts-baseline.ps1` calls `--bench`, which uses
+`position_temperature = 5`).
+
+The authoritative protocol, now implemented in `examples/render_tokens.rs`:
+
+- mode `product` (the app's variety 0, position noise 5.0);
+- two warmup renders that are not counted, then one or more timed renders;
+- the **median** of the timed runs;
+- `nvidia-smi --query-gpu=clocks.sm,power.draw,temperature.gpu` recorded for every timed run.
+
+The first measured result: **2.668 s** for s1 (214 frames), 82-83 ms per step, at **1920 MHz,
+74.7 W, 64.6 C**. The same render with a cold first step took 3.68 s. The deterministic warm run
+is 2.54 s; the product mode costs about 0.1 s more for the position Gumbel and the host score
+work.
+
+Criterion 3 is therefore **2.67 s against 2.3 s**: about 0.37 s short. P3, P4 and P5 are the
+remaining levers; the review corrected E3's projection to about 0.15-0.2 s (the production
+attention is about 15 ms per step, not 24.7), so P5 alone may not close the gap.
