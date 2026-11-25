@@ -5,6 +5,9 @@
 //!
 //! It also prints the time of each run without the model load, so the same tool gives the
 //! whisper.cpp baseline. Set `RUNS` to the number of runs (default 1).
+//!
+//! Set `GPU=0` to run whisper.cpp on the CPU. The Phase 1b tie diagnosis compares the two
+//! devices at the same token.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -26,9 +29,11 @@ fn main() {
     });
     let samples = to_whisper(&audio);
     let runs: usize = std::env::var("RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
+    // GPU by default. GPU=0 runs whisper.cpp on the CPU.
+    let use_gpu = std::env::var("GPU").map(|v| v != "0").unwrap_or(true);
 
-    let w = WhisperRs::load(&model_path(), true).expect("load the model");
-    let opts = TranscribeOptions { language, use_gpu: true };
+    let w = WhisperRs::load(&model_path(), use_gpu).expect("load the model");
+    let opts = TranscribeOptions { language, use_gpu };
     let mut result = None;
     for run in 0..runs {
         let t = Instant::now();
