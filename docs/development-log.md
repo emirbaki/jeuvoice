@@ -944,3 +944,201 @@ work.
 Criterion 3 is therefore **2.67 s against 2.3 s**: about 0.37 s short. P3, P4 and P5 are the
 remaining levers; the review corrected E3's projection to about 0.15-0.2 s (the production
 attention is about 15 ms per step, not 24.7), so P5 alone may not close the gap.
+
+### P3, the fused QKV and gate/up GEMMs (2026-11-25)
+
+The load concatenates the three attention projections into one `[4096, 1024]` matrix (q | k | v
+side by side) and gate/up into `[6144, 1024]`. Each part keeps its own LoRA merge first, so the
+merge still runs once per checkpoint tensor in f32. The parts are not uploaded a second time, so
+`weight_bytes` is unchanged and the arena grows by 13 MB (the SwiGLU output is now a separate
+`[rows, 3072]` tensor, because `blas.rs` has no leading-dimension parameter).
+
+Two kernels learned one argument, not a new algorithm:
+
+- `to_heads_f16` takes the **source row stride**, so the head layout reads one block of the wide
+  row. The op is `to_heads_at(col)`; `to_heads` is the same call with `col = 0`.
+- `swiglu_strided_f16` reads gate and up from one wide row (`row_width`, `row_stride`) and writes
+  a contiguous `[rows, d]`. It is 11% slower than the contiguous version (59.2 us against 53.4 at
+  `[486, 3072]`) because the row width 3072 is not a power of two and each thread needs
+  `i / 3072` and `i % 3072`.
+
+The GEMM side pays for that. Isolated, three runs each at 1485 MHz:
+
+| shape | fused | separate | delta |
+|---|---|---|---|
+| 486 rows, N=4096 | 341.8 us | 393.9 us (q + 2·kv) | −52 us |
+| 214 rows, N=4096 | 191.4 us | 212.8 us | −21 us |
+| 486 rows, N=6144 | 477.9 us | 468.4 us (2·3072) | +9.5 us |
+| 214 rows, N=6144 | 242.7 us | 324.4 us | −81 us |
+
+Per step the two passes save about 4 ms of GEMM time, and the strided SwiGLU gives back about
+0.01 ms. Under the P2 protocol s1 went from 2.702/2.622 s (median 2.66) to 2.586/2.602 s (median
+2.59), −2.6%. The product tokens changed between the two builds: the trajectory is chaotic, and a
+different GEMM shape reorders the near ties of the first step. Both builds are repeatable on
+their own.
+
+The tests came first: a strided head-layout test with a canary and a block-outside-the-row panic,
+a strided SwiGLU test with a canary at three shapes, and `the_fused_weights_are_the_parts_in_order`
+in `tests/weights.rs`, which compares the fused matrix with the checkpoint values f16 for f16 and
+asserts that the parts are no longer in the arena.
+
+### P4, the position table and the dead scratch (2026-11-25)
+
+Two findings, both from the review:
+
+1. `forward` rebuilt and uploaded the two position vectors on every pass, with a synchronize each.
+   The positions of this model are always `0..t-1`, so the new kernel `rope_half_f16_rows` takes
+   the position from the row (`row % t`) and the op `rope_rows` replaces the upload entirely. The
+   `positions` and `positions_kv` tensors are gone. A test asserts that the derived positions give
+   exactly the uploaded `0..t-1` values at `t = 486, 214, 5, 1`, and a partial run of positions
+   panics.
+2. `kx` and `vx` have not been read since the grouped attention of D1; they are gone from
+   `Activations` and from `BidirScratch`. The arena fell from 1477 MB to 1460 MB.
+
+The bench of the two RoPE kernels on the same 8 MB tensor: 117.6 us with the table, 111.2 us
+without. Under the P2 protocol s1 went to 2.456/2.468 s (median 2.46), −5%, and the product tokens
+are byte-identical to the P3 build, which shows that the derived positions are exact. The packed
+972-row pass of the forward test fell from 105.5 ms to 100.0 ms warm.
+
+### P5, the d128 flash attention on tensor cores (2026-11-25)
+
+The grouped path put the score plane of every head in DRAM (7.6 MB per layer for 486 positions)
+and made three passes over it. The new kernel `flash_attn_tc128_f16` is the d64 kernel of lesson 5
+generalized to a head width of 128: 16 k steps instead of 4, four B-fragment groups per
+`ldmatrix_x4` (columns 0, 32, 64, 96), and 16 O accumulators. `attention_bidir` now dispatches to
+the flash kernel when there is no padding mask and the head width is 128; the grouped
+implementation is `attention_bidir_grouped`, and the padded tap test still uses it.
+
+Measured at the production shapes (one pass, `b = 1`, 16 query heads, 8 key heads):
+
+| positions | grouped | flash d128 | delta |
+|---|---|---|---|
+| 486 | 468 us (4.1 TF/s, 27%) | 333 us (5.8 TF/s, 38%) | −29% |
+| 214 | 164 us (2.3 TF/s, 15%) | 104 us (3.6 TF/s, 24%) | −37% |
+
+That is 12.2 ms per step of attention instead of 17.7. The PTX has no `ld.local` and no
+`st.local`; the kernel keeps about 150 registers per thread, 3 blocks per SM and 12 of 64 warps.
+A 64-key tile was tried and is not better (331/103 us): the shared memory doubles and the block
+count falls to one per SM.
+
+The first correct version was wrong by the score scale: `ATTN_SCALE` is `1/√64`, and a 128-wide
+head needs `1/√128`. The f64 test caught it at once (mean 0.011, max 0.083).
+
+Real-model checks after P5: every forward tap is closer to the f32 reference than with the
+grouped path (`hidden_27` 17.95 → 16.61 max, `post_norm` 0.2706 → 0.1956), cond argmax 1693/1712
+with max 0.0544, uncond 1712/1712 with 0.0389. The deterministic warm decode is 2.26 s.
+
+One record caveat: the first P5 run of the tap test printed `hidden_27` 13.82, and three later
+runs of the same binary print 16.61 with the same mean to 3e-5. The difference is not the code:
+cuBLAS picks its kernel per process, the byte-level differences spread over the tensor, and the
+chaotic trajectory amplifies one element at the maximum. Both values pass the tap threshold (twice
+the engine's own fp16 error).
+
+Criterion 3 after P3, P4 and P5, product mode, two warmups, median of one timed render per
+process, seven processes: **2.269, 2.266, 2.390, 2.260, 2.336, 2.326, 2.234 s** (median 2.30 s) at
+1867-1942 MHz, 73.6-75.0 W, 64.8-69.8 C. The three pre-P3 baselines of this session were 2.702,
+2.622 and the ledger's 2.668 at 61-65 C. The criterion is met at the median and missed on the
+hotter runs; the last run, of the final build at 64.8 C, is 2.234 s. The bench numbers above are
+the trustworthy part: attention alone accounts for about 0.18 s of the 0.37 s gap. The user must
+decide whether the median counts as met.
+
+### Package 2, magic-number division (P2 review, 2026-11-25)
+
+A GPU has no integer division hardware. The host knows the divisors, so it computes a checked
+multiply-shift pair once and passes `magic` and `shift` to the kernel.
+
+- `ops/fastdiv.rs` holds `FastDiv`, a host-checked pair with a cache per `(divisor, n_max)`.
+  `FastDiv::new` checks the full index range before it returns. A device `fast_div` uses one
+  widening product and one shift.
+- `swiglu_strided_f16`, `to_heads_f16`, `from_heads_f16` and `rope_half_f16_rows` now take magic
+  pairs. In `from_heads_f16` the host also passes `heads`; the kernel no longer divides.
+- The PTX of all four kernels has zero `rem.u*` and zero `div.u*`. It has `mul.wide.u32` and
+  `shf/shr` instead.
+- Tests first: `tests/fastdiv.rs` checks powers of two, the production divisors 3072, 486 and
+  214, and a device launch against exact integer division. The existing head, rope and SwiGLU
+  tests cover the integration.
+
+Measured after the change:
+
+| Item | Before | After |
+|---|---|---|
+| `swiglu_strided_f16`, 486 rows | 59.2 us | **54.7 us** (contiguous 53.2) |
+| packed 972-row forward pass | 100.0 ms | **87.7 ms** warm |
+| product s1, P2 protocol | 2.30 s median | **2.13 s** at 1882 MHz, 74.9 W, 66.8 C |
+| warm step, product tool | about 72 ms | **66-67 ms** |
+
+The 2.13 s is one process with two warmups and three timed runs. The clock and temperature match
+the earlier runs, so the comparison is fair. Criterion 3 now has margin at the median. The
+forward taps still pass: cond 1692/1712 (98.8%, 0.0545), uncond 1712/1712 (100%, 0.0389),
+logits 1693/1712 (98.9%, 0.0576). `hidden_27` printed 13.82 in this process and 16.61 in an
+earlier run of the same binary. As the P5 note records, cuBLAS kernel choice moves one element at
+the maximum without changing the mean. Both values pass the tap threshold.
+
+Tests: 456 plain, 125 GPU, 70 whisper GPU. The real forward and decode files pass, one process
+at a time. The product mode keeps 214 frames, is repeatable, and the deterministic mode still
+gives identical tokens on a second run.
+
+The remaining minor cost in `swiglu_strided_f16` is the 12 KB wide row, which sends DRAM down two
+read streams. Lesson 11 records both causes and the new numbers.
+
+### Package 3, warp RMSNorm (P2 review, 2026-11-25)
+
+`rmsnorm_rows_f16_small` used 128 threads for one row and `block_sum_4` with two barriers. The new
+`rmsnorm_rows_f16_warp` gives one warp to one row and four rows to a block. Each lane keeps four
+values in registers, uses `warp::reduce_sum_f32`, and writes its own four values back. No shared
+memory and no barriers remain. The op `rmsnorm_rows_warp` replaces `rmsnorm_rows` in the forward
+pass for q/k norm.
+
+Test first: `the_warp_rmsnorm_matches_the_row_kernel` compares the two ops at 1, 3, 5 and 33 rows
+and checks a canary after a partial last block. It failed with the missing op, then passed.
+
+Isolated bench on the same 8 MB tensor: `rmsnorm_rows_f16` 164.4 us (99.7 GB/s, 52%) and
+`rmsnorm_rows_warp` **103.2 us** (158.8 GB/s, 83%). The PTX of the warp kernel has zero
+`bar.sync`, zero `ld.shared` and five `shfl.sync.bfly`.
+
+End-to-end numbers moved less: the packed 972-row warm pass went from 87.7 ms to 86.5 ms, and the
+product s1 render from 2.13 s at 66.8 C to 2.16 s at 68.8 C. The kernel win is clear but the
+decode gain sits inside clock and temperature noise. The kernel stays because it is faster and
+simpler in device code, not because of an end-to-end speed claim.
+
+Real checks after the change: cond 1693/1712 (98.9%, 0.0606), uncond 1712/1712 (100%, 0.0386),
+logits 1693/1712 (98.9%, 0.0583), all taps inside the ratio threshold. `hidden_27` printed 12.22 in
+this process, another example of the cuBLAS per-process variation noted above. Test counts: 456
+plain, 126 GPU, 70 whisper GPU. The real forward and decode files pass; product keeps 214 frames
+and the deterministic second run matches.
+
+Lesson 10 records the new measurement as exercise 1 and adds a row to its summary table.
+
+### Package 1, approximate math (P2 review, 2026-11-25)
+
+Four device divisions now use cuda-oxide intrinsics: `rsqrt_approx_f32` in `rmsnorm_rows_f16_warp`
+and `rmsnorm_f32in_f16out`, `rcp_approx_ftz_f32` in `silu`, `softmax_regs_f16` and the flash
+normalizer. The PTX of these kernels has no `sqrt.rn` and no `rcp.rn`. It has `rsqrt.approx.f32`
+and `rcp.approx.ftz.f32`.
+
+A PTX check caught a misapplied edit: the first `rsqrt` change landed in the older block-per-row
+kernel, not in the production warp kernel. The extraction now checks each function body from its
+`.entry` to the next one, not a fixed line window. That method found the error and then confirmed
+it was fixed.
+
+Tests first: `tests/fast_math.rs` probes the two intrinsics on eight values with a 1e-6 relative
+bound. It failed with the missing op and passed after the test kernel was added. All existing
+norm, softmax, SwiGLU and flash tests still pass.
+
+Isolated before and after:
+
+| Kernel | Before | After |
+|---|---|---|
+| `rmsnorm_rows_warp`, 32000x128 | 103.2 us (83%) | **94.5 us** (90%) |
+| `swiglu_f16`, 486x3072 | 53.2 us | 53.2 us (memory bound) |
+| `attn_p5_flash128`, 486 | 333 us | **323 us** |
+| `attn_p5_flash128`, 214 | 104 us | **94 us** |
+
+The end-to-end change stays inside clock noise: product s1 2.16 s at 68.8 C before this package,
+2.10 s at 64.5 C after it. The isolated kernel numbers are the evidence, and the criterion stays
+met. The real forward checks pass: cond 1693/1712 (98.9%, 0.0594), uncond 1712/1712 (100%,
+0.0389), logits 1693/1712 (98.9%, 0.0554), all taps inside the ratio threshold. `hidden_27`
+printed 16.67 in this process, consistent with the cuBLAS per-process variation recorded earlier.
+
+Tests: 456 plain, 127 GPU, 70 whisper GPU. The real forward and decode files pass. Product keeps
+214 frames and the deterministic second run matches. Lessons 10, 11 and 13 carry the new numbers.

@@ -2,7 +2,7 @@
 
 OmniVoice'ın dil modeli Qwen3'tür. Whisper'dan iki farkı bu dersin konusu: her dikkat kafası, sorgu ve anahtar vektörünü konuma göre **döndürür** (RoPE), ve her kafanın kendi **RMSNorm**'u vardır (q/k norm). İkisi de 128 değerlik satırlar üzerinde çalışır ve her katmanda iki kez koşar.
 
-Kod: `crates/jeuvoice-gpu/src/kernels/mod.rs` (`rope_half_f16`, `rope_half_f16_shared`, `rope_f16`, `rmsnorm_rows_f16`, `rmsnorm_rows_f16_small`, `block_sum_4`), `crates/jeuvoice-gpu/src/ops/rope.rs`.
+Kod: `crates/jeuvoice-gpu/src/kernels/mod.rs` (`rope_half_f16`, `rope_half_f16_shared`, `rope_half_f16_rows`, `rope_f16`, `rmsnorm_rows_f16`, `rmsnorm_rows_f16_small`, `block_sum_4`), `crates/jeuvoice-gpu/src/ops/rope.rs`.
 
 Ölçümler: RTX 3050 Ti Laptop, bellek sınırı 192 GB/s. `target\release\gpu-bench.exe rope_f16`, `... rmsnorm_rows`. Boyutlar bilerek büyük: 8 MB girer, 8 MB çıkar, yani 4 MB'lık L2 tensörü tutamaz.
 
@@ -96,12 +96,31 @@ let scale = 1.0 / (block_sum_4(v * v) / d as f32 + eps).sqrt();
 
 Neden %100 değil? Trafik 16 MB, 154 µs'de 106 GB/s. Kalan kayıp işlem boyutunda: her blok yalnızca 128 f16 = 256 bayt okuyor. Bir warp 32 thread ile 2 bayt okur: 64 bayt, yani bir 32 baytlık sektörün sadece bir parçası. Blok başına iş küçük olduğu için bellek denetleyicisi tam doldurulamıyor ve 32 000 blok sıraya giriyor. Çözüm alıştırma 1'de: blok başına 4 satır.
 
+### 4.3. Warp başına satır, blok başına dört satır (154,2 → 103,2 µs)
+
+Alıştırma 1'in çözümü: bir blok 128 thread ile tek satır yerine dört warp ile dört satır işler. Her warp bir satırın 128 değerini alır; thread başına dört değer register'da kalır. Toplam `block_sum_4` shared dizisi ve iki `bar.sync` kalkar, yerini beş `shfl.sync.bfly` alır.
+
+`rmsnorm_rows_f16_warp` aynı 8 MB tensörde **103,2 µs, 158,8 GB/s, %83** ölçüldü. Blok başına okuma dört katına çıkınca bellek denetleyicisi daha iyi doluyor. PTX'te `bar.sync` ve `ld.shared` yok, beş warp shuffle var.
+
+Paket 1 `sqrt.rn` + `rcp.rn` çiftini tek `rsqrt.approx.f32` ile değiştirdi. Aynı kernel **94,5 µs, 173,4 GB/s, %90** ölçüldü. Yaklaşık hata f16 çıktıda görünmüyor ve tap testleri geçiyor. Kalan %10, 128 baytlık satırın sektör veriminden ve okuma/yazma karışımından geliyor.
+
+Üretim yolu q/k norm çağrılarını bu kernel'e geçirdi. İzole kernel kazancı açık olsa da uçtan uca decode süresi ölçüm gürültüsü içinde kaldı: gerçek geçiş 87,7 ms'den 86,5 ms'ye, s1 product 2,13 s'den 2,16 s'ye (sıcaklık 66,8 C'den 68,8 C'ye çıktı) değişti. Tap hataları eşik içinde kaldı.
+
+## 4b. Üretimdeki sürüm: konum tablosu yok
+
+Üretimde konum her zaman `0..t-1`, yani satırın kendi sırası. Tabloyu her geçişte hazırlayıp yüklemek iki kopya ve iki senkronizasyon demekti. `rope_half_f16_rows` konumu `row % t` ile kendisi hesaplar (`row` = düz kafa satırı, `t` = dizideki konum sayısı): tablo ne yüklenir ne okunur.
+
+Ölçüm (aynı 8 MB tensör, 2000 konum): tablolu `rope_half_f16` 117,6 µs, tablosuz `rope_half_f16_rows` **111,2 µs**. Fark hem tablo okumasının yokluğu hem de tamsayı modülosunun bellek gölgesinde kalması. Geçiş başına kazanç küçük, asıl kazanç kopyaların ve senkronizasyonların kalkması: paketlenmiş 972 satırlık geçiş 105,5 ms'den 100,0 ms'ye indi ve arena 16,8 MB küçüldü (ölü `kx`/`vx` türevleri de gitti).
+
+Tuzak: satır sayısı `t`'nin tam katı olmalı, yoksa konum dizinin ortasında sıfıra döner. `rope_rows` bunu panikle reddeder.
+
 ## 5. Kartın sınırı ve ne kadar yaklaştık
 
 | Kernel | Önce | Sonra | Sınırın yüzdesi |
 |---|---|---|---|
 | `rope_f16` | 117,9 µs (naive) | **98,9 µs** | %72 → **%86** |
 | `rmsnorm_rows_f16` | 372,6 µs (naive) | **154,2 µs** | %23 → **%55** |
+| `rmsnorm_rows_f16_warp` | 154,2 µs (blok/satır) | **94,5 µs** (rsqrt) | %55 → **%90** |
 
 RoPE için sınır bellek: 1M f16 oku + yaz = 4 MB... hayır, 2000 satır × 16 kafa × 128 × 2 bayt = 8 MB, oku + yaz = **16,4 MB**. 98,9 µs'de 165,6 GB/s, 192 GB/s'nin %86'sı. Bu, kartta bir bellek kernel'i için iyi bir sonuç.
 
