@@ -842,15 +842,83 @@ The final review (Task 12 step 4) waits for the performance work: the decode is 
 
 | Criterion | Target | Measured | State |
 |---|---|---|---|
-| 1, the same tokens | restated with the user: per-position accuracy and closeness to the f32 model, because the deterministic trajectory is chaotic under arithmetic changes | argmax 1693/1712 (98.8-98.9%) for both rows on the first pass; token share against the f32 engine 29.0% (s1), 49.2% (s2), 61.7% (s3), while the engine's own fp16 run keeps 20.0 / 14.9 / 14.1% of its f32 tokens | **met as restated** |
+| 1, the same tokens | restated with the user: per-position accuracy and closeness to the f32 model, because the deterministic trajectory is chaotic under arithmetic changes | argmax 1693/1712 (98.8-98.9%) for both rows on the first pass; token share against the f32 engine 25.9% (s1), 27.8% (s2), 37.9% (s3), while the engine's own fp16 run keeps 20.0 / 14.9 / 14.1% of its f32 tokens | **met as restated** |
 | 2, the frame count in the product mode | the same frames as the engine | 214 / 193 / 196 from the text estimate, identical to the fixtures; the product mode keeps 214 and is repeatable for one seed; its token share with the deterministic run is 0.8%, as the engine's 1689/1712 predicts | **met** |
-| 3, the token stage | 2.3 s (the engine 4.6 s) | **3.73 s** for s1 warm (s2 3.4 s, s3 3.3 s); 32 x 106.0 ms of forward pass plus about 0.3 s | **not met** |
+| 3, the token stage | 2.3 s (the engine 4.6 s) | **2.55 s** for s1 warm (s2 2.7 s, s3 2.5 s); 32 x 77.4 ms of the two passes plus about 0.1 s | **not met** |
 | 4, video memory above idle | 2.0 GB | 1464 MB (weights 1225 MB, activations 239 MB with the new buffers) | **met** |
 | 5, the load | 25 s | 5.6-6.4 s, the LoRA merge and the uploads included | **met** |
 | 6, the existing tests and the app | all pass, the app unchanged | 455 plain, 114 GPU, 70 whisper GPU; the real forward, decode and weights tests pass; no app file was touched | **met** |
 
-Criterion 3 is the one open target. The measured budget: 3.39 s of forward pass (the pass is 91% of
+Criterion 3 is the one open target: 2.55 s against 2.3 s. The measured budget: 2.48 s of the two passes, about 0.1 s of guidance, top-k and uploads. (The 3.73 s and the 3.39 s below are the packed-step measurement that the two passes replaced.) A forward pass of (the pass is 91% of
 the decode) plus 0.34 s of guidance download, top-k and uploads. Experiment A of E1 showed a
 29% cheaper step (109.3 -> 77.9 ms) but its unconditioned row did not agree with the packed
 path, so it is not adopted. E1 done properly projects about 76 ms per pass (2.6 s), and E3 or
 D6 would be needed after it.
+
+### E1, the ragged step: the values are right (2026-11-25)
+
+The earlier "the ragged step does not agree with the packed one" (50.5%) was a comparison bug in
+the experiment, not a fault of the ragged path. Measured against the engine's f32 taps the
+ragged step is correct:
+
+| Row | Ragged against the engine |
+|---|---|
+| conditioned | 1693 / 1712 (98.9%) |
+| unconditioned | **1712 / 1712 (100.0%)** |
+
+Both rows also match the packed path against the same engine taps, so the two computations
+agree and the 50.5% figure came from the packed download inside that test (a stale or
+misaligned plane), not from the 214-length pass.
+
+The time, same run: packed 109.9 ms, ragged 94.9 ms (-15.0 ms). An earlier run measured
+-31.5 ms; the machine varies, so the two-pass experiment needs a repeated measurement before it
+is quoted.
+
+Next: fix the experiment's packed comparison, repeat the timing, then choose between the two
+passes (measured, extra weight reads) and the full ragged design (700 rows and two attention
+segments).
+
+### E1 experiment, repeated (2026-11-25)
+
+The experiment now uses the engine taps as the authority and repeats the timing five times:
+
+| Item | Value |
+|---|---|
+| packed step (2 x 486) | 109.6 ms |
+| ragged step (486 + 214) | **77.4 ms** (-32.2 ms, -29%) |
+| ragged conditioned vs the engine | 1693/1712 (98.9%) |
+| ragged unconditioned vs the engine | 1712/1712 (100.0%) |
+
+The "50.5% ragged vs packed" line is a bug in this test's packed download, not in the ragged
+path: both sides match the same engine taps. The assertion was replaced by the printed shares.
+
+**Decision: adopt the two passes in the decode.** At 77.4 ms per step the token stage becomes
+32 x 77.4 ms + 0.34 s = about 2.8 s. The adoption is small because the conditioned pass writes
+its target rows at 272..486 and the unconditioned pass writes its own at 0..214, so the two
+`guide_peak` planes are already disjoint in the same logits buffer: no copy, no extra kernel.
+The product mode downloads two ranges instead of one adjacent range.
+
+### E1-A adopted: the decode runs two passes (2026-11-25)
+
+The decode now runs one conditioned pass of `seq` rows and one unconditioned pass of
+`target_len` rows instead of the padded two-row pass. The conditioned target rows are written at
+`target..` and the unconditioned rows at `0..`, so the two `guide_peak` planes are disjoint in
+the same buffer; no copy and no extra kernel. The product mode downloads the two ranges.
+
+| Item | Packed step | Two passes |
+|---|---|---|
+| warm s1 decode | 3.73 s | **2.55 s** |
+| warm s2 / s3 | 3.4 / 3.3 s | **2.7 / 2.5 s** |
+| step | 109.6 ms | 77.4 ms |
+| s1 share vs the f32 engine | 29.0% | 25.9% |
+| s1 share vs the fp16 engine | 20.4% | 17.4% (the engine's own fp16-vs-f32 is 20.0%) |
+| conditioned / unconditioned logits vs the f32 taps (experiment) | 98.8 / 100% | 98.9 / 100% |
+| product mode | 214 frames | 214 frames, repeatable |
+
+The token shares moved because the GEMM's M changed (486 and 214 instead of 972); the
+deterministic trajectory is chaotic under that change, as criterion 1 records. Determinism
+holds (a second run gives the same tokens).
+
+Criterion 3 is now **2.55 s against 2.3 s**: about 0.25 s short. The step is 77.4 ms; reaching
+2.3 s needs about 72 ms per step, which is within reach of D6 (fused QKV and gate/up, 84 fewer
+GEMM calls per pass) or E3.

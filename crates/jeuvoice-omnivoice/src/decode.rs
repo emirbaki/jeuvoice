@@ -263,22 +263,29 @@ mod gpu {
                 progress(step, params.num_step);
                 continue;
             }
-            // 1. The ids of the step: the layout with the tokens written in, and the target
-            //    frames of the unconditioned row.
+            // 1. The conditioned row: the layout with the tokens written in. One row of `seq`.
             ids[..codebooks * seq].copy_from_slice(&layout.ids);
             for c in 0..codebooks {
                 ids[c * seq + target..c * seq + target + target_len]
                     .copy_from_slice(&tokens[c * target_len..(c + 1) * target_len]);
-                let uncond = (codebooks + c) * seq;
-                ids[uncond..uncond + target_len].copy_from_slice(&tokens[c * target_len..(c + 1) * target_len]);
             }
-            let valid = [seq as i32, target_len as i32];
-            forward(w, cfg, gpu, blas, &ids, &mask, 2, seq, Some(&valid), None, &mut |_, _, _| {})?;
+            mask[..seq].copy_from_slice(&layout.audio_mask);
+            forward(w, cfg, gpu, blas, &ids[..codebooks * seq], &mask[..seq], 1, seq, None, None, &mut |_, _, _| {})?;
+
+            // 2. The unconditioned row: the target frames alone, no padding to `seq`. It writes
+            //    rows 0..target_len, so the conditioned target rows at `target..` stay intact.
+            for c in 0..codebooks {
+                ids[c * target_len..(c + 1) * target_len]
+                    .copy_from_slice(&tokens[c * target_len..(c + 1) * target_len]);
+            }
+            mask[..target_len].fill(1);
+            forward(w, cfg, gpu, blas, &ids[..codebooks * target_len], &mask[..target_len], 1, target_len, None, None, &mut |_, _, _| {})?;
 
             if params.mode == Mode::Product {
                 // The full planes, for the top-k filter and the Gumbel noise of the token.
-                let rows = download_rows(w, gpu, target, 2 * target_len)?;
-                let (cond, uncond) = rows.split_at(target_len * width);
+                let cond_rows = download_rows(w, gpu, target, target_len)?;
+                let uncond_rows = download_rows(w, gpu, 0, target_len)?;
+                let (cond, uncond) = (&cond_rows[..], &uncond_rows[..]);
                 for c in 0..codebooks {
                     for p in 0..target_len {
                         let index = c * target_len + p;
@@ -310,7 +317,7 @@ mod gpu {
             //    logit planes stay on the device, so a step moves 13.4 KiB to the host.
             let pairs = codebooks * target_len;
             let c_plane = w.act.logits.rows_unaligned(target, target_len);
-            let u_plane = w.act.logits.rows_unaligned(seq, target_len);
+            let u_plane = w.act.logits.rows_unaligned(0, target_len);
             let conf = w.act.conf.prefix_as(&[pairs]);
             let pick = w.act.pick.prefix_as(&[pairs]);
             jeuvoice_gpu::ops::guide_peak(

@@ -29,7 +29,7 @@ Neden ilk adımlar az? Erken yazılan yanlış bir token sonraki tüm adımları
 
 Otoregresif bir model her token için bir geçiş ister: 8·214 = 1712 geçiş. Maskeli çözme **32 geçiş** yapar, çünkü attention bidirectional ve bir geçiş bütün konumları aynı anda görür. Bedeli: her geçiş tüm dizi (486 konum) üzerinde, iki satırla.
 
-Bir render: 32 × 106 ms ≈ 3.4 s ileri geçiş + ~0.3 s çizelge/top-k/indirme. Motorun aynı aşaması 4.6 s.
+Bir render: 32 × 77,4 ms ≈ 2,5 s ileri geçiş (iki geçiş: 486 + 214) + ~0,1 s çizelge/top-k/indirme. Motorun aynı aşaması 4,6 s.
 
 ## 3. Naive hâl ve ölçümü
 
@@ -70,9 +70,9 @@ RTX 3050 Ti Laptop, 192 GB/s, 15.2 TFLOP/s fp16.
 | attention, dolgulu | 28 × 1021 µs = 28.6 ms |
 | SwiGLU | 28 × 110 µs = 3.1 ms |
 | audio head (972 × 8200 × 1024) | ~1.0-1.35 ms |
-| **tam geçiş, ölçülen** | **106 ms** |
+| **iki geçiş, ölçülen** | **77,4 ms** |
 
-Bench'ler her kerneli soğuk cache ile çağırır; toplamları ölçülen geçişten büyüktür. Ölçülen geçiş 2.3 s ölçütü için 32 × 65 ms olmalı; bugün 106 ms. Kalan iş: dolgulu koşulsuz satırı kaldırmak (700 satır, %28 az lineer iş) ve attention'ı d128 flash ile skor düzlemini yazmadan yapmak.
+Bench'ler her kerneli soğuk cache ile çağırır; toplamları ölçülen geçişten büyüktür. Ölçülen geçiş 2,3 s ölçütü için 32 × 72 ms olmalı; bugün 77,4 ms. Kalan iş: dolgulu koşulsuz satırı kaldırmak (700 satır, %28 az lineer iş) ve attention'ı d128 flash ile skor düzlemini yazmadan yapmak.
 
 ## 6. PTX ve Nsight'ta neye bakmalı
 

@@ -41,8 +41,8 @@ The engine vectors for all 13 tags, for `[foo]` in context, and the whole s1 lay
 | GPU tests | 114 |
 | whisper GPU tests | 70 |
 | real forward test | cond argmax 1694/1712 (98.9%), uncond 1712/1712, max logit error 0.059 / 0.041 |
-| real decode, s1 | 4.8 s, 19.8% of the fp16 tokens, 23.7% of the f32 tokens (the engine keeps 20.0% of its own f32 tokens) |
-| real decode, s2 / s3 | 4.1 s / 4.1 s |
+| real decode, s1 | 2.55 s, 17.4% of the fp16 tokens, 25.9% of the f32 tokens (the engine keeps 20.0% of its own f32 tokens) |
+| real decode, s2 / s3 | 2.7 s / 2.5 s |
 | arena | 1469 MB |
 
 The decode time is still above the 2.3 s criterion; that is Work package C/D/E work. The measurements above come from the existing wall-clock paths.
