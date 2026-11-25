@@ -4,7 +4,7 @@ Date: 2026-11-25. Written by the previous agent for the next agent. Read `AGENTS
 
 ## 1. Start here
 
-1. Switch to the branch: `git switch rust-cuda-phase1b`. It has 27 commits on top of `main`. It is **not merged and not pushed**. Merge and push only when the user says so.
+1. Switch to the branch: `git switch rust-cuda-phase1b`. It is 30 commits ahead of `main`. It is **not merged and not pushed**. Merge and push only when the user says so.
 2. Run the plain tests: `scripts\cargo.cmd test`. Expected: 407 pass, 0 fail.
 3. Run the GPU kernel tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-gpu`. Expected: 93 pass.
 4. Run the Whisper GPU tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-whisper --features cuda-kernels`. Expected: 70 pass (the rest are `#[ignore]`).
