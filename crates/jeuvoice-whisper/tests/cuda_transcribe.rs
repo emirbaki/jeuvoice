@@ -176,3 +176,29 @@ fn panicking_progress_returns_an_error() {
     // The worker still works after that.
     assert!(!w.transcribe(&samples, &opts(), &mut |_| {}).unwrap().words.is_empty());
 }
+
+/// What DTW adds to a whole transcription (lesson 9): the same clip with the DTW pass and
+/// without it. The difference holds the GPU alignment pass and the CPU stages together.
+#[test]
+#[ignore = "needs the model file and the test clips"]
+fn dtw_cost_in_a_transcription() {
+    let model = GgmlModel::open(&jeuvoice_whisper::model_path()).unwrap();
+    let vocab = Vocab::from_ggml(&model).unwrap();
+    let mut gw = GpuWhisper::load(&model).unwrap();
+    let f = common::load(common::CLIPS[1]);
+    let samples = common::samples(&f);
+    gw.set_audio(&samples).unwrap();
+    let mut times = Vec::new();
+    for (label, dtw) in [("off", false), ("on", true), ("off", false), ("on", true)] {
+        let params = DecodeParams { dtw, ..DecodeParams::default() };
+        let t0 = std::time::Instant::now();
+        let t = transcribe_tokens(&mut gw, &vocab, &samples, &params, &mut |_| {}).unwrap();
+        let s = t0.elapsed().as_secs_f64();
+        eprintln!("dtw {label}: {s:.3} s, {} windows", t.windows.len());
+        times.push((label, s));
+    }
+    let off = times.iter().filter(|(l, _)| *l == "off").map(|(_, s)| *s).fold(f64::MAX, f64::min);
+    let on = times.iter().filter(|(l, _)| *l == "on").map(|(_, s)| *s).fold(f64::MAX, f64::min);
+    eprintln!("DTW adds {:.3} s to the best of each", on - off);
+}
+

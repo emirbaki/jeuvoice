@@ -111,3 +111,81 @@ fn place_times_on_text_tokens_in_order() {
     let dtw: Vec<Vec<i64>> = segs.iter().map(|s| s.tokens.iter().map(|t| t.t_dtw).collect()).collect();
     assert_eq!(dtw, vec![vec![-1, 1004, 1008, -1], vec![1010, -1]]);
 }
+
+/// The CPU cost of the DTW of one window (lesson 9), stage by stage. A window of 130 tokens
+/// over 1500 audio positions and 6 alignment heads is a typical large-v3-turbo window.
+/// Prints the times, so run it with `--nocapture` in release.
+#[test]
+fn dtw_cpu_cost_of_one_window() {
+    use std::time::Instant;
+    use jeuvoice_whisper::decode::dtw::MEDFILT_WIDTH;
+    let (heads, tokens, audio) = (6usize, 130usize, 1500usize);
+    // Values in [0, 1), like a softmax over the audio positions.
+    let mut s = 12345u32;
+    let w: Vec<f32> = (0..heads * tokens * audio)
+        .map(|_| {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            (s >> 8) as f32 / (1u32 << 24) as f32
+        })
+        .collect();
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+
+    let mut norm = w.clone();
+    let t = Instant::now();
+    normalize_over_tokens(&mut norm, heads, tokens, audio);
+    let t_norm = ms(t);
+
+    let t = Instant::now();
+    median_filter(&mut norm, heads * tokens, audio, MEDFILT_WIDTH);
+    let t_med = ms(t);
+
+    let t = Instant::now();
+    let cost = cost_matrix(&w, heads, tokens, audio);
+    let t_all = ms(t);
+
+    let t = Instant::now();
+    let path = dtw_path(&cost, tokens - 3, audio);
+    let t_path = ms(t);
+
+    eprintln!("DTW of one window ({heads} heads, {tokens} tokens, {audio} audio positions):");
+    eprintln!("  normalize over the tokens: {t_norm:.2} ms");
+    eprintln!("  median filter (width {MEDFILT_WIDTH}): {t_med:.2} ms");
+    eprintln!("  cost matrix, all stages: {t_all:.2} ms");
+    eprintln!("  DTW path and backtrace: {t_path:.2} ms");
+    eprintln!("  together: {:.2} ms, {} path points", t_all + t_path, path.len());
+    assert!(path.len() >= audio, "the path must reach the last audio position");
+}
+/// Random rows of several lengths, so the padded edges are covered too: the fast width-7
+/// path must agree with a plain sort of the window, exactly.
+#[test]
+fn median_filter_width_7_matches_a_sort_on_random_rows() {
+    let mut s = 99u32;
+    let mut rnd = || {
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        (s >> 8) as f32 / (1u32 << 24) as f32 * 10.0 - 5.0
+    };
+    for n in [8usize, 9, 12, 33, 1500] {
+        let rows = 3;
+        let row: Vec<f32> = (0..n).map(|_| rnd()).collect();
+        let ni = n as i64;
+        let want: Vec<f32> = (0..ni)
+            .map(|k| {
+                let mut w: Vec<f32> = (-3..=3)
+                    .map(|o| {
+                        let i = k + o;
+                        let i = if i < 0 { -i } else if i >= ni { 2 * (ni - 1) - i } else { i };
+                        row[i as usize]
+                    })
+                    .collect();
+                w.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                w[3]
+            })
+            .collect();
+        let mut x: Vec<f32> = (0..rows).flat_map(|_| row.iter().copied()).collect();
+        median_filter(&mut x, rows, n, 7);
+        for r in 0..rows {
+            assert_eq!(&x[r * n..(r + 1) * n], &want[..], "row {r} of {n}");
+        }
+    }
+}
+

@@ -52,6 +52,36 @@ pub fn normalize_over_tokens(w: &mut [f32], n_heads: usize, n_tokens: usize, n_a
     }
 }
 
+/// The median of seven values: a sorting network of 19 compare-exchanges (Knuth, TAOCP
+/// 5.3.4). It needs no allocation and no comparison function, so the filter spends its time
+/// on loads and compares. Lesson 9 measures it against `sort_by`.
+#[inline]
+fn median7(mut v: [f32; 7]) -> f32 {
+    #[inline]
+    fn ce(v: &mut [f32; 7], i: usize, j: usize) {
+        if v[i] > v[j] {
+            v.swap(i, j);
+        }
+    }
+    ce(&mut v, 0, 6);
+    ce(&mut v, 2, 3);
+    ce(&mut v, 4, 5);
+    ce(&mut v, 0, 2);
+    ce(&mut v, 1, 4);
+    ce(&mut v, 3, 6);
+    ce(&mut v, 0, 1);
+    ce(&mut v, 2, 5);
+    ce(&mut v, 3, 4);
+    ce(&mut v, 1, 2);
+    ce(&mut v, 4, 6);
+    ce(&mut v, 2, 3);
+    ce(&mut v, 4, 5);
+    ce(&mut v, 1, 2);
+    ce(&mut v, 3, 4);
+    ce(&mut v, 5, 6);
+    v[3]
+}
+
 /// The median filter of whisper.cpp over the last dimension of `x` (`[rows][n]`), with
 /// reflect padding: index −1 reads index 1, and index n reads n − 2.
 ///
@@ -60,6 +90,42 @@ pub fn normalize_over_tokens(w: &mut [f32], n_heads: usize, n_tokens: usize, n_a
 pub fn median_filter(x: &mut [f32], rows: usize, n: usize, width: usize) {
     assert!(width % 2 == 1 && width < n, "median_filter: the width {width} must be odd and below {n}");
     assert_eq!(x.len(), rows * n, "median_filter: the size is not rows × n");
+    if width == 7 {
+        // The product path: a fixed window, the two padded ends handled on their own, so the
+        // middle of the row has no branch at all.
+        let n_i = n as i64;
+        let half = 3usize;
+        let mut out = vec![0.0f32; n];
+        for r in 0..rows {
+            let row = &mut x[r * n..(r + 1) * n];
+            for (k, o) in out.iter_mut().enumerate() {
+                let mut v = [0.0f32; 7];
+                if k < half {
+                    for (j, off) in (0..7).enumerate() {
+                        let mut i = k as i64 + off as i64 - half as i64;
+                        if i < 0 {
+                            i = -i;
+                        }
+                        v[j] = row[i as usize];
+                    }
+                } else if k + half >= n {
+                    for (j, off) in (0..7).enumerate() {
+                        let mut i = k as i64 + off as i64 - half as i64;
+                        if i >= n_i {
+                            i = 2 * (n_i - 1) - i;
+                        }
+                        v[j] = row[i as usize];
+                    }
+                } else {
+                    let base = k - half;
+                    v.copy_from_slice(&row[base..base + 7]);
+                }
+                *o = median7(v);
+            }
+            row.copy_from_slice(&out);
+        }
+        return;
+    }
     let half = (width / 2) as i64;
     let mut window = Vec::with_capacity(width);
     let mut out = vec![0.0f32; n];

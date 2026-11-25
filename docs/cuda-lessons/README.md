@@ -17,7 +17,7 @@ Kernel'ler Rust ile yazılır ve NVIDIA'nın **cuda-oxide** derleyicisi onları 
 | 6 | [conv1d: doğrudan ve im2col + GEMM](06-conv1d.md) | hazır |
 | 7 | [Log-mel spektrogram: matris çarpımı olarak DFT](07-mel.md) | hazır |
 | 8 | [Decoder: token gömme, KV cache ve decoder attention](08-decoder.md) | hazır |
-| 9 | Kelime zamanları: hizalama başları ve DTW | Faz 1 |
+| 9 | [Kelime zamanları: hizalama başları ve DTW](09-dtw.md) | hazır |
 
 ## Çalıştırma
 
