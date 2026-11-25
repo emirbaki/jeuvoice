@@ -29,6 +29,7 @@ JeuVoice is a Windows desktop app in Rust for Turkish speech: transcription (Whi
 | `scripts\cargo.cmd oxide build -- -p jeuvoice-gpu --bin gpu-bench --release` | build the benchmark table |
 | `target\release\gpu-bench.exe [filter]` | run it. Put `%CUDA_PATH%\bin\x64` on PATH first, for cuBLAS. |
 | `powershell -ExecutionPolicy Bypass -File scripts\compare-whisper.ps1` | the Phase 1 criteria: whisper.cpp against `CudaWhisper` (WER, word starts, time, VRAM) |
+| `powershell -ExecutionPolicy Bypass -File packaging\windows\collect.ps1` | the release bundle; it builds the app with the `cuda-kernels` feature through the oxide backend (about 9 minutes) |
 
 Always use `scripts\cargo.cmd`, not `cargo`. It sets up Visual Studio, bindgen and the cuda-oxide environment. Tests that need the model file or the test audio are `#[ignore]`: run them with `-- --ignored` or `--include-ignored`.
 
