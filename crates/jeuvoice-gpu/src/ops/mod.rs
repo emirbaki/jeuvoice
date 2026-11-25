@@ -10,6 +10,7 @@ mod elementwise;
 mod embed;
 mod gemm_lesson;
 mod layernorm;
+mod llm;
 mod mel;
 mod rmsnorm;
 mod rope;
@@ -23,6 +24,7 @@ pub use embed::{embed, embed_audio_sum, embed_f32, embed_one, embed_one_f32, emb
 pub use gemm_lesson::{GemmKind, gemm_lesson, mma_probe};
 pub use mel::{log10_max, log10_max_partials, mel_frames, mel_window, power_spectrum};
 pub use layernorm::{LayerNormKind, layernorm, layernorm_to_f16, layernorm_with};
+pub use llm::{embed_mixed, repeat_heads, rmsnorm_to_f16};
 pub use rmsnorm::{rmsnorm, rmsnorm_naive};
 pub use rope::{RopeKind, rmsnorm_rows, rmsnorm_rows_naive, rope, rope_inv_freq, rope_with};
 pub use softmax::{SoftmaxKind, softmax_rows, softmax_rows_with};

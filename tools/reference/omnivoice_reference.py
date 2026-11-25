@@ -117,7 +117,12 @@ def save_npz(path: Path, script: dict, language: str, speed: float, tokens: np.n
 
 
 def capture_taps(model, prompt, script: dict, language: str, speed: float, cfg, out_path: Path) -> None:
-    """One pass of the deterministic decode, with the layer outputs of the first step saved."""
+    """One pass of the deterministic decode, with the layer outputs of the first step saved.
+
+    Besides the hidden states, it saves the input of that pass, so the Rust side can run the
+    same ids through its own forward pass: `ids0` `[8, T]` (the conditioned row),
+    `audio_mask0` `[T]` (true where the position is audio) and `positions0` `[T]`.
+    """
     from safetensors.numpy import save_file
 
     taps: dict[str, np.ndarray] = {}
@@ -167,6 +172,42 @@ def capture_taps(model, prompt, script: dict, language: str, speed: float, cfg, 
 
     save_file(taps, str(out_path))
     print(f"  {out_path.name}: {len(taps)} tensors, embed {taps['embed'].shape}")
+
+
+def first_pass_inputs(model, prompt, script: dict, language: str, speed: float, cfg, out_path: Path) -> None:
+    """The ids, the audio mask and the positions of the first pass of the deterministic run.
+
+    They go into the same taps file, so the Rust forward pass reads exactly the input that
+    made those hidden states.
+    """
+    from safetensors.numpy import save_file
+
+    task = model._preprocess_all(
+        text=[script["text"]],
+        language=[language],
+        ref_text=[None],
+        ref_audio=[None],
+        voice_clone_prompt=[prompt],
+        instruct=[None],
+        preprocess_prompt=cfg.preprocess_prompt,
+        speed=[speed],
+        duration=[None],
+        normalize_text=False,
+    )
+    inp = model._prepare_inference_inputs(
+        task.texts[0], task.target_lens[0], task.ref_texts[0], task.ref_audio_tokens[0], task.langs[0], task.instructs[0], cfg.denoise
+    )
+    ids = inp["input_ids"][0].to("cpu").numpy().astype(np.int32)
+    mask = inp["audio_mask"][0].to("cpu").numpy().astype(np.uint8)
+    positions = np.arange(ids.shape[1], dtype=np.int32)
+    extra = {"ids0": ids, "audio_mask0": mask, "positions0": positions}
+    # Merge into the taps file that already exists.
+    from safetensors.numpy import load_file
+
+    existing = load_file(str(out_path)) if out_path.is_file() else {}
+    existing.update(extra)
+    save_file(existing, str(out_path))
+    print(f"  {out_path.name}: + ids0 {ids.shape}, audio_mask0 {mask.shape} ({int(mask.sum())} audio positions)")
 
 
 def bench(model, prompt, script: dict, language: str, speed: float, cfg, n: int, ref_audio: str, ref_text: str) -> None:
@@ -265,7 +306,9 @@ def main() -> None:
             save_npz(out / f"{script['id']}.product.npz", script, language, speed, tokens, target_len, prompt_frames(prompt), ref_text)
 
     if not args.skip_taps:
-        capture_taps(model, prompt, specs["scripts"][0], language, speed, det, out / f"{specs['scripts'][0]['id']}.taps.safetensors")
+        taps_path = out / f"{specs['scripts'][0]['id']}.taps.safetensors"
+        capture_taps(model, prompt, specs["scripts"][0], language, speed, det, taps_path)
+        first_pass_inputs(model, prompt, specs["scripts"][0], language, speed, det, taps_path)
 
     if args.bench:
         bench(model, prompt, specs["scripts"][0], language, speed, prod, args.bench, ref_audio, ref_text)

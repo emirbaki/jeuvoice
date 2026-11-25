@@ -1751,6 +1751,98 @@ pub mod device {
         unsafe { *out.add(i) = sum as f16 };
     }
 
+    /// `out[t] = Σ_c table[ids[c][t] + vocab·c]` where `mask[t] != 0`, else
+    /// `text[ids[0][t]]`: the mixed embedding of OmniVoice, where a position is either an audio
+    /// frame (the 8 codebook tables summed) or a text token.
+    ///
+    /// # Safety
+    /// `ids` is valid for `codebooks * rows` i32 values, `mask` for `rows`, `text` for `vocab`
+    /// rows of `d` values per codebook and `out` for `rows * d`. An id is inside its table.
+    #[kernel]
+    pub unsafe fn embed_mixed_f16(
+        ids: *const i32,
+        mask: *const i32,
+        text: *const f16,
+        audio: *const f16,
+        out: *mut f16,
+        rows: usize,
+        d: usize,
+        codebooks: usize,
+        vocab: usize,
+    ) {
+        let i = thread::index_1d().get() as usize;
+        if i >= rows * d {
+            return;
+        }
+        let (t, col) = (i / d, i % d);
+        // SAFETY: t < rows, so mask and ids are inside, and every id is inside its table.
+        unsafe {
+            let v = if *mask.add(t) != 0 {
+                let mut sum = 0.0f32;
+                let mut c = 0;
+                while c < codebooks {
+                    let id = *ids.add(c * rows + t) as usize;
+                    sum += *audio.add((id + vocab * c) * d + col) as f32;
+                    c += 1;
+                }
+                sum
+            } else {
+                *text.add(*ids.add(t) as usize * d + col) as f32
+            };
+            *out.add(i) = v as f16;
+        }
+    }
+
+    /// `y[i] = x[i] / sqrt(mean(x_row²) + eps) · w[col]` with `x` f32 and `y` f16: the
+    /// RMSNorm of Qwen3 on the f32 residual stream. One block of `ROW_BLOCK` threads per row.
+    ///
+    /// # Safety
+    /// `x` is valid for `rows * d` f32, `w` for `d` f32 and `y` for `rows * d` f16. `y` does
+    /// not overlap `x`. The grid has one block per row and `ROW_BLOCK` threads.
+    #[kernel]
+    pub unsafe fn rmsnorm_f32in_f16out(x: *const f32, w: *const f32, y: *mut f16, d: usize, eps: f32) {
+        let base = thread::blockIdx_x() as usize * d;
+        let tid = thread::threadIdx_x() as usize;
+        let mut sum = 0.0f32;
+        let mut c = tid;
+        while c < d {
+            // SAFETY: c < d, one block per row.
+            let v = unsafe { *x.add(base + c) };
+            sum += v * v;
+            c += ROW_BLOCK as usize;
+        }
+        let scale = 1.0 / (block_sum(sum) / d as f32 + eps).sqrt();
+        let mut c = tid;
+        while c < d {
+            // SAFETY: each (row, c) belongs to exactly one thread.
+            unsafe {
+                let v = *x.add(base + c) * scale * *w.add(c);
+                *y.add(base + c) = v as f16;
+            }
+            c += ROW_BLOCK as usize;
+        }
+    }
+
+    /// `dst[.., h] = src[.., h / g]`: one thread per output value, for the key and value heads
+    /// of the grouped-query attention (`g` query heads share one key head).
+    ///
+    /// # Safety
+    /// `src` is valid for `heads_kv * row_len` f16 values and `dst` for `n` f16 values, with
+    /// `n == heads_q * row_len` and `heads_q % heads_kv == 0`. The tensors do not overlap.
+    #[kernel]
+    pub unsafe fn repeat_heads_f16(src: *const f16, dst: *mut f16, n: usize, row_len: usize, group: usize) {
+        let i = thread::index_1d().get() as usize;
+        if i >= n {
+            return;
+        }
+        // SAFETY: the source head is h / group, which is below heads_kv, so the read is inside
+        // src; the write is inside dst.
+        unsafe {
+            let head = i / row_len;
+            *dst.add(i) = *src.add((head / group) * row_len + i % row_len);
+        }
+    }
+
     // ---- Attention (lesson 5: docs/cuda-lessons/05-attention.md) ----
 
     /// Flash attention: online softmax, K and V tiles in shared memory, no score matrix in
