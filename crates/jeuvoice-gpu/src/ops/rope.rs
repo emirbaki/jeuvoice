@@ -66,12 +66,12 @@ pub fn rope_with(gpu: &Gpu, arena: &Arena, x: &Tensor, positions: &Tensor, inv_f
             let cfg = LaunchConfig::for_num_elems(grid_elems(rows * heads * (d / 2)));
             // SAFETY: one thread per pair, rows * heads * d/2 threads, and the pair of a
             // thread is inside x. positions and inv_freq are read only.
-            unsafe { k.rope_half_f16(gpu.stream(), cfg, xs.as_mut_ptr().cast(), ps.as_ptr(), fs.as_ptr(), heads, d) }?;
+            unsafe { k.rope_half_f16(gpu.stream(), cfg, xs.as_mut_ptr().cast(), ps.as_ptr(), fs.as_ptr(), heads, d, rows * heads * (d / 2)) }?;
         }
         RopeKind::Interleaved => {
             let cfg = LaunchConfig::for_num_elems(grid_elems(rows * heads * (d / 2)));
             // SAFETY: as the half-split path.
-            unsafe { k.rope_f16(gpu.stream(), cfg, xs.as_mut_ptr().cast(), ps.as_ptr(), fs.as_ptr(), heads, d) }?;
+            unsafe { k.rope_f16(gpu.stream(), cfg, xs.as_mut_ptr().cast(), ps.as_ptr(), fs.as_ptr(), heads, d, rows * heads * (d / 2)) }?;
         }
         RopeKind::HalfSplitShared => {
             assert!(d / 2 <= 64, "rope: the shared path needs a head width of at most 128, not {d}");

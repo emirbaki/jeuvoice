@@ -14,7 +14,7 @@ use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, Tensor};
 
 use crate::config::OmniVoiceConfig;
 use crate::index::TensorIndex;
-use crate::lora::{LORA_A, merge_into, other_half, replaced_name, scale_of};
+use crate::lora::{LORA_A, Shapes, check_adapter, merge_into, other_half, replaced_name, scale_of};
 use crate::{Result, TtsError};
 
 /// The most positions one pass can hold. A render of 8.4 s uses 486; the prompt and the target
@@ -40,6 +40,9 @@ pub struct Activations {
     /// `[batches, heads_kv, t, head_dim]` f16.
     pub k: Tensor,
     pub v: Tensor,
+    /// `[codebooks·t]` f32 and i32: the guided confidence and the picked token of every pair.
+    pub conf: Tensor,
+    pub pick: Tensor,
     /// `[batches·codebooks, t]` i32: the token ids of the pass, uploaded by the forward pass.
     pub ids: Tensor,
     /// `[batches, t]` i32: 1 where the position is an audio frame, else 0.
@@ -50,8 +53,6 @@ pub struct Activations {
     pub att: Tensor,
     /// `[batches·t, q_width]` f16: the attention output in the row layout.
     pub att_row: Tensor,
-    /// `[batches·t, hidden]` f16: a projection result, the residual addend.
-    pub proj: Tensor,
     /// `[batches·t, d_mlp]` f16: the gate, then `silu(gate)·up` in place.
     pub gate: Tensor,
     /// `[batches·t, d_mlp]` f16.
@@ -89,7 +90,6 @@ impl Activations {
             v: plan.add(DType::F16, &[b, hkv, t, hd]),
             att: plan.add(DType::F16, &[b, hq, t, hd]),
             att_row: plan.add(DType::F16, &[rows, q_w]),
-            proj: plan.add(DType::F16, &[rows, d]),
             gate: plan.add(DType::F16, &[rows, mlp]),
             up: plan.add(DType::F16, &[rows, mlp]),
             logits: plan.add(DType::F32, &[rows, cfg.audio_head_rows()]),
@@ -97,6 +97,8 @@ impl Activations {
             positions_kv: plan.add(DType::I32, &[b * hkv * t]),
             inv_freq: plan.add(DType::F32, &[hd / 2]),
             scores: plan.add(DType::F16, &[b * hq, t, t]),
+            conf: plan.add(DType::F32, &[cfg.num_audio_codebook * t]),
+            pick: plan.add(DType::I32, &[cfg.num_audio_codebook * t]),
             ids: plan.add(DType::I32, &[b * cfg.num_audio_codebook, t]),
             mask: plan.add(DType::I32, &[b, t]),
             valid: plan.add(DType::I32, &[b]),
@@ -133,6 +135,14 @@ impl OmniVoiceWeights {
             Some(dir) => Some(TensorIndex::open(&dir.join("adapter_model.safetensors"))?),
             None => None,
         };
+        // The adapter must be complete before the arena is allocated: a missing pair or a
+        // wrong replacement shape is a broken download, not a quiet base run.
+        if let Some(idx) = &adapter_idx {
+            let shapes = |index: &TensorIndex| -> Shapes {
+                index.names().map(|n| (n.to_string(), index.get(n).expect("the name came from the index").shape.clone())).collect()
+            };
+            check_adapter(&shapes(&base), &shapes(idx))?;
+        }
 
         // The plan: every float tensor of the checkpoint, and the activations after them.
         let mut plan = ArenaPlan::new();

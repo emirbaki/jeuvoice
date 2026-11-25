@@ -93,7 +93,7 @@ impl Bpe {
     }
 
     /// The ids of `text`, as the engine's tokenizer gives them.
-    pub fn encode(&self, text: &str) -> Vec<i32> {
+    pub fn encode(&self, text: &str) -> Result<Vec<i32>> {
         let normalized: String = text.nfc().collect();
         let mut out = Vec::new();
         let mut start = 0usize;
@@ -101,18 +101,18 @@ impl Bpe {
             match self.find_added(&normalized[start..]) {
                 Some((at, len, id)) => {
                     if at > 0 {
-                        self.encode_plain(&normalized[start..start + at], &mut out);
+                        self.encode_plain(&normalized[start..start + at], &mut out)?;
                     }
                     out.push(id as i32);
                     start += at + len;
                 }
                 None => {
-                    self.encode_plain(&normalized[start..], &mut out);
+                    self.encode_plain(&normalized[start..], &mut out)?;
                     break;
                 }
             }
         }
-        out
+        Ok(out)
     }
 
     /// The earliest added token, with its byte offset and length. A longer token wins a tie.
@@ -133,16 +133,17 @@ impl Bpe {
     }
 
     /// The pre-split, the byte-level map and the merges of a segment without added tokens.
-    fn encode_plain(&self, text: &str, out: &mut Vec<i32>) {
+    fn encode_plain(&self, text: &str, out: &mut Vec<i32>) -> Result<()> {
         for found in self.split.find_iter(text) {
-            let Ok(m) = found else { continue };
+            let m = found.map_err(|e| TtsError::Render(format!("the pre-split of {text:?} failed: {e}")))?;
             let mapped: String = m.as_str().bytes().map(|b| self.byte_chars[b as usize]).collect();
-            self.bpe_word(&mapped, out);
+            self.bpe_word(&mapped, out)?;
         }
+        Ok(())
     }
 
     /// The merges of one pre-split word, lowest rank first, then the vocab ids.
-    fn bpe_word(&self, word: &str, out: &mut Vec<i32>) {
+    fn bpe_word(&self, word: &str, out: &mut Vec<i32>) -> Result<()> {
         let mut parts: Vec<String> = word.chars().map(|c| c.to_string()).collect();
         while parts.len() > 1 {
             let mut best: Option<(u32, usize)> = None;
@@ -159,10 +160,13 @@ impl Bpe {
             parts.splice(at..at + 2, [merged]);
         }
         for part in parts {
-            if let Some(&id) = self.vocab.get(&part) {
-                out.push(id as i32);
-            }
+            let id = self
+                .vocab
+                .get(&part)
+                .ok_or_else(|| TtsError::Render(format!("the tokenizer has no token for {part:?}")))?;
+            out.push(*id as i32);
         }
+        Ok(())
     }
 }
 
@@ -209,29 +213,38 @@ pub fn combine_text(ref_text: Option<&str>, text: &str) -> String {
     full
 }
 
+/// The engine's nonverbal tags, exactly: `_NONVERBAL_PATTERN` of `omnivoice.py:1651`. Any other
+/// bracket is ordinary text and must go through the normal tokenizer path.
+static NONVERBAL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[(laughter|sigh|confirmation-en|question-en|question-ah|question-oh|question-ei|question-yi|surprise-ah|surprise-oh|surprise-wa|surprise-yo|dissatisfaction-hnn)\]").expect("a literal pattern")
+});
+
+/// True when `text` is exactly one of the engine's nonverbal tags.
+pub fn is_nonverbal_tag(text: &str) -> bool {
+    matches!(NONVERBAL.find(text), Ok(Some(m)) if m.start() == 0 && m.end() == text.len())
+}
 /// `_tokenize_with_nonverbal_tags` (`omnivoice.py:1658`): a bracketed tag is tokenized on its
 /// own, so its ids do not depend on the language around it.
-fn tokenize_with_nonverbal(bpe: &Bpe, text: &str) -> Vec<i32> {
-    static TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[[a-z0-9-]+\]").expect("a literal pattern"));
+fn tokenize_with_nonverbal(bpe: &Bpe, text: &str) -> Result<Vec<i32>> {
     let mut out = Vec::new();
     let mut last = 0usize;
-    for found in TAG.find_iter(text) {
-        let Ok(tag) = found else { continue };
+    for found in NONVERBAL.find_iter(text) {
+        let tag = found.map_err(|e| TtsError::Render(format!("the tag split of {text:?} failed: {e}")))?;
         if tag.start() > last {
-            out.extend(bpe.encode(&text[last..tag.start()]));
+            out.extend(bpe.encode(&text[last..tag.start()])?);
         }
-        out.extend(bpe.encode(tag.as_str()));
+        out.extend(bpe.encode(tag.as_str())?);
         last = tag.end();
     }
     if last < text.len() {
-        out.extend(bpe.encode(&text[last..]));
+        out.extend(bpe.encode(&text[last..])?);
     }
-    out
+    Ok(out)
 }
 
 /// The style block of the prompt: `<|denoise|><|lang_start|>{lang}<|lang_end|>` and the
 /// instruction block. `denoise` is present only when there is a prompt to clean the audio with.
-pub fn style_ids(bpe: &Bpe, lang: Option<&str>, instruct: Option<&str>, has_prompt: bool) -> Vec<i32> {
+pub fn style_ids(bpe: &Bpe, lang: Option<&str>, instruct: Option<&str>, has_prompt: bool) -> Result<Vec<i32>> {
     let mut text = String::new();
     if has_prompt {
         text.push_str("<|denoise|>");
@@ -292,10 +305,10 @@ pub fn build_layout(
     target_len: usize,
 ) -> Result<Layout> {
     let lang = resolve_language(lang)?;
-    let style = style_ids(bpe, lang, instruct, prompt_len > 0);
+    let style = style_ids(bpe, lang, instruct, prompt_len > 0)?;
     let full = combine_text(ref_text, text);
     let wrapped = format!("<|text_start|>{full}<|text_end|>");
-    let text_ids = tokenize_with_nonverbal(bpe, &wrapped);
+    let text_ids = tokenize_with_nonverbal(bpe, &wrapped)?;
     layout_from_ids(&style, &text_ids, prompt, prompt_len, target_len, codebooks, mask_id)
 }
 

@@ -40,6 +40,8 @@ let u = *up.add(i) as f32;
 
 Ölçüm: **53,8 µs, 166 GB/s, sınırın %87'si.**
 
+Bu ölçüm tek satır (`[486, 3072]`) içindir. Üretimde bir geçiş iki satırdır (`[972, 3072]`) ve süre satır sayısıyla doğrusal artar, çünkü kernel her öğeyi bir kez işler. Karşılaştırma yaparken aynı satır sayısını kullan.
+
 Dikkat: bu, ders 1'deki `bias_gelu`'nun ilk sürümünden (%56) çok daha iyi. Fark nerede? `bias_gelu` her elemanda `i % d` hesaplıyordu (tam sayı bölme, GPU'da pahalı) ve `erf` polinomu çalıştırıyordu. Burada `%` yok (bias yok) ve `silu` sadece bir bölme ile bir `exp`.
 
 ## 4. Hızlandırma denemesi: çift okuma — kazanç yok

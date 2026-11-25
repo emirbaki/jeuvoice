@@ -57,9 +57,10 @@ fn the_weights_load_and_fit_the_plan() {
     assert_eq!(w.get("llm.layers.0.self_attn.q_proj.weight").dtype(), DType::F16, "matrices are f16");
     assert_eq!(w.get("llm.embed_tokens.weight").dtype(), DType::F16);
 
-    // The activations cover the longest sequence.
-    assert_eq!(w.act.x.shape(), &[BATCH, T_MAX, d]);
-    assert_eq!(w.act.logits.shape(), &[BATCH, T_MAX, cfg.audio_head_rows()]);
+    // The activations cover the longest sequence. The residual stream and the logits are 2-D,
+    // the layout the GEMMs use: one row per position.
+    assert_eq!(w.act.x.shape(), &[BATCH * T_MAX, d]);
+    assert_eq!(w.act.logits.shape(), &[BATCH * T_MAX, cfg.audio_head_rows()]);
     assert_eq!(w.act.inv_freq.numel(), cfg.head_dim / 2);
 
     // The arena is inside a 4 GB card, with the context and the audio tokenizer on the CPU.

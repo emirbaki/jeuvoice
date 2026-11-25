@@ -1,6 +1,6 @@
 # Rust CUDA Phase 2: handoff after Task 7 (2026-11-25)
 
-The branch is `rust-cuda-phase2`. The last commit is **`1e7dcc5`** (`feat(tts): run the OmniVoice forward pass on the GPU`). The tree is clean.
+The branch is `rust-cuda-phase2`. The last commit at the time of that handoff was `1e7dcc5`, then `651e2bb` (`feat(tts): build the OmniVoice text layout and decode the masked frames`). The audit revisions are on top of `651e2bb` and are not committed yet: see `2026-11-25-rust-cuda-phase2-audit-fixes-handoff.md`.
 
 ## 1. The state in one paragraph
 

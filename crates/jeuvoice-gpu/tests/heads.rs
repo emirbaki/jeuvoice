@@ -15,11 +15,16 @@ fn the_head_layout_matches_the_row_layout() {
     let mut plan = ArenaPlan::new();
     let flat = plan.add(DType::F16, &[rows, heads * d]);
     let heads4 = plan.add(DType::F16, &[batches, heads, t, d]);
+    // A canary directly after the destination: the launch grid is rounded up.
+    let canary = plan.add(DType::F16, &[512]);
     let back = plan.add(DType::F16, &[rows, heads * d]);
     let arena = Arena::new(&gpu, &plan).unwrap();
     arena.upload(&gpu, &flat, &src.iter().map(|&v| f16::from_f32(v)).collect::<Vec<_>>()).unwrap();
 
+    arena.upload(&gpu, &canary, &vec![f16::from_f32(7.5); 512]).unwrap();
     to_heads(&gpu, &arena, &flat, &heads4, batches, t, heads, d).unwrap();
+    let after = arena.download::<f16>(&gpu, &canary).unwrap();
+    assert!(after.iter().all(|v| v.to_f32() == 7.5), "to_heads wrote past the end of dst");
     let got: Vec<f32> = arena.download::<f16>(&gpu, &heads4).unwrap().iter().map(|v| v.to_f32()).collect();
     for b in 0..batches {
         for h in 0..heads {

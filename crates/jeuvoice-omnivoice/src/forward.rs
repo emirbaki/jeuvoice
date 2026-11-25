@@ -7,7 +7,7 @@
 
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
-    BidirScratch, RopeKind, add_into_f32, attention_bidir, embed_mixed, f16_to_f32, from_heads, rmsnorm_rows, rmsnorm_to_f16, rope_with, swiglu, to_heads,
+    BidirScratch, RopeKind, attention_bidir, embed_mixed, f16_to_f32, from_heads, rmsnorm_rows, rmsnorm_to_f16, rope_with, swiglu, to_heads,
 };
 use jeuvoice_gpu::{Arena, Gpu, Tensor};
 
@@ -30,6 +30,10 @@ pub fn forward(
     rows: usize,
     t: usize,
     valid: Option<&[i32]>,
+    // When set, the final norm and the audio head process only this block of rows (the start
+    // row and the count), and the logits are written compactly from row zero. The decode uses
+    // it for the target frames of both rows; the tap path passes `None`.
+    head: Option<(usize, usize)>,
     taps: &mut dyn FnMut(&str, &Arena, &Tensor),
 ) -> Result<()> {
     let ar = &w.arena;
@@ -52,15 +56,13 @@ pub fn forward(
     // The ids, the mask and the lengths live in this arena, so the caller may keep its own
     // copies anywhere.
     let codebooks = cfg.num_audio_codebook;
-    if ids.len() != rows * codebooks * t || audio_mask.len() != rows * t {
-        return Err(TtsError::Render(format!(
-            "the pass needs {} ids and {} mask values, not {} and {}",
-            rows * codebooks * t,
-            rows * t,
-            ids.len(),
-            audio_mask.len()
-        )));
-    }
+    // The ids index the embedding tables, so they are checked before any upload.
+    let limits = crate::inputs::Limits {
+        codebooks,
+        vocab: cfg.vocab_size,
+        audio_vocab: cfg.audio_vocab_size,
+    };
+    crate::inputs::check(ids, audio_mask, rows, t, limits, valid)?;
     // The tensors are planned for the longest pass, so the slices are prefixes of them.
     let ids_all = a.ids.prefix_as(&[rows * codebooks, t]);
     let q_all = a.q.prefix_as(&[rows, hq, t, hd]);
@@ -132,30 +134,38 @@ pub fn forward(
         rope_with(gpu, ar, &q_flat, &pos_all, &a.inv_freq, RopeKind::HalfSplit)?;
         rope_with(gpu, ar, &k_flat, &pos_kv_all, &a.inv_freq, RopeKind::HalfSplit)?;
 
-        // 4. The attention, then back to the row layout and the output projection.
+        // 4. The attention, then back to the row layout and the output projection. The
+        //    projection accumulates into the f32 residual stream, so there is no f16 round
+        //    trip and no second pass over the row.
         let valid_t = a.valid.rows_unaligned(0, rows);
         let scratch = BidirScratch { kx: scratch_all.kx, vx: scratch_all.vx, scores: scratch_all.scores };
         attention_bidir(gpu, ar, blas, &q_all, &k_all, &v_all, &att_all, scratch, if padded { Some(&valid_t) } else { None })?;
         from_heads(gpu, ar, &att_all, &a.att_row.rows(0, n), rows, t, hq, hd)?;
-        gemm(gpu, blas, ar, &a.att_row.rows(0, n), w.get(&format!("{p}.self_attn.o_proj.weight")), &a.proj.rows(0, n), d)?;
-        add_into_f32(gpu, ar, &a.x.rows(0, n), &a.proj.rows(0, n))?;
+        accumulate(gpu, blas, ar, &a.att_row.rows(0, n), w.get(&format!("{p}.self_attn.o_proj.weight")), &a.x.rows(0, n), d)?;
 
         // 5. post_attention_layernorm and the SwiGLU MLP.
         rmsnorm_to_f16(gpu, ar, &a.x.rows(0, n), w.get(&format!("{p}.post_attention_layernorm.weight")), &a.h.rows(0, n), eps)?;
         gemm(gpu, blas, ar, &a.h.rows(0, n), w.get(&format!("{p}.mlp.gate_proj.weight")), &a.gate.rows(0, n), mlp)?;
         gemm(gpu, blas, ar, &a.h.rows(0, n), w.get(&format!("{p}.mlp.up_proj.weight")), &a.up.rows(0, n), mlp)?;
         swiglu(gpu, ar, &a.gate.rows(0, n), &a.up.rows(0, n), &a.gate.rows(0, n))?;
-        gemm(gpu, blas, ar, &a.gate.rows(0, n), w.get(&format!("{p}.mlp.down_proj.weight")), &a.proj.rows(0, n), d)?;
-        add_into_f32(gpu, ar, &a.x.rows(0, n), &a.proj.rows(0, n))?;
+        accumulate(gpu, blas, ar, &a.gate.rows(0, n), w.get(&format!("{p}.mlp.down_proj.weight")), &a.x.rows(0, n), d)?;
 
         taps(&format!("hidden_{layer:02}"), ar, &a.x.rows(0, n));
     }
 
-    // 6. The final norm and the audio head.
-    rmsnorm_to_f16(gpu, ar, &a.x.rows(0, n), w.get("llm.norm.weight"), &a.h.rows(0, n), eps)?;
-    taps("post_norm", ar, &a.h.rows(0, n));
-    let (hs, wh, ls) = (ar.slice(&a.h.rows(0, n)), ar.slice(w.get("audio_heads.weight")), ar.slice(&a.logits.rows(0, n)));
-    blas.gemm_f16_f32out(gpu, &hs, Op::N, &wh, Op::T, &ls, n, cfg.audio_head_rows(), d, 1.0, 0.0)?;
+    // 6. The final norm and the audio head, over the whole pass or over one block of rows.
+    let (head_start, head_rows) = head.unwrap_or((0, n));
+    if head_start + head_rows > n || head_rows == 0 {
+        return Err(TtsError::Render(format!(
+            "the head block {head_start}..{} is outside the {n} rows of the pass",
+            head_start + head_rows
+        )));
+    }
+    let hidden = a.x.rows(head_start, head_rows);
+    rmsnorm_to_f16(gpu, ar, &hidden, w.get("llm.norm.weight"), &a.h.rows(0, head_rows), eps)?;
+    taps("post_norm", ar, &a.h.rows(0, head_rows));
+    let (hs, wh, ls) = (ar.slice(&a.h.rows(0, head_rows)), ar.slice(w.get("audio_heads.weight")), ar.slice(&a.logits.rows(0, head_rows)));
+    blas.gemm_f16_f32out(gpu, &hs, Op::N, &wh, Op::T, &ls, head_rows, cfg.audio_head_rows(), d, 1.0, 0.0)?;
     Ok(())
 }
 
@@ -164,6 +174,15 @@ fn gemm(gpu: &Gpu, blas: &Blas, ar: &Arena, x: &Tensor, w: &Tensor, y: &Tensor, 
     let rows = x.shape()[0];
     let n_in = x.shape()[1];
     blas.gemm_f16(gpu, &ar.slice(x), Op::N, &ar.slice(w), Op::T, &ar.slice(y), rows, n_out, n_in, 1.0, 0.0)?;
+    Ok(())
+}
+
+/// `x [rows, n_in] += x [rows, n_in] · Wᵀ` in f32: a projection accumulated into the residual
+/// stream, with `W` stored `[n_out, n_in]` (`n_out == n_in` here).
+fn accumulate(gpu: &Gpu, blas: &Blas, ar: &Arena, x: &Tensor, w: &Tensor, residual: &Tensor, n_out: usize) -> Result<()> {
+    let rows = x.shape()[0];
+    let n_in = x.shape()[1];
+    blas.gemm_f16_f32out(gpu, &ar.slice(x), Op::N, &ar.slice(w), Op::T, &ar.slice(residual), rows, n_out, n_in, 1.0, 1.0)?;
     Ok(())
 }
 

@@ -39,7 +39,7 @@ Checked in `engine/.venv/Lib/site-packages/omnivoice/models/omnivoice.py` (line 
 - Every step runs **one full forward pass over the whole sequence**; there is **no KV cache between steps** (all positions change). Cost per step is one 28-layer pass over `T ≈ 100 + prompt frames + target frames`.
 - The attention is **bidirectional**: `batch_attention_mask[i, :, :c_len, :c_len] = True` (`omnivoice.py:1339`). Padding positions get a diagonal-only mask (`:1345-1347`). This is not a causal LM pass.
 - Batch is `2 · B` rows: conditioned rows `0..B` and unconditioned rows `B..2B`. The unconditioned row is only the last `target_len` tokens, without the style, text and prompt (`:1342-1344`).
-- `num_step` **32** (the app's preset, `preset.rs:148`), mask schedule `linspace(0, 1, num_step + 1)` shifted by `t_shift = 0.1` (`t / (0.1 + 0.9 t)`), `k = ceil(masked_total · (t[k+1] - t[k]))` positions decoded per step, the last step takes the remainder (`:1356-1378`, `_get_time_steps:1639-1648`).
+- `num_step` **32** (the app's preset, `preset.rs:148`), mask schedule `linspace(0, 1, num_step + 1)` shifted by `t_shift = 0.1` (`0.1 t / (1 - 0.9 t)`), `k = ceil(masked_total · (t[k+1] - t[k]))` positions decoded per step, the last step takes the remainder (`:1356-1378`, `_get_time_steps:1639-1648`).
 - Position priority at a step: `score = max log prob - 5.0 · layer_id`, plus Gumbel noise scaled by `position_temperature = 5.0`, where `layer_id = id / 1025` (`:1407-1415`).
 - Guidance (the app's 2.5): `lp_c = log_softmax(cond)`, `lp_u = log_softmax(uncond)`, `logits = lp_c + g · (lp_c - lp_u)`, then `log_softmax`; the mask id gets `-inf` (`:1429-1452`).
 - Sampling: `variety = 0` means argmax. Above 0: top-k with `k = ceil(0.1 · 1025) = 103`, then Gumbel (`:1624-1636`).
@@ -96,7 +96,7 @@ Decided with the user before Task 1. The numbers below are the starting proposal
 **Files:** `crates/jeuvoice-omnivoice/{Cargo.toml,src/lib.rs,src/config.rs,src/weights.rs}`, `crates/jeuvoice-omnivoice/tests/config.rs`, workspace `Cargo.toml`.
 
 **Interfaces:**
-- `OmniVoiceConfig` from `config.json`: the 11 LLM fields of "The OmniVoice facts", `num_audio_codebook = 8`, `audio_mask_id = 1024`, `audio_vocab_size = 8200`, the special ids, `guidance_scale`, `num_step`, `t_shift`, `position_temperature`.
+- `OmniVoiceConfig` from `config.json`: the 11 LLM fields of "The OmniVoice facts", `num_audio_codebook = 8`, `audio_mask_id = 1024`, `audio_vocab_size = 1025` (the head is 8200 = 8 x 1025), the special ids, `guidance_scale`, `num_step`, `t_shift`, `position_temperature`.
 - `tensor_index(path) -> Vec<(name, dtype, shape, offset)>` over `model.safetensors` and the adapter file.
 - A check for the model variant, as `check_large_v3_turbo` does for Whisper: 28 layers, hidden 1024, 8 codebooks, vocab 151676, or a plain `ModelLoad` error.
 

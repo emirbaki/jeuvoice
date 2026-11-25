@@ -4,7 +4,7 @@
 use cuda_core::LaunchConfig;
 use half::f16;
 
-use super::{grid_elems, llm::repeat_heads, softmax_rows};
+use super::{grid_elems, softmax_rows};
 use crate::blas::{Blas, Op};
 use crate::kernels::{FLASH_BR, FLASH_D, FTC_ROWS, FTC_THREADS};
 use crate::{Arena, DType, Gpu, GpuError, Tensor};
@@ -162,32 +162,34 @@ pub fn attention_bidir(
     if b == 0 || t_len == 0 || d == 0 {
         return Ok(());
     }
-    // 1. The key and value heads of a group are the same, so expand them once.
-    repeat_heads(gpu, arena, k, scratch.kx)?;
-    repeat_heads(gpu, arena, v, scratch.vx)?;
-    // 2. The scores, a batched product over every batch and head.
-    let (qs, kxs, ss, vxs, os) = (
+    // 1. The query heads of one key head are adjacent, so one GEMM can process the whole group.
+    let (qs, ks, vs, ss, os) = (
         arena.slice::<f16>(q),
-        arena.slice::<f16>(scratch.kx),
+        arena.slice::<f16>(k),
+        arena.slice::<f16>(v),
         arena.slice::<f16>(scratch.scores),
-        arena.slice::<f16>(scratch.vx),
         arena.slice::<f16>(out),
     );
-    let batch = b * hq;
+    let kv_batch = b * h_kv;
+    let score_batch = b * hq;
+    let group = hq / h_kv;
+    let q_rows = group * t_len;
     let row_d = t_len * d;
-    blas.gemm_f16_batched(gpu, &qs, Op::N, row_d, &kxs, Op::T, row_d, &ss, t_len * t_len, t_len, t_len, d, batch, 1.0, 0.0)?;
+    // 2. The scores, a batched product over every batch and key head.
+    blas.gemm_f16_batched(gpu, &qs, Op::N, q_rows * d, &ks, Op::T, row_d, &ss, q_rows * t_len, q_rows, t_len, d, kv_batch, 1.0, 0.0)?;
     // 3. The padding mask of the batch rows, when the caller has shorter rows.
     if let Some(mask) = valid {
         // The valid lengths may start off the 256-byte alignment: scalar reads only.
         let ms = arena.slice_unaligned::<i32>(mask);
-        let cfg = LaunchConfig::for_num_elems(grid_elems(batch * t_len * t_len));
+        // The mask covers every query-head score plane, not only one plane per key head.
+        let cfg = LaunchConfig::for_num_elems(grid_elems(score_batch * t_len * t_len));
         // SAFETY: one thread per score value, and the mask has one value per batch.
         unsafe { gpu.kernels()?.attn_pad_mask_f16(gpu.stream(), cfg, ss.as_mut_ptr().cast(), ms.as_ptr(), t_len, hq, b) }?;
     }
     // 4. The softmax over the keys, with the scale of the head width.
     softmax_rows(gpu, arena, scratch.scores, 1.0 / (d as f32).sqrt(), None)?;
     // 5. The weighted sum of the values.
-    blas.gemm_f16_batched(gpu, &ss, Op::N, t_len * t_len, &vxs, Op::N, row_d, &os, row_d, t_len, d, t_len, batch, 1.0, 0.0)?;
+    blas.gemm_f16_batched(gpu, &ss, Op::N, q_rows * t_len, &vs, Op::N, row_d, &os, q_rows * d, q_rows, d, t_len, kv_batch, 1.0, 0.0)?;
     Ok(())
 }
 

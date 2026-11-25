@@ -11,6 +11,7 @@ use jeuvoice_gpu::blas::Blas;
 use jeuvoice_gpu::Gpu;
 use jeuvoice_omnivoice::config::{OmniVoiceConfig, default_cache_root, model_dir};
 use jeuvoice_omnivoice::decode::{Params, decode};
+use jeuvoice_omnivoice::duration::estimate_frames;
 use jeuvoice_omnivoice::paths::{adapter_dir, data_models_dir};
 use jeuvoice_omnivoice::text::{Bpe, build_layout};
 use jeuvoice_omnivoice::weights::OmniVoiceWeights;
@@ -98,15 +99,60 @@ fn tokens_match_the_deterministic_reference() {
         // order of the positions diverges with any change of arithmetic. The engine
         // itself keeps only 20% of its tokens between fp16 and f32. Our share must be
         // in the same family: a token comparison cannot be exact across kernels.
+        if ours_f32 + 0.05 < engine {
+            failures.push(format!(
+                "{id}: we keep only {:.1}% of the f32 tokens, the engine keeps {:.1}% of its own",
+                ours_f32 * 100.0,
+                engine * 100.0
+            ));
+        }
         if ours_fp16 + 0.05 < engine {
             failures.push(format!("{id}: we keep {:.1}% of the fp16 tokens, the engine keeps {:.1}% of its own", ours_fp16 * 100.0, engine * 100.0));
         }
         if id == "s1" {
             // The deterministic mode must give the same tokens on a second run.
+            let warm_started = Instant::now();
             let again = decode(&w, &cfg, &gpu, &blas, &layout, prompt_len, target_len, &params, &mut |_, _| {}).unwrap();
+            eprintln!("s1: a warm decode took {:.2} s", warm_started.elapsed().as_secs_f64());
             assert_eq!(again.ids, tokens.ids, "s1: the decode is not deterministic");
             eprintln!("s1: a second run gave the same tokens");
         }
     }
     assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// Topic 10: the product mode keeps the frame count, is repeatable for one seed, and only
+/// ever emits a real token id. A token comparison with the engine is not possible (W1).
+#[test]
+#[ignore = "needs the GPU, the OmniVoice checkpoint, the adapter and the tokenizer"]
+fn the_product_mode_keeps_the_frame_count() {
+    use jeuvoice_omnivoice::decode::Mode;
+    let gpu = Gpu::open(0).unwrap();
+    let blas = Blas::load(&gpu).unwrap();
+    let dir = model_dir(&default_cache_root(), std::env::var("JEUVOICE_OMNIVOICE_MODEL").ok().as_deref()).unwrap();
+    let cfg = OmniVoiceConfig::from_file(&dir.join("config.json")).unwrap();
+    let appdata = std::env::var("APPDATA").ok();
+    let models = data_models_dir(None, appdata.as_deref()).unwrap();
+    let w = OmniVoiceWeights::load(&gpu, &dir, adapter_dir(&models).as_deref(), &cfg).unwrap();
+    let bpe = Bpe::load(&dir.join("tokenizer.json")).unwrap();
+    let v = vectors();
+    let script = &v["scripts"][0];
+    let ref_text = v["ref_text"].as_str().unwrap();
+    let lang = v["language"].as_str().unwrap();
+    let prompt_len = script["prompt_len"].as_u64().unwrap() as usize;
+    let target_len = script["target_len"].as_u64().unwrap() as usize;
+    let prompt = ints_2d(&script["prompt_ids"]);
+    let layout = build_layout(&bpe, cfg.num_audio_codebook, cfg.audio_mask_id as i32, script["text"].as_str().unwrap(), Some(ref_text), Some(lang), None, &prompt, prompt_len, target_len).unwrap();
+    let base = Params { num_step: 32, guidance: 2.5, t_shift: 0.1, layer_penalty: 5.0, ..Params::default() };
+    let det = decode(&w, &cfg, &gpu, &blas, &layout, prompt_len, target_len, &base, &mut |_, _| {}).unwrap();
+    let product = Params { mode: Mode::Product, position_temperature: 5.0, class_temperature: 0.5, seed: 42, ..base };
+    let a = decode(&w, &cfg, &gpu, &blas, &layout, prompt_len, target_len, &product, &mut |_, _| {}).unwrap();
+    let b = decode(&w, &cfg, &gpu, &blas, &layout, prompt_len, target_len, &product, &mut |_, _| {}).unwrap();
+    let frames = estimate_frames(script["text"].as_str().unwrap(), Some(ref_text), Some(prompt_len), v["speed"].as_f64().unwrap() as f32);
+    assert_eq!(frames, target_len, "the estimate must match the engine's product frame count");
+    assert_eq!(a.len, frames, "the product run must keep the estimated frame count");
+    assert_eq!(a.ids, b.ids, "the same seed must give the same tokens");
+    assert!(a.ids.iter().all(|&t| t >= 0 && (t as usize) < cfg.audio_vocab_size), "a token is outside the vocabulary");
+    let same = a.ids.iter().zip(&det.ids).filter(|(x, y)| x == y).count();
+    eprintln!("product: {} frames, {} of {} tokens equal the deterministic run ({:.1}%)", a.len, same, det.ids.len(), same as f64 / det.ids.len() as f64 * 100.0);
 }

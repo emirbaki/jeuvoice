@@ -63,13 +63,16 @@ fn the_hidden_states_match_the_reference() {
     let ids2: Vec<i32> = ids_host.repeat(2);
     let mask2: Vec<i32> = mask_host.repeat(2);
     for i in 0..6 {
+        gpu.stream().synchronize().unwrap();
         let started = std::time::Instant::now();
-        forward(&w, &cfg, &gpu, &blas, &ids2, &mask2, 2, t, None, &mut |_, _, _| {}).unwrap();
-        eprintln!("pass {i}: {:.2} ms, 2 rows of {t} positions", started.elapsed().as_secs_f64() * 1e3);
+        forward(&w, &cfg, &gpu, &blas, &ids2, &mask2, 2, t, None, None, &mut |_, _, _| {}).unwrap();
+        gpu.stream().synchronize().unwrap();
+        let label = if i == 0 { "cold" } else { "warm" };
+        eprintln!("pass {i} ({label}): {:.2} ms of GPU work, 2 rows of {t} positions", started.elapsed().as_secs_f64() * 1e3);
     }
     // The two rows of that pass, kept for the batch-independence check below.
     let logits_two: Vec<f32> = w.arena.download::<f32>(&gpu, &w.act.logits.prefix_as(&[2 * t, cfg.audio_head_rows()])).unwrap();
-    forward(&w, &cfg, &gpu, &blas, &ids_host, &mask_host, rows, t, None, &mut |name: &str, ar: &Arena, ten: &Tensor| {
+    forward(&w, &cfg, &gpu, &blas, &ids_host, &mask_host, rows, t, None, None, &mut |name: &str, ar: &Arena, ten: &Tensor| {
         let v: Vec<f32> = if ten.dtype() == DType::F32 {
             ar.download::<f32>(&gpu, ten).unwrap()
         } else {
@@ -125,10 +128,8 @@ fn the_hidden_states_match_the_reference() {
     // not be twice as far from the exact model either.
     let mut failures = Vec::new();
     for (name, ours) in &got {
-        let (Some(want), Some(want32)) = (taps.get(name), taps32.get(name)) else {
-            eprintln!("{name}: no reference");
-            continue;
-        };
+        let want = taps.get(name).unwrap_or_else(|| panic!("{name}: the fixture has no such tap"));
+        let want32 = taps32.get(name).unwrap_or_else(|| panic!("{name}: the f32 fixture has no such tap"));
         assert_eq!(ours.len(), want.len(), "{name}: {} vs {} values", ours.len(), want.len());
         assert_eq!(ours.len(), want32.len(), "{name}: {} vs {} values", ours.len(), want32.len());
         assert!(ours.iter().all(|v| v.is_finite()), "{name}: inf or NaN");
@@ -143,6 +144,14 @@ fn the_hidden_states_match_the_reference() {
         }
     }
     assert!(failures.is_empty(), "these taps are further from the f32 model than twice the fp16 run: {failures:?}");
+
+    // Every tap of the pass is tested: a new tap or a lost one must not pass silently.
+    let mut names: Vec<String> = got.iter().map(|(n, _)| n.clone()).collect();
+    names.sort_unstable();
+    let mut wanted: Vec<String> = vec!["embed".into(), "post_norm".into()];
+    wanted.extend((0..cfg.num_hidden_layers).map(|layer| format!("hidden_{layer:02}")));
+    wanted.sort_unstable();
+    assert_eq!(names, wanted, "the pass must tap every block and the final norm");
 }
 
 /// The two-row pass of a decode step: the conditioned row is the layout, the unconditioned
@@ -178,9 +187,21 @@ fn both_rows_match_the_reference() {
         }
     }
     mask[t..t + target].fill(1);
-    forward(&w, &cfg, &gpu, &blas, &ids, &mask, 2, t, Some(&[t as i32, target as i32]), &mut |_, _, _| {}).unwrap();
+    forward(&w, &cfg, &gpu, &blas, &ids, &mask, 2, t, Some(&[t as i32, target as i32]), None, &mut |_, _, _| {}).unwrap();
 
     let logits: Vec<f32> = w.arena.download::<f32>(&gpu, &w.act.logits.prefix_as(&[2 * t, width])).unwrap();
+    // The compact head block must give the same values as the full one.
+    let block = (t - target, 2 * target);
+    forward(&w, &cfg, &gpu, &blas, &ids, &mask, 2, t, Some(&[t as i32, target as i32]), Some(block), &mut |_, _, _| {}).unwrap();
+    let compact: Vec<f32> = w.arena.download::<f32>(&gpu, &w.act.logits.prefix_as(&[2 * target, width])).unwrap();
+    let mut worst = 0.0f32;
+    for row in 0..2 * target {
+        for col in 0..width {
+            worst = worst.max((compact[row * width + col] - logits[(t - target + row) * width + col]).abs());
+        }
+    }
+    eprintln!("compact vs full: max_abs {worst:.5}");
+    assert!(worst < 1e-3, "the compact head block differs from the full head: {worst}");
     for (name, start, tap) in [("cond", t - target, "cond_logits_00"), ("uncond", t, "uncond_logits_00")] {
         let want = &taps32[tap];
         let mut agree = 0usize;
@@ -202,5 +223,98 @@ fn both_rows_match_the_reference() {
         let total = codebooks * target;
         eprintln!("{name}: argmax {agree}/{total} ({:.1}%), max_abs {max:.4}", agree as f64 / total as f64 * 100.0);
         assert!(agree as f64 / total as f64 >= 0.98, "{name}: the argmax agrees on {:.1}%", agree as f64 / total as f64 * 100.0);
+        // A direct bound on the values, not only on the argmax: measured 0.059 and 0.041.
+        assert!(max < 0.1, "{name}: the logits are {max:.3} away from the f32 reference");
     }
+}
+
+/// Experiment A of E1: is a ragged step (one 486 pass and one 214 pass) faster than the
+/// packed 972-row pass? The values must agree first, then the clock decides.
+#[test]
+#[ignore = "needs the GPU, the OmniVoice checkpoint, the adapter and the s1 taps fixture"]
+fn the_ragged_step_is_worth_it() {
+    if std::env::var("JEUVOICE_RAGGED_EXPERIMENT").ok().as_deref() != Some("1") {
+        eprintln!("the ragged experiment is opt-in: set JEUVOICE_RAGGED_EXPERIMENT=1");
+        return;
+    }
+    let gpu = Gpu::open(0).unwrap();
+    let blas = Blas::load(&gpu).unwrap();
+    let dir = model_dir(&default_cache_root(), std::env::var("JEUVOICE_OMNIVOICE_MODEL").ok().as_deref()).unwrap();
+    let cfg = OmniVoiceConfig::from_file(&dir.join("config.json")).unwrap();
+    let appdata = std::env::var("APPDATA").ok();
+    let models = data_models_dir(None, appdata.as_deref()).unwrap();
+    let w = OmniVoiceWeights::load(&gpu, &dir, adapter_dir(&models).as_deref(), &cfg).unwrap();
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/reference/omnivoice");
+    let taps = reference(base.join("s1.taps.safetensors").to_str().unwrap());
+    let (t, target) = (taps["ids0"].len() / 8, 214usize);
+    let ids0: Vec<i32> = taps["ids0"].iter().map(|&v| v as i32).collect();
+    let mask0: Vec<i32> = taps["audio_mask0"].iter().map(|&v| v as i32).collect();
+    let codebooks = 8usize;
+    let width = cfg.audio_head_rows();
+
+    // The packed step: the conditioned layout and the target frames of the unconditioned row.
+    let mut packed_ids = vec![cfg.audio_mask_id as i32; 2 * codebooks * t];
+    let mut packed_mask = vec![0i32; 2 * t];
+    packed_ids[..codebooks * t].copy_from_slice(&ids0);
+    packed_mask[..t].copy_from_slice(&mask0);
+    let mut uncond_ids = vec![0i32; codebooks * target];
+    let mut uncond_mask = vec![1i32; target];
+    for c in 0..codebooks {
+        for p in 0..target {
+            uncond_ids[c * target + p] = ids0[c * t + t - target + p];
+            packed_ids[(codebooks + c) * t + p] = uncond_ids[c * target + p];
+        }
+    }
+    packed_mask[t..t + target].fill(1);
+
+    let time = |gpu: &Gpu, runs: usize, mut f: Box<dyn FnMut()>| -> f64 {
+        let mut best = f64::INFINITY;
+        for _ in 0..runs {
+            gpu.stream().synchronize().unwrap();
+            let started = std::time::Instant::now();
+            f();
+            gpu.stream().synchronize().unwrap();
+            best = best.min(started.elapsed().as_secs_f64() * 1e3);
+        }
+        best
+    };
+
+    let packed_ms = time(&gpu, 3, Box::new(|| {
+        forward(&w, &cfg, &gpu, &blas, &packed_ids, &packed_mask, 2, t, Some(&[t as i32, target as i32]), None, &mut |_, _, _| {}).unwrap();
+    }));
+    let packed: Vec<f32> = w.arena.download::<f32>(&gpu, &w.act.logits.prefix_as(&[2 * t, width])).unwrap();
+
+    let ragged_ms = time(&gpu, 3, Box::new(|| {
+        forward(&w, &cfg, &gpu, &blas, &ids0, &mask0, 1, t, None, None, &mut |_, _, _| {}).unwrap();
+        forward(&w, &cfg, &gpu, &blas, &uncond_ids, &uncond_mask, 1, target, None, None, &mut |_, _, _| {}).unwrap();
+    }));
+    let uncond: Vec<f32> = w.arena.download::<f32>(&gpu, &w.act.logits.prefix_as(&[target, width])).unwrap();
+    forward(&w, &cfg, &gpu, &blas, &ids0, &mask0, 1, t, None, None, &mut |_, _, _| {}).unwrap();
+    let cond: Vec<f32> = w.arena.download::<f32>(&gpu, &w.act.logits.prefix_as(&[t, width])).unwrap();
+
+    // The values: the two approaches must agree within the f16 GEMM noise.
+    let mut agree = 0usize;
+    let mut total = 0usize;
+    let mut worst = 0.0f32;
+    for (ours, packed_row0, rows) in [(&cond, t - target, target), (&uncond, t, target)] {
+        for p in 0..rows {
+            for c in 0..codebooks {
+                let vocab = cfg.audio_vocab_size;
+                let a = &ours[p * width + c * vocab..][..vocab];
+                let b = &packed[(packed_row0 + p) * width + c * vocab..][..vocab];
+                if a.iter().enumerate().max_by(|x, y| x.1.total_cmp(y.1)).unwrap().0
+                    == b.iter().enumerate().max_by(|x, y| x.1.total_cmp(y.1)).unwrap().0
+                {
+                    agree += 1;
+                }
+                total += 1;
+                for (x, y) in a.iter().zip(b) {
+                    worst = worst.max((x - y).abs());
+                }
+            }
+        }
+    }
+    eprintln!("packed {packed_ms:.1} ms, ragged {ragged_ms:.1} ms ({:+.1} ms)", ragged_ms - packed_ms);
+    eprintln!("ragged vs packed: argmax {agree}/{total} ({:.1}%), max_abs {worst:.4}", agree as f64 / total as f64 * 100.0);
+    assert!(agree as f64 / total as f64 >= 0.98, "the ragged step does not agree with the packed one");
 }

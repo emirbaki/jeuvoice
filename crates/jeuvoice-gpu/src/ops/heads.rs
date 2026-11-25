@@ -23,7 +23,7 @@ pub fn to_heads(gpu: &Gpu, arena: &Arena, src: &Tensor, dst: &Tensor, batches: u
     let n = src.numel();
     // SAFETY: one thread per value; the kernel walks (batch, head, position, column) inside
     // the two tensors of the same size.
-    unsafe { gpu.kernels()?.to_heads_f16(gpu.stream(), LaunchConfig::for_num_elems(grid_elems(n)), ss.as_ptr().cast(), ds.as_mut_ptr().cast(), t, heads, d) }?;
+    unsafe { gpu.kernels()?.to_heads_f16(gpu.stream(), LaunchConfig::for_num_elems(grid_elems(n)), ss.as_ptr().cast(), ds.as_mut_ptr().cast(), t, heads, d, n) }?;
     Ok(())
 }
 
@@ -33,6 +33,6 @@ pub fn from_heads(gpu: &Gpu, arena: &Arena, src: &Tensor, dst: &Tensor, batches:
     let (ss, ds) = (arena.slice::<f16>(src), arena.slice::<f16>(dst));
     let n = src.numel();
     // SAFETY: as `to_heads`, with the two pointers swapped.
-    unsafe { gpu.kernels()?.from_heads_f16(gpu.stream(), LaunchConfig::for_num_elems(grid_elems(n)), ss.as_ptr().cast(), ds.as_mut_ptr().cast(), t, heads, d) }?;
+    unsafe { gpu.kernels()?.from_heads_f16(gpu.stream(), LaunchConfig::for_num_elems(grid_elems(n)), ss.as_ptr().cast(), ds.as_mut_ptr().cast(), t, heads, d, n) }?;
     Ok(())
 }

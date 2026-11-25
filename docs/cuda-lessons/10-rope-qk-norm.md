@@ -73,6 +73,8 @@ while h < heads { /* çifti döndür */ h += 1; }
 
 Ölçüm: **98,9 µs, 165,6 GB/s, %86.** Kazanç 1,19 kat.
 
+Bu ölçüm **token-major** girdi içindir: satır bir konumdur ve o konumun 16 kafası satırın içindedir, yani 16 kafa aynı `sin/cos` çiftini paylaşır. Girdi kafa-major ise (kernela `heads = 1` görünür) paylaşım olmaz ve kazanç kaybolur.
+
 Neden bu kadar az? Çünkü kernel **bellek sınırlı**. 2M çiftde tetik hesabı 32k'ya indi, ama süre yalnızca %16 düştü: `sinf`/`cosf` PTX'te birkaç komut (`sin.approx.f32` benzeri), ve bellek gecikmesi zaten baskın. Bu, "hesabı azaltmak her zaman hız demek değildir" kuralının bir örneği daha. Yine de bu değişiklik kalıyor: küçük tensörlerde (L2'de kalan) fark büyür.
 
 Bitişik düzenin paylaşımlı sürümü aynı kodla 109,0 µs (%78) ölçüldü: düzen yalnızca indekstir, hızı değiştirmez. Fark **doğrulukta**.

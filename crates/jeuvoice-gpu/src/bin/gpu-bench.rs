@@ -33,7 +33,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (m, n, k) in [(1500, 1280, 1280), (1500, 5120, 1280), (4096, 1024, 1024)] {
         let name = "gemm_f16".to_string();
         if name.contains(&filter) {
-            rows.push(bench_gemm(&gpu, m, n, k)?);
+            rows.push(bench_gemm(&gpu, "gemm_f16", m, n, k)?);
+        }
+    }
+
+    // The production shapes of one OmniVoice pass: 2 rows of 486 positions (972 rows).
+    for (name, m, n, k) in [
+        ("gemm_q", 972usize, 2048usize, 1024usize),
+        ("gemm_kv", 972, 1024, 1024),
+        ("gemm_o", 972, 1024, 2048),
+        ("gemm_gate_up", 972, 3072, 1024),
+        ("gemm_down", 972, 1024, 3072),
+        ("gemm_head_f32out", 972, 8200, 1024),
+    ] {
+        if name.contains(&filter) {
+            rows.push(if name.ends_with("f32out") {
+                bench_gemm_f32out(&gpu, name, m, n, k)?
+            } else {
+                bench_gemm(&gpu, name, m, n, k)?
+            });
         }
     }
 
@@ -41,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // step: it reads the whole 133 MB table, so it shows the memory limit of a step.
     if "gemm_f16_f32out".contains(&filter) {
         for m in [1, 7] {
-            rows.push(bench_gemm_f32out(&gpu, m, 51866, 1280)?);
+            rows.push(bench_gemm_f32out(&gpu, "gemm_f16_f32out", m, 51866, 1280)?);
         }
     }
 
@@ -156,12 +174,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     // The bidirectional GQA attention of one OmniVoice pass: 2 rows, 16 heads of 128, 486 positions.
-    for (name, heads) in [("attention_bidir_f16", 16usize)] {
+    for (name, valid) in [
+        ("attention_bidir_f16", None),
+        ("attention_bidir_padded_f16", Some([486i32, 214i32])),
+    ] {
         if name.contains(&filter) {
-            rows.push(bench_attention_bidir(&gpu, name, heads, 486, 128)?);
+            rows.push(bench_attention_bidir(&gpu, name, 16, 486, 128, valid)?);
         }
     }
-    // The 8-codebook audio embedding of one pass: [8, 486] ids into [8200, 1024].
+    // The guided peak of one decode step: 428 positions of 8 codebooks of 1025 tokens.
+    if "guide_peak_f32".contains(&filter) {
+        rows.push(bench_guide_peak(&gpu, "guide_peak_f32", 428 * 8, 8200, 1025, 8)?);
+    }    // The 8-codebook audio embedding of one pass: [8, 486] ids into [8200, 1024].
     if "embed_audio_sum_f16".contains(&filter) {
         rows.push(bench_embed_audio(&gpu, "embed_audio_sum_f16", 486, 1024)?);
     }
@@ -169,6 +193,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, kind) in [("swiglu_f16", SwigluKind::Two), ("swiglu_f16_x1", SwigluKind::One)] {
         if name.contains(&filter) {
             rows.push(bench_swiglu(&gpu, name, kind, 486, 3072)?);
+            // The production pass has two rows of 486 positions.
+            rows.push(bench_swiglu(&gpu, name, kind, 972, 3072)?);
         }
     }
 
@@ -443,7 +469,7 @@ fn bench_conv1d(gpu: &Gpu, name: &str, kind: ConvKind, c_in: usize, c_out: usize
     })
 }
 
-fn bench_gemm_f32out(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, GpuError> {
+fn bench_gemm_f32out(gpu: &Gpu, name: &str, m: usize, n: usize, k: usize) -> Result<Row, GpuError> {
     let blas = Blas::load(gpu)?;
     let mut plan = ArenaPlan::new();
     let x = plan.add(DType::F16, &[m, k]);
@@ -457,7 +483,7 @@ fn bench_gemm_f32out(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, Gpu
     // A few rows: the table read sets the time, so the limit is the memory.
     let bytes = (n * k * 2 + m * k * 2 + m * n * 4) as u64;
     Ok(Row {
-        name: "gemm_f16_f32out".into(),
+        name: name.into(),
         size: format!("{m}x{n}x{k}"),
         t,
         rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
@@ -512,7 +538,7 @@ fn bench_rmsnorm_rows(gpu: &Gpu, name: &str, naive: bool, rows: usize, d: usize)
 }
 
 /// The GQA attention of OmniVoice: q·kᵀ, the softmax, then probs·v, per batch and head.
-fn bench_attention_bidir(gpu: &Gpu, name: &str, heads: usize, t_len: usize, d: usize) -> Result<Row, GpuError> {
+fn bench_attention_bidir(gpu: &Gpu, name: &str, heads: usize, t_len: usize, d: usize, valid: Option<[i32; 2]>) -> Result<Row, GpuError> {
     let blas = Blas::load(gpu)?;
     let mut plan = ArenaPlan::new();
     let q = plan.add(DType::F16, &[2, heads, t_len, d]);
@@ -522,18 +548,22 @@ fn bench_attention_bidir(gpu: &Gpu, name: &str, heads: usize, t_len: usize, d: u
     let kx = plan.add(DType::F16, &[2, heads, t_len, d]);
     let vx = plan.add(DType::F16, &[2, heads, t_len, d]);
     let scores = plan.add(DType::F16, &[2 * heads, t_len, t_len]);
+    let lens = valid.map(|_| plan.add(DType::I32, &[2]));
     let arena = Arena::new(gpu, &plan)?;
     arena.upload(gpu, &q, &vec![f16::from_f32(0.01); 2 * heads * t_len * d])?;
     arena.upload(gpu, &k, &vec![f16::from_f32(0.01); heads * t_len * d])?;
     arena.upload(gpu, &v, &vec![f16::from_f32(0.01); heads * t_len * d])?;
     let scratch = BidirScratch { kx: &kx, vx: &vx, scores: &scores };
-    let t = time_on_stream(gpu, 3, 10, || attention_bidir(gpu, &arena, &blas, &q, &k, &v, &out, BidirScratch { kx: &kx, vx: &vx, scores: &scores }, None))?;
+    if let (Some(v), Some(t)) = (valid, lens.as_ref()) {
+        arena.upload(gpu, t, &v)?;
+    }
+    let t = time_on_stream(gpu, 3, 10, || attention_bidir(gpu, &arena, &blas, &q, &k, &v, &out, BidirScratch { kx: &kx, vx: &vx, scores: &scores }, lens.as_ref()))?;
     let _ = scratch;
     // Two products of q·kᵀ and probs·v per batch and head.
     let flops = 4 * (2 * heads * t_len * t_len * d) as u64;
     Ok(Row {
         name: name.into(),
-        size: format!("2x{heads}x{t_len}x{d}"),
+        size: format!("2x{heads}x{t_len}x{d}{}", if valid.is_some() { " padded" } else { "" }),
         t,
         rate: (flops as f64 / (t.us * 1e-6) / 1e12, "TF/s"),
         pct: pct_of_tensor_limit(flops, &t, gpu.info()),
@@ -581,7 +611,7 @@ fn bench_swiglu(gpu: &Gpu, name: &str, kind: SwigluKind, rows: usize, d: usize) 
     })
 }
 
-fn bench_gemm(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, GpuError> {
+fn bench_gemm(gpu: &Gpu, name: &str, m: usize, n: usize, k: usize) -> Result<Row, GpuError> {
     let blas = Blas::load(gpu)?;
     let mut plan = ArenaPlan::new();
     let x = plan.add(DType::F16, &[m, k]);
@@ -594,10 +624,35 @@ fn bench_gemm(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, GpuError> 
     let t = time_on_stream(gpu, 3, 20, || blas.gemm_f16(gpu, &xs, Op::N, &ws, Op::T, &ys, m, n, k, 1.0, 0.0))?;
     let flops = 2 * (m * n * k) as u64;
     Ok(Row {
-        name: "gemm_f16".into(),
+        name: name.into(),
         size: format!("{m}x{n}x{k}"),
         t,
         rate: (flops as f64 / (t.us * 1e-6) / 1e12, "TF/s"),
         pct: pct_of_tensor_limit(flops, &t, gpu.info()),
+    })
+}
+
+/// The guided peak of the decode: one block per (position, codebook) pair, two logit planes of
+/// `vocab` values read per pair.
+fn bench_guide_peak(gpu: &Gpu, name: &str, pairs: usize, width: usize, vocab: usize, codebooks: usize) -> Result<Row, GpuError> {
+    let positions = pairs / codebooks;
+    let mut plan = ArenaPlan::new();
+    let c = plan.add(DType::F32, &[positions, width]);
+    let u = plan.add(DType::F32, &[positions, width]);
+    let conf = plan.add(DType::F32, &[pairs]);
+    let pick = plan.add(DType::I32, &[pairs]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &c, &vec![0.01f32; positions * width])?;
+    arena.upload(gpu, &u, &vec![0.02f32; positions * width])?;
+    let t = time_on_stream(gpu, 3, 20, || {
+        jeuvoice_gpu::ops::guide_peak(gpu, &arena, &c, &u, &conf, &pick, pairs, width, vocab, codebooks, 1024, 2.5)
+    })?;
+    let bytes = 2 * pairs * vocab * 4;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{pairs} pairs of {vocab}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: bytes as f64 / (t.us * 1e-6) / (gpu.info().mem_bandwidth_gbs * 1e9) * 100.0,
     })
 }

@@ -62,7 +62,7 @@ fn the_layout_matches_the_engine() {
             assert_eq!(layout.audio_mask, ints(&script["mask0"]), "{}: the audio mask", script["id"]);
         }
         // The style and the text blocks are the same on every script, so check them too.
-        let style = jeuvoice_omnivoice::text::style_ids(&bpe, Some(lang), None, true);
+        let style = jeuvoice_omnivoice::text::style_ids(&bpe, Some(lang), None, true).unwrap();
         assert_eq!(style, ints(&script["style_ids"]), "{}: the style ids", script["id"]);
         assert_eq!(layout.len, layout.ids.len() / 8, "{}: the row length", script["id"]);
     }
@@ -93,13 +93,51 @@ fn the_bpe_merges_the_byte_level_alphabet() {
     let bpe = Bpe::load(&path).expect("the tokenizer");
 
     // "ab" is one merge; "a b" keeps the space as `Ġ`; the added token splits the text.
-    assert_eq!(bpe.encode("ab"), vec![2]);
-    assert_eq!(bpe.encode("a b"), vec![0, 3, 1]);
-    assert_eq!(bpe.encode("a<|x|>b"), vec![0, 7, 1]);
+    assert_eq!(bpe.encode("ab").unwrap(), vec![2]);
+    assert_eq!(bpe.encode("a b").unwrap(), vec![0, 3, 1]);
+    assert_eq!(bpe.encode("a<|x|>b").unwrap(), vec![0, 7, 1]);
 
     // The two bytes of "ğ" become `ÄŁ`, the byte-level alphabet of GPT-2.
-    assert_eq!(bpe.encode("ğ"), vec![4]);
+    assert_eq!(bpe.encode("ğ").unwrap(), vec![4]);
 
     // NFC: the decomposed "ğ" (g and a combining breve) becomes the composed one.
-    assert_eq!(bpe.encode("g\u{0306}"), vec![4]);
+    assert_eq!(bpe.encode("g\u{0306}").unwrap(), vec![4]);
+}
+
+/// The engine tokenizes only its own nonverbal tags on their own; any other bracket is
+/// ordinary text. `tests/data/tag_vectors.json` holds the engine's ids for both kinds.
+#[test]
+#[ignore = "needs the Qwen3 tokenizer.json of the checkpoint"]
+fn the_tags_follow_the_engine_pattern() {
+    let dir = jeuvoice_omnivoice::config::model_dir(
+        &jeuvoice_omnivoice::config::default_cache_root(),
+        std::env::var("JEUVOICE_OMNIVOICE_MODEL").ok().as_deref(),
+    )
+    .expect("the model directory");
+    let bpe = Bpe::load(&dir.join("tokenizer.json")).expect("the tokenizer");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/tag_vectors.json");
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let samples: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+    for (text, want) in samples.as_object().expect("an object") {
+        assert_eq!(bpe.encode(text).expect("the encoding"), ints(want), "{text:?}");
+    }
+}
+#[test]
+fn only_the_engine_tags_are_nonverbal() {
+    use jeuvoice_omnivoice::text::is_nonverbal_tag;
+    assert!(is_nonverbal_tag("[laughter]"));
+    assert!(is_nonverbal_tag("[dissatisfaction-hnn]"));
+    assert!(!is_nonverbal_tag("[foo]"), "a bracket the engine does not list is ordinary text");
+    assert!(!is_nonverbal_tag("a[laughter]"), "a tag glued to text is not a whole tag");
+}
+
+#[test]
+fn an_unknown_byte_is_an_error() {
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let path = dir.path().join("tokenizer.json");
+    std::fs::write(&path, synthetic()).expect("the fixture");
+    let bpe = Bpe::load(&path).expect("the tokenizer");
+    // The fixture has no byte for "z", so the encoder must say so instead of dropping it.
+    let e = bpe.encode("z").unwrap_err().to_string();
+    assert!(e.contains("no token"), "{e}");
 }

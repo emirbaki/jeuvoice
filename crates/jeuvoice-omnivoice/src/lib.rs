@@ -12,6 +12,7 @@ pub mod decode;
 pub mod duration;
 mod duration_table;
 pub mod index;
+pub mod inputs;
 mod lang;
 pub mod lora;
 pub mod text;

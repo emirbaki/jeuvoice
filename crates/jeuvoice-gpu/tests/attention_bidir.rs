@@ -71,7 +71,7 @@ fn run(gpu: &Gpu, q: &[f32], k: &[f32], v: &[f32], b: usize, hq: usize, h_kv: us
     let kx = plan.add(DType::F16, &[b, hq, t, d]);
     let vx = plan.add(DType::F16, &[b, hq, t, d]);
     let scores = plan.add(DType::F16, &[b * hq, t, t]);
-    let mask = valid.map(|v| plan.add(DType::I32, &[b]));
+    let mask = valid.map(|_| plan.add(DType::I32, &[b]));
     let arena = Arena::new(gpu, &plan).unwrap();
     let r16 = |x: &[f32]| x.iter().map(|&v| f16::from_f32(v)).collect::<Vec<_>>();
     let back = |x: &f16| x.to_f32();
@@ -141,6 +141,29 @@ fn the_padding_rows_see_only_themselves() {
             // hq == h_kv here, so the group is 1 and query head h reads key head h.
             let want_v = f16::from_f32(v[((1 * h_kv + h) * t + row) * d + i]).to_f32();
             assert!((got[out_off + i] - want_v).abs() < 3e-3, "head {h} column {i}: {} vs {want_v}", got[out_off + i]);
+        }
+    }
+}
+
+/// Grouped GEMMs must still mask every query-head plane of a padded batch.
+#[test]
+fn grouped_padding_matches_the_reference() {
+    let gpu = Gpu::open(0).unwrap();
+    let (b, hq, h_kv, t, d) = (2usize, 4usize, 2usize, 7usize, 8usize);
+    let valid = [7i32, 3];
+    let (q, k, v) = (rnd(b * hq * t * d, 131, 1.0), rnd(b * h_kv * t * d, 132, 1.0), rnd(b * h_kv * t * d, 133, 1.0));
+    let (got, want) = run(&gpu, &q, &k, &v, b, hq, h_kv, t, d, Some(&valid));
+    assert_close("attention_bidir grouped padding", &got, &want, Tol { abs: 3e-3, rel: 2e-2 });
+
+    let group = hq / h_kv;
+    for h in 0..hq {
+        for row in valid[1] as usize..t {
+            for col in 0..d {
+                let out_at = ((hq + h) * t + row) * d + col;
+                let v_at = ((h_kv + h / group) * t + row) * d + col;
+                let want_v = f16::from_f32(v[v_at]).to_f32();
+                assert!((got[out_at] - want_v).abs() < 3e-3, "head {h}, row {row}, column {col}: {} vs {want_v}", got[out_at]);
+            }
         }
     }
 }

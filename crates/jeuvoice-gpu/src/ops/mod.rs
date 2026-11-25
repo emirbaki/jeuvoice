@@ -9,6 +9,7 @@ mod conv1d;
 mod elementwise;
 mod embed;
 mod gemm_lesson;
+mod guide;
 mod heads;
 mod layernorm;
 mod llm;
@@ -25,6 +26,7 @@ pub use embed::{embed, embed_audio_sum, embed_f32, embed_one, embed_one_f32, emb
 pub use gemm_lesson::{GemmKind, gemm_lesson, mma_probe};
 pub use mel::{log10_max, log10_max_partials, mel_frames, mel_window, power_spectrum};
 pub use layernorm::{LayerNormKind, layernorm, layernorm_to_f16, layernorm_with};
+pub use guide::guide_peak;
 pub use heads::{from_heads, to_heads};
 pub use llm::{embed_mixed, repeat_heads, rmsnorm_to_f16};
 pub use rmsnorm::{rmsnorm, rmsnorm_naive};

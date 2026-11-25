@@ -68,13 +68,19 @@ fn cpu_rope_interleaved(x: &[f32], rows: usize, heads: usize, positions: &[i32],
 fn run_rope(gpu: &Gpu, kind: RopeKind, x: &[f32], rows: usize, heads: usize, positions: &[i32], theta: f32) -> Vec<f32> {
     let mut plan = ArenaPlan::new();
     let tx = plan.add(DType::F16, &[rows, heads, HEAD]);
+    // A canary directly after `x`: the launch grid is rounded up, so a thread past the last
+    // pair must not write here.
+    let canary = plan.add(DType::F16, &[4096]);
     let tp = plan.add(DType::I32, &[rows]);
     let tf = plan.add(DType::F32, &[HEAD / 2]);
     let arena = Arena::new(gpu, &plan).unwrap();
     arena.upload(gpu, &tx, &x.iter().map(|&v| f16::from_f32(v)).collect::<Vec<_>>()).unwrap();
+    arena.upload(gpu, &canary, &vec![f16::from_f32(7.5); 4096]).unwrap();
     arena.upload(gpu, &tp, positions).unwrap();
     arena.upload(gpu, &tf, &rope_inv_freq(theta, HEAD)).unwrap();
     rope_with(gpu, &arena, &tx, &tp, &tf, kind).unwrap();
+    let after = arena.download::<f16>(gpu, &canary).unwrap();
+    assert!(after.iter().all(|v| v.to_f32() == 7.5), "rope {kind:?} wrote past the end of x");
     arena.download::<f16>(gpu, &tx).unwrap().iter().map(|v| v.to_f32()).collect()
 }
 
@@ -189,5 +195,28 @@ fn rmsnorm_rows_normalises_each_head() {
     for naive in [false, true] {
         let got = run_rmsnorm(&gpu, naive, &x, rows, &w);
         assert_close(&format!("rmsnorm_rows naive={naive}"), &got, &want, Tol { abs: 2e-3, rel: 5e-3 });
+    }
+}
+
+/// One pair is one work item: the rounded-up grid has 255 threads that own nothing, and they
+/// must not read the positions or write the tensor.
+#[test]
+fn rope_does_not_write_past_the_tensor() {
+    let gpu = Gpu::open(0).unwrap();
+    let mut plan = ArenaPlan::new();
+    let (d, heads) = (2usize, 1usize);
+    let tx = plan.add(DType::F16, &[1, heads, d]);
+    let canary = plan.add(DType::F16, &[512]);
+    let tp = plan.add(DType::I32, &[1]);
+    let tf = plan.add(DType::F32, &[d / 2]);
+    let arena = Arena::new(&gpu, &plan).unwrap();
+    arena.upload(&gpu, &tx, &[f16::from_f32(1.0), f16::from_f32(0.0)]).unwrap();
+    arena.upload(&gpu, &canary, &vec![f16::from_f32(7.5); 512]).unwrap();
+    arena.upload(&gpu, &tp, &[0i32]).unwrap();
+    arena.upload(&gpu, &tf, &rope_inv_freq(1_000_000.0, d)).unwrap();
+    for kind in [RopeKind::HalfSplit, RopeKind::Interleaved] {
+        rope_with(&gpu, &arena, &tx, &tp, &tf, kind).unwrap();
+        let after = arena.download::<f16>(&gpu, &canary).unwrap();
+        assert!(after.iter().all(|v| v.to_f32() == 7.5), "rope {kind:?} wrote past the end of x");
     }
 }

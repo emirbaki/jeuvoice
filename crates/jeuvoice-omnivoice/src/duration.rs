@@ -104,7 +104,9 @@ mod tests {
     fn a_short_line_is_boosted_and_a_zero_frame_reference_gives_one() {
         assert!(estimate_duration("hi", "a much longer reference line", 100) < 50.0);
         assert_eq!(estimate_frames("hi", Some("reference"), Some(0), 1.0), 1);
-        // Without a reference the engine falls back to "Nice to meet you." and 25 frames,\n        // and the cube-root boost turns 3.5 frames into 20.\n        assert_eq!(estimate_frames("hi", None, None, 1.0), 20);
+        // Without a reference the engine falls back to "Nice to meet you." and 25 frames,
+        // and the cube-root boost turns 3.5 frames into 20.
+        assert_eq!(estimate_frames("hi", None, None, 1.0), 20);
     }
 
     #[test]

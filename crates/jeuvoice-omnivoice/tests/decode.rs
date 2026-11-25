@@ -40,3 +40,13 @@ fn the_shift_gives_the_early_steps_fewer_pairs() {
     assert!(counts[0] < counts[16], "the shifted curve unmask more later: {counts:?}");
     assert_eq!(counts.len(), 32);
 }
+
+/// A one-frame target needs eight pairs in 32 steps, so most steps have nothing to unmask.
+/// The decode skips the pass of such a step; this proves the schedule can produce it.
+#[test]
+fn a_short_target_has_zero_count_steps() {
+    let params = Params { num_step: 32, t_shift: 0.1, ..Params::default() };
+    let counts = schedule(1, 8, &params);
+    assert_eq!(counts.iter().sum::<usize>(), 8, "every pair is unmasked once: {counts:?}");
+    assert!(counts.contains(&0), "a one-frame target leaves empty steps: {counts:?}");
+}

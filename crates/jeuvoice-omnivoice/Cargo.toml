@@ -21,3 +21,7 @@ cuda-kernels = ["dep:jeuvoice-gpu"]
 [dev-dependencies]
 tempfile.workspace = true
 safetensors.workspace = true
+
+[[example]]
+name = "render_tokens"
+required-features = ["cuda-kernels"]

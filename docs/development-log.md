@@ -614,3 +614,243 @@ The text path (`src/text.rs`, `src/duration.rs`, `src/lang.rs`, `src/duration_ta
 The cause is measured, not guessed. The score of a position is `log_prob_max - 5 * codebook`, and the six best positions of the first step score -0.0703, -0.0724, -0.0997, -0.1018, -0.1184 and -0.1209: a 0.002 gap at the top, and 0.05 across the six. Any difference of arithmetic (f16 against f32 weights, a different GEMM order) reorders them, and a different order changes what every later step sees. **The engine cannot reproduce itself across a dtype change**, so criterion 1 ("identical tokens on 3 scripts") is not reachable by an independent implementation. Our share is within 0.3 points of the engine's own fp16-vs-f32 share, and against the f32 model we keep more of its tokens than the fp16 engine does. The per-position prediction is accurate: 98.9% argmax on the first pass (both rows).
 
 **The time:** s1 takes 4.6 s for 214 frames (s2 3.9 s, s3 3.8 s) against the 2.3 s criterion. The forward pass is about 112 ms of each of the 32 steps (3.6 s); the guided peak over 2 x 8 x 214 rows of 1025 values on the CPU adds about 1 s. Task 12 must move the guidance to the GPU and find the rest.
+
+### The audit revisions (2026-11-25)
+
+The read-only audit of `651e2bb` found memory-safety and validation gaps. Work packages A and B are implemented; C, D and E need the user's selection first.
+
+**A1, tail guards.** `rope_half_f16`, `rope_f16`, `to_heads_f16` and `from_heads_f16` now take the exact work-item count and return at or past it. `for_num_elems` rounds up to 256-thread blocks, so the old launches wrote past the tensors on any shape that is not a multiple of 256. The canary tests in `tests/rope.rs` and `tests/heads.rs` failed before the guards and pass after them.
+
+**A2, input validation.** `src/inputs.rs` checks every id against the text or audio table, the mask against 0 and 1, and the valid lengths against `0..=t`, before any upload. A negative id is an error, not a huge `usize`. The forward pass calls it; the real decode is unchanged.
+
+**A3, the activation shapes.** The real weight test expected 3-D activations; the plan is 2-D (`[BATCH * T_MAX, d]`). Test-only fix.
+
+**A4, the adapter preflight.** `lora::check_adapter` requires the two LoRA halves of all 196 llm linear layers and both `modules_to_save` tables with the base shapes, rejects an adapter key that has no base tensor, and rejects rank 0. It runs before the arena is allocated. The real adapter still loads (1469 MB).
+
+**B1 and B2, the tokenizer.** The nonverbal split now uses the engine's exact 13-tag alternation, and `encode` returns a `Result`: a pre-split error or a byte with no vocab token is an error with the segment, never a silently shorter text. The engine vectors (all 13 tags plus `[foo]` in context) still match.
+
+**B3.** The literal `\n` in the duration test comment is fixed.
+
+**B4.** The guided peak has a direct unit test against an f64 implementation of the engine's three-log-softmax formula, including a mask logit that is the maximum and large logits.
+
+**B5.** The decode test also bounds the share against the f32 run, the forward test asserts the exact tap-name set, and the two-row test bounds the logit error (0.059 and 0.041 measured) instead of only the argmax.
+
+**Tests after the revisions:** 451 plain, 112 GPU, 70 whisper GPU; the real forward, decode and weights tests pass. The decode takes 4.8 s (s1), 4.1 s (s2) and 4.1 s (s3).
+
+### C, the performance baseline (P2, 2026-11-25)
+
+The timings below use CUDA events (`time_on_stream`) in the bench, and an explicit stream
+synchronisation around the wall clock in the tests. The old 112 ms pass value was taken with
+asynchronous launches and is replaced.
+
+| Row | Value |
+|---|---|
+| forward pass, 2 rows of 486, cold | 287.7 ms (module and cuBLAS setup) |
+| forward pass, warm | **114.3 ms**, stable to +-0.15 ms over 5 runs |
+| s1 decode, cold / warm | 4.50 s / **4.32 s** |
+| s2 / s3 decode | 3.9 s / 3.8 s |
+| attention bidir, `[2,16,486,128]`, no padding | 1217.7 us (21%) |
+| attention bidir, the production padding `[486,214]` | **1638.9 us (16%)**, 35% more |
+| SwiGLU `[486,3072]` / `[972,3072]` | 61.3 us / 110.3 us |
+| GEMM 972 rows: q / kv / o / gate+up / down | 360.2 / 209.3 / 391.5 / 573.6 / 593.1 us |
+| audio head, f32 out, 972x8200x1024 | 1354.5 us (19% of the memory limit) |
+| load / arena | 6.4 s / 1469 MB |
+
+The per-pass budget from the bench is about 81 ms of GEMMs, 46 ms of attention and 3 ms of
+SwiGLU for 28 layers, plus 1.35 ms of the audio head: 131 ms against the measured 114 ms. The
+bench calls each kernel with a cold cache, so it is a relative weight, not a sum.
+
+**What that means for the criterion.** The forward pass is 32 x 114.3 ms = 3.66 s of the 4.32 s;
+the guided peak is about 0.65 s. Removing the CPU guidance (E2) gives about 3.7 s. The head on
+the used rows (D2) saves about 0.7 ms per pass, 22 ms in a decode. The repetition removal (D1)
+and the residual accumulation (D3) are smaller. Reaching 2.3 s needs the attention path (E3) or
+the ragged rows (E1): the padding alone costs 421 us per layer, 11.8 ms per pass.
+
+### D3 and D4 (P2, 2026-11-25)
+
+**D3, the residual accumulations.** `o_proj` and `down_proj` now accumulate into the f32
+residual stream with `beta = 1` (`gemm_f16_f32out`), so the f16 `proj` buffer and the 56
+`add_into_f32` launches are gone. The micro-benchmark pair from the audit was replaced by the
+complete pass, which is the acceptance the audit asks for ("keep the change only if the
+complete pass does not lose speed"):
+
+| Item | Before | After |
+|---|---|---|
+| warm pass, 2 rows of 486 | 114.3 ms | **107.0 ms** (-6.4%) |
+| `hidden_27` max / mean against f32 | 18.70 / 0.03278 | **16.01 / 0.03020** |
+| `post_norm` | 0.2294 / 0.000792 | **0.1956 / 0.000732** |
+| logits argmax / max | 1692 / 0.0594 | **1693 / 0.0557** |
+| conditioned logits | 98.9%, 0.0591 | **98.9%, 0.0564** |
+| unconditioned logits | 100%, 0.0410 | **100%, 0.0384** |
+
+The change removes the f16 rounding of the projection before the residual add, so it is also
+more accurate. `activations` lost the `proj` buffer.
+
+**D4, the redundant work in the decode.** Three exact changes: a position that is already
+unmasked skips the guided peak (16.27% fewer calls on s1), a step whose count is 0 skips the
+pass, and the conditioned and unconditioned logit rows are adjacent (`target + target_len ==
+seq`), so one download takes both. A one-frame target test proves the schedule can hold empty
+steps.
+
+| Item | Before | After |
+|---|---|---|
+| warm s1 decode | 4.32 s | **4.23 s** |
+| warm pass | 114.3 ms | 107.0 ms (D3) |
+
+The tokens moved because D3 changed the arithmetic, not because of D4: the share against the
+f32 engine rose from 23.7% to 28.0% on s1, 27.1% to 49.2% on s2 and 22.2% to 61.7% on s3,
+while the share against the fp16 engine stays at the engine's own dtype gap (20.0% on s1).
+Determinism holds.
+
+**Tests:** 452 plain; the real forward (taps and both logit rows) and the real decode pass.
+
+### D2, the compact head: measured and not used (P2, 2026-11-25)
+
+`forward` gained an optional head block (`head: Option<(usize, usize)>`): the final norm and the
+audio head run only on those rows and write the logits compactly from row zero. The equivalence
+test proves the compact block is **bit-identical** to the full head (`max_abs 0.00000`), and the
+decode's tokens are unchanged when it is used.
+
+It is **slower** at the only size that matters. With 428 rows instead of 972 the cuBLAS f32-out
+GEMM picks a less efficient kernel for M = 428:
+
+| Warm s1 decode | Time |
+|---|---|
+| before D2 (full head) | 4.25 s |
+| with the compact head | 4.55 s (second run 4.65 s) |
+
+The production decode therefore keeps the full head, and `head` stays as a tested option (the
+audit asked for the path); the measurement above is why it is not used. The saving the FLOP
+count suggests (16.3 to 7.2 GFLOP) does not reach the clock at this M.
+
+The mistake to remember: the first attempt also kept the old download offset (`target`) while
+the head wrote from row zero. The token share fell to 0.2% and the decode test caught it. Any
+change of the logits origin must move the download in the same commit.
+
+### D1, the grouped attention: measured, blocked, reverted (P2, 2026-11-25)
+
+The transformation of the audit was implemented in `attention_bidir`: one batched product per
+key head with `batch = B * 8`, `M = group*T`, Q stride `group*T*d`, K stride `T*d`, score
+stride `group*T*T`, and the matching PV product. `repeat_heads` and the `kx`/`vx` traffic left
+the path. The 10 attention tests passed, including the GQA mapping and the padding rule, and
+the bench improved:
+
+| Attention `[2,16,486,128]` | Before | Grouped |
+|---|---|---|
+| without padding | 1217.7 us | **882.1 us** (-27.6%) |
+| with the production padding | 1638.9 us | **1087.7 us** (-33.6%) |
+
+It is **wrong for the padded row**. The conditioned row (valid = t) stays exact against the f32
+reference (98.8%), and the unconditioned row (valid = 214) collapses to 23.8% of the argmax
+with a maximum error of 10.76. So the grouped strides are right and the fault is in the
+interaction with the padding mask over a score plane of `group*T` rows.
+
+Not isolated before the change was reverted: the prime suspect is the per-row rule of
+`attn_pad_mask_f16` (`row = (i / t) % t`, `b = (i / (t*t)) / heads`) on the grouped layout. A
+unit test of the mask with `group > 1` and `valid < t`, and a grouped score plane built by
+hand, is the first step next time.
+
+The path is reverted to the repeated K/V heads; the pass is back to 108 ms and both rows match
+(98.9% / 100%, max 0.0564 / 0.0384). The measurement above is the reason to retry D1: 550 us
+per layer, 15 ms per pass, about 0.5 s per decode.
+
+### E2, the guided peak on the GPU (P2, 2026-11-25)
+
+`ops/guide.rs` and the kernel `guide_peak_f32` (kernels/mod.rs) evaluate the engine's guided
+log-softmax per `(position, codebook)` pair: one block of 256 threads per pair, the mask id in
+the normaliser and out of the argmax, a shared-memory max/argmax reduction and `block_sum` for
+the exponential sum. The decode keeps the two logit planes on the device and moves
+`conf`/`pick` (13.7 KiB) instead of 13.4 MiB per step.
+
+| Item | Before | After |
+|---|---|---|
+| warm s1 decode | 4.25 s | **3.74 s** (-0.51 s) |
+| warm s2 / s3 decode | 4.0 / 3.8 s | **3.5 / 3.2 s** |
+| s1 share vs the f32 engine | 28.0% | 29.0% |
+| s1 share vs the fp16 engine | 20.0% | 20.4% |
+
+The GPU test (`tests/guide.rs`) compares against an f64 implementation of the engine's three
+log_softmaxes, with a case where the mask logit is the maximum. Determinism holds. Two traps
+cost a run each: the block is not limited to 1024 values (vocab is 1025, the loop strides by
+256), and the unconditioned plane starts at row 486, which is not 256-byte aligned, so the
+kernel takes `slice_unaligned`.
+
+Still missing for E2's bookkeeping: the lesson 12 text and the `gpu-bench` row. The CPU
+`guided_peak` stays as the reference of the unit tests.
+
+A concurrent writer touched `crates/jeuvoice-gpu/src/ops/attention.rs` during this work (a
+comment and one GEMM line changed between two builds). The file was brought back to the tested
+repeat-heads version; the D1 findings note is the source of truth for the grouped attempt.
+
+### D1 retry: the padding launch is fixed (P2, 2026-11-25)
+
+The grouped path is correct now. The bug was not the mask index math. The grouped change reused
+`batch = b * h_kv` for the padding launch, but the score tensor has `b * hq` planes. At group 2,
+only the first half of the scores received a mask. The new `grouped_padding_matches_the_reference`
+test failed with that code and passes with separate `kv_batch` and `score_batch` values.
+
+The real `both_rows` test gives cond 98.8% / max 0.0545 and uncond **100% / max 0.0389**. All
+hidden taps pass. Warm passes take 101.1 to 101.4 ms. The deterministic decode passes on all
+three scripts, with cold / warm s1 times of 4.2 / **3.57 s**. Plain 452, GPU 114 and whisper GPU
+70 tests pass.
+
+Isolated benches give 1217.7 -> **881.7 us** without padding and 1638.9 -> **1297.4 us** with
+production padding. The old grouped padded 1087.7 us measurement also used the incomplete mask,
+so it was not a valid full-mask comparison. The `kx` and `vx` allocations remain for a separate
+cleanup, but the grouped path no longer reads them.
+
+### D1 fixed by the supervisor (2026-11-25)
+
+The root cause of the grouped-attention failure was the **mask launch grid**, not the masked
+row rule: the code passed the new `batch = b * h_kv` to `attn_pad_mask_f16`, so the mask covered
+only the first half of the `b * hq` score planes. The conditioned row has `valid = t`, where the
+mask changes nothing, which is why only the unconditioned row broke. The fix is
+`score_batch = b * hq` for that launch only. A `group > 1, valid < t` test now exists in
+`tests/attention_bidir.rs`.
+
+Verified here: attention 5/5 tests, the real forward test (conditioned 98.8% / 0.0545,
+unconditioned **100% / 0.0389**, both rows), and the real decode (deterministic, shares 20.4 /
+29.0 on s1).
+
+**Overall performance after C, D3, D4, E2 and D1:**
+
+| Item | P2 start | Now |
+|---|---|---|
+| warm forward pass, 2 x 486 | 114.3 ms | **106.0 ms** |
+| warm s1 decode | 4.32 s | **3.73 s** |
+| warm s2 / s3 decode | 4.0 / 3.8 s | **3.4 / 3.3 s** |
+| attention, no padding | 1217.7 us | **708.7 us** |
+| attention, production padding | 1638.9 us | **1021.3 us** |
+| conditioned / unconditioned logits | 98.9 / 100% | 98.8 / 100%, max 0.0545 / 0.0389 |
+| s1 share vs the f32 engine | 23.7% | **29.0%** |
+| s2 / s3 share vs the f32 engine | 27.1 / 22.2% | **49.2 / 61.7%** |
+
+Budget of the 3.73 s: 32 x 106.0 ms = 3.39 s of forward pass, about 0.34 s of guidance
+download, top-k and uploads. The pass is now 91% of the decode. Reaching 2.3 s needs about
+65 ms per pass: E1 (700 instead of 972 rows, -28% of the linear work) projects to about 76 ms
+(2.6 s), so E3 or D6 is still needed after it.
+
+### Task 10 and Task 12 (P2, 2026-11-25)
+
+**Task 10, the product mode.** `decode.rs` gained a seeded `Rng` (xorshift64*, Gumbel) and `sample_row`: the guided logits, the top 10% of the 1025 tokens, the Gumbel noise on `y / T`, the confidence from the **unfiltered** distribution for the position score, and the Gumbel on the position score at `position_temperature = 5.0`. The deterministic mode keeps the GPU guided peak; the product mode downloads the two planes and samples on the host, because the kernel returns only the peak. The test proves the frame count (214), repeatability for one seed, and that every token is inside the vocabulary; the token share with the deterministic run is 0.8%, as the engine's own 1689/1712 difference predicts.
+
+**Task 12, the tool and the lesson.** `examples/render_tokens.rs` renders one script from `tests/data/text_vectors.json`, prints the estimate against the fixture, the per-step time and writes `[8, T]` i32. First run: load 5.59 s, arena 1464 MB, the estimate 214 (the fixture 214), 486 positions of which 400 are audio, 8 x 214 tokens in 4.05 s (127 ms per step including the cold first step), 8.6 s of audio. Lesson 12 is written in Turkish with the seven parts and the measured numbers.
+
+The final review (Task 12 step 4) waits for the performance work: the decode is 3.73 s against 2.3 s, and E1's experiment shows a 29% saving on the pass (109.3 -> 77.9 ms) but the unconditioned row does not agree yet.
+
+### The Phase 2 criteria, measured (Task 12, 2026-11-25)
+
+| Criterion | Target | Measured | State |
+|---|---|---|---|
+| 1, the same tokens | restated with the user: per-position accuracy and closeness to the f32 model, because the deterministic trajectory is chaotic under arithmetic changes | argmax 1693/1712 (98.8-98.9%) for both rows on the first pass; token share against the f32 engine 29.0% (s1), 49.2% (s2), 61.7% (s3), while the engine's own fp16 run keeps 20.0 / 14.9 / 14.1% of its f32 tokens | **met as restated** |
+| 2, the frame count in the product mode | the same frames as the engine | 214 / 193 / 196 from the text estimate, identical to the fixtures; the product mode keeps 214 and is repeatable for one seed; its token share with the deterministic run is 0.8%, as the engine's 1689/1712 predicts | **met** |
+| 3, the token stage | 2.3 s (the engine 4.6 s) | **3.73 s** for s1 warm (s2 3.4 s, s3 3.3 s); 32 x 106.0 ms of forward pass plus about 0.3 s | **not met** |
+| 4, video memory above idle | 2.0 GB | 1464 MB (weights 1225 MB, activations 239 MB with the new buffers) | **met** |
+| 5, the load | 25 s | 5.6-6.4 s, the LoRA merge and the uploads included | **met** |
+| 6, the existing tests and the app | all pass, the app unchanged | 455 plain, 114 GPU, 70 whisper GPU; the real forward, decode and weights tests pass; no app file was touched | **met** |
+
+Criterion 3 is the one open target. The measured budget: 3.39 s of forward pass (the pass is 91% of
+the decode) plus 0.34 s of guidance download, top-k and uploads. Experiment A of E1 showed a
+29% cheaper step (109.3 -> 77.9 ms) but its unconditioned row did not agree with the packed
+path, so it is not adopted. E1 done properly projects about 76 ms per pass (2.6 s), and E3 or
+D6 would be needed after it.
