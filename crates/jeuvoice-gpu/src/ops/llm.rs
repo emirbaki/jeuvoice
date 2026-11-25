@@ -44,8 +44,9 @@ pub fn embed_mixed(
     }
     let vocab = audio_table.shape()[0] / codebooks;
     let (is, ms, ts, as_, os) = (
-        arena.slice::<i32>(ids),
-        arena.slice::<i32>(audio_mask),
+        // The ids and the mask may be a row of a larger tensor: scalar reads only.
+        arena.slice_unaligned::<i32>(ids),
+        arena.slice_unaligned::<i32>(audio_mask),
         arena.slice::<f16>(text_table),
         arena.slice::<f16>(audio_table),
         arena.slice::<f16>(out),

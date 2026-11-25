@@ -1566,15 +1566,41 @@ pub mod device {
         }
     }
 
-    /// Rotary position embedding on `[rows, heads, 128]` f16 in place: the pair
-    /// `(2i, 2i+1)` of every head rotates by `pos · inv_freq[i]`, the interleaved layout of
-    /// Qwen3 (`x[..., ::2]` and `x[..., 1::2]`). One thread per pair.
+    /// Rotary position embedding with the *half-split* pairs of Qwen: the pair is `(i, i + d/2)`
+    /// of a head and rotates by `pos · inv_freq[i]`. One thread per pair.
     ///
     /// `inv_freq` holds `theta^(-2i/d)` for `i` in `0..d/2`, computed once on the host.
     ///
     /// # Safety
     /// `x` is valid for `rows * heads * d` f16 values, `positions` for `rows` i32 values and
-    /// `inv_freq` for `d / 2` f32 values. `d` is even.
+    /// `inv_freq` for `d / 2` f32 values. `d` is even. The grid has `rows * heads * d/2`
+    /// threads.
+    #[kernel]
+    pub unsafe fn rope_half_f16(x: *mut f16, positions: *const i32, inv_freq: *const f32, heads: usize, d: usize) {
+        let i = thread::index_1d().get() as usize;
+        let pairs = d / 2;
+        let row = i / (heads * pairs);
+        let pair = i % pairs;
+        let base = i / pairs * d + pair;
+        // SAFETY: the grid has exactly rows * heads * pairs threads, so row < rows and
+        // pair < d/2. The two halves are inside the same head.
+        unsafe {
+            let pos = *positions.add(row) as f32;
+            let angle = pos * *inv_freq.add(pair);
+            let (s, c) = (libm::sinf(angle), libm::cosf(angle));
+            let a = *x.add(base) as f32;
+            let b = *x.add(base + pairs) as f32;
+            *x.add(base) = (a * c - b * s) as f16;
+            *x.add(base + pairs) = (a * s + b * c) as f16;
+        }
+    }
+
+    /// Rotary position embedding on `[rows, heads, 128]` f16 in place with *interleaved* pairs:
+    /// the pair is `(2i, 2i+1)`, the form of GPT-J. Qwen uses `rope_half_f16` instead; this one
+    /// stays for lesson 10, which compares the two layouts. One thread per pair.
+    ///
+    /// # Safety
+    /// As `rope_half_f16`.
     #[kernel]
     pub unsafe fn rope_f16(x: *mut f16, positions: *const i32, inv_freq: *const f32, heads: usize, d: usize) {
         let i = thread::index_1d().get() as usize;
@@ -1638,18 +1664,19 @@ pub mod device {
         }
     }
 
-    /// Rotary position embedding with the sine and cosine of a pair computed once per row and
-    /// kept in shared memory: all heads of a row share the same angles. One block of `d/2`
-    /// threads per row, and each thread walks the heads.
+    /// Rotary position embedding with the half-split pairs of Qwen3, and the sine and cosine of
+    /// a pair computed once per row and kept in shared memory: all heads of a row share the
+    /// same angles. One block of `d/2` threads per row, and each thread walks the heads.
     ///
     /// # Safety
     /// `x` is valid for `rows * heads * d` f16 values, `positions` for `rows` i32 values and
     /// `inv_freq` for `d / 2` f32 values. `d` is even and at most 128.
     #[kernel]
-    pub unsafe fn rope_f16_shared(x: *mut f16, positions: *const i32, inv_freq: *const f32, heads: usize, d: usize) {
+    pub unsafe fn rope_half_f16_shared(x: *mut f16, positions: *const i32, inv_freq: *const f32, heads: usize, d: usize) {
         static mut ANG: SharedArray<f32, 128> = SharedArray::UNINIT; // sin and cos of one pair
         let row = thread::blockIdx_x() as usize;
         let pair = thread::threadIdx_x() as usize;
+        let pairs = d / 2;
         // SAFETY: row < rows and pair < d/2, so both reads are inside their tensors.
         let (pos, freq) = unsafe { (*positions.add(row) as f32, *inv_freq.add(pair)) };
         let angle = pos * freq;
@@ -1663,13 +1690,13 @@ pub mod device {
         let (s, c) = unsafe { (ANG[2 * pair], ANG[2 * pair + 1]) };
         let mut h = 0;
         while h < heads {
-            let base = ((row * heads + h) * d) + 2 * pair;
+            let base = ((row * heads + h) * d) + pair;
             // SAFETY: the head and the pair are inside the row, and this thread owns the pair.
             unsafe {
                 let a = *x.add(base) as f32;
-                let b = *x.add(base + 1) as f32;
+                let b = *x.add(base + pairs) as f32;
                 *x.add(base) = (a * c - b * s) as f16;
-                *x.add(base + 1) = (a * s + b * c) as f16;
+                *x.add(base + pairs) = (a * s + b * c) as f16;
             }
             h += 1;
         }
@@ -1874,6 +1901,49 @@ pub mod device {
             if !keep {
                 *score.add(i) = f16::from_bits(0xFC00); // -inf in f16
             }
+        }
+    }
+
+    /// `dst[b][h][t] = src[(b·t + t)][h·d .. h·d + d]`: the row-major projection output into
+    /// the head layout of the attention.
+    ///
+    /// # Safety
+    /// `src` is valid for `batches * t * heads * d` f16 values and `dst` for the same count.
+    /// They do not overlap. One thread per value.
+    #[kernel]
+    pub unsafe fn to_heads_f16(src: *const f16, dst: *mut f16, t: usize, heads: usize, d: usize) {
+        let i = thread::index_1d().get() as usize;
+        let total = t * heads * d;
+        let b = i / total;
+        let rest = i % total;
+        let h = rest / (t * d);
+        let pos = (rest / d) % t;
+        let col = rest % d;
+        // SAFETY: the source row (b·t + pos) and the head column h·d + col are inside src for
+        // every i below batches·t·heads·d, and dst has the same size.
+        unsafe {
+            let src_row = b * t + pos;
+            *dst.add(i) = *src.add(src_row * heads * d + h * d + col);
+        }
+    }
+
+    /// The inverse of `to_heads_f16`.
+    ///
+    /// # Safety
+    /// As `to_heads_f16`.
+    #[kernel]
+    pub unsafe fn from_heads_f16(src: *const f16, dst: *mut f16, t: usize, heads: usize, d: usize) {
+        let i = thread::index_1d().get() as usize;
+        let total = t * heads * d;
+        let b = i / total;
+        let rest = i % total;
+        let h = rest / (t * d);
+        let pos = (rest / d) % t;
+        let col = rest % d;
+        // SAFETY: as `to_heads_f16`, with the two pointers swapped.
+        unsafe {
+            let dst_row = b * t + pos;
+            *dst.add(dst_row * heads * d + h * d + col) = *src.add(i);
         }
     }
 

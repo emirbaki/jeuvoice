@@ -70,7 +70,21 @@ impl Arena {
         Ok(Arena { buf, stream: Arc::clone(gpu.stream()) })
     }
 
-    /// The device memory of `t`, typed as `T`.
+    /// As `slice`, but the offset may fall off the 256-byte alignment: for a tensor that a
+    /// scalar kernel reads value by value (the token ids, the audio mask, the valid lengths).
+    /// Never pass the result to cuBLAS or to a kernel with vectorised loads.
+    ///
+    /// # Panics
+    /// If `T` does not match `t.dtype`, or `t` does not fit in this arena.
+    pub fn slice_unaligned<T: Element>(&self, t: &Tensor) -> DevSlice<'_, T> {
+        assert_eq!(T::DTYPE, t.dtype, "tensor type mismatch");
+        // Tensor::new checked that offset + bytes does not overflow.
+        assert!(t.offset + t.bytes() <= self.buf.len(), "tensor is outside this arena");
+        DevSlice { ptr: self.buf.cu_deviceptr() + t.offset as u64, len: t.numel(), _arena: PhantomData }
+    }
+
+    /// The device memory of `t`, typed as `T`, on the 256-byte alignment the vectorised
+    /// kernels and cuBLAS need.
     ///
     /// # Panics
     /// If `T` does not match `t.dtype`, or `t` does not fit in this arena. Both are

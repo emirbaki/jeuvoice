@@ -11,6 +11,8 @@ pub mod config;
 pub mod index;
 pub mod lora;
 #[cfg(feature = "cuda-kernels")]
+pub mod forward;
+#[cfg(feature = "cuda-kernels")]
 pub mod weights;
 pub mod paths;
 

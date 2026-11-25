@@ -571,3 +571,28 @@ The sequence of script s1 is 486 positions: the special and text tokens, the 186
 The audio tokenizer must stay on the CPU. With the 805 MB tokenizer on the GPU beside the model the card reached 3.9 GB, thrashed, and one render took 202 s instead of 6 s. A 24.6 s voice prompt did the same on its own: the sequence grew from 486 to 1009 positions and the render to 202 s. The model itself recommends a 3 to 10 s prompt.
 
 **Determinism, measured:** the deterministic mode gives the same tokens on a second run. The product mode differs from the deterministic mode on **1689 of 1712** positions of s1, because the Gumbel noise on the position score changes the order in which positions are unmasked, and every later step sees another context. A token-level comparison of the product mode against the engine is therefore not reachable without the same Philox stream and the same kernel rounding; Phase 2 compares the frame count there and leaves the quality judgement to Phase 3 (a listen).
+
+### The forward pass and the RoPE pair layout (Phase 2, Task 7, 2026-11-25)
+
+The pass runs in `crates/jeuvoice-omnivoice/src/forward.rs` and the tap test compares it with the fixtures. Three faults hid each other, and each one had to be measured:
+
+| Fault | How it showed | Fix |
+|---|---|---|
+| the RoPE pair layout | the logits agreed on 111 of 1712 argmax (6.5%) in a shape- and speed-correct kernel | Qwen3 rotates the *half-split* pair `(i, i + d/2)` (`rotate_half`), not the interleaved `(2i, 2i+1)` of GPT-J; `rope_half_f16` and `rope_half_f16_shared` now do it |
+| the adapter's audio tables | the base `audio_heads.weight` gave 40.7% argmax against the model's own logits, the adapter's gave 95.6% | `replaced_name` replaces `audio_embeddings` and `audio_heads`; the loader already did this, the check was in a Python tool |
+| the fixture's logits | the saved `cond_logits_00` differed from the model's own head output on codebooks 1 to 7; they were a strided slice of `batch_logits`, and `save_file` wrote the storage, not the values | `.contiguous()` before `.numpy()` in `omnivoice_reference.py`; the taps carry `post_norm`, `head_in` and `head_out` now |
+
+**The result** (`--test forward`, 2 rows, 486 positions):
+
+| Tap | ours vs f32 (max / mean) | the engine's own fp16 run vs f32 |
+|---|---|---|
+| `embed` | 0.0007 / 0.000020 | 0.0007 / 0.000020 |
+| `hidden_00` | 0.0117 / 0.000155 | 0.0215 / 0.000188 |
+| `hidden_13` | 0.2119 / 0.001000 | 0.2449 / 0.001509 |
+| `hidden_27` | 18.70 / 0.03278 | 47.26 / 0.05215 |
+| `post_norm` | 0.2294 / 0.000792 | 0.3675 / 0.001345 |
+
+The logits agree with the f32 model on **1692 of 1712** argmax (98.8%), max_abs 0.059. The f16 weights put us closer to the f32 model than the engine's own fp16 run is, so the test asserts that ratio (at most twice the engine's fp16 error) instead of an absolute tolerance.
+
+**The time:** one pass of the real batch shape (`[2, 486]`) is **112 ms** after the first (the first pays the cuBLAS and module setup, 656 ms). At `num_step = 32` the token stage would be about 3.6 s against the 2.3 s criterion, so the GEMMs and the copies are Task 12's work.
+

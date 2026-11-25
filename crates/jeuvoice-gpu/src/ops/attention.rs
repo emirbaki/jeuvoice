@@ -178,7 +178,8 @@ pub fn attention_bidir(
     blas.gemm_f16_batched(gpu, &qs, Op::N, row_d, &kxs, Op::T, row_d, &ss, t_len * t_len, t_len, t_len, d, batch, 1.0, 0.0)?;
     // 3. The padding mask of the batch rows, when the caller has shorter rows.
     if let Some(mask) = valid {
-        let ms = arena.slice::<i32>(mask);
+        // The valid lengths may start off the 256-byte alignment: scalar reads only.
+        let ms = arena.slice_unaligned::<i32>(mask);
         let cfg = LaunchConfig::for_num_elems(grid_elems(batch * t_len * t_len));
         // SAFETY: one thread per score value, and the mask has one value per batch.
         unsafe { gpu.kernels()?.attn_pad_mask_f16(gpu.stream(), cfg, ss.as_mut_ptr().cast(), ms.as_ptr(), t_len, hq, b) }?;

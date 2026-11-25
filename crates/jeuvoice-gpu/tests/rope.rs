@@ -21,9 +21,30 @@ fn rnd(n: usize, seed: u32, scale: f32) -> Vec<f32> {
         .collect()
 }
 
-/// `x` `[rows, heads, 128]` rotated in f64. The interleaved pair layout of Qwen3: the pair is
-/// `(2i, 2i + 1)` and the angle is `pos · theta^(-2i/head_dim)`.
-fn cpu_rope(x: &[f32], rows: usize, heads: usize, positions: &[i32], theta: f64) -> Vec<f32> {
+/// `x` `[rows, heads, 128]` rotated in f64 with the *half-split* pairs of Qwen3: the pair is
+/// `(i, i + 64)` and the angle is `pos · theta^(-2i/head_dim)`.
+fn cpu_rope_half(x: &[f32], rows: usize, heads: usize, positions: &[i32], theta: f64) -> Vec<f32> {
+    let mut y = x.to_vec();
+    let half = HEAD / 2;
+    for r in 0..rows {
+        for h in 0..heads {
+            let base = (r * heads + h) * HEAD;
+            for i in 0..half {
+                let inv = theta.powf(-(2.0 * i as f64) / HEAD as f64);
+                let angle = positions[r] as f64 * inv;
+                let (c, s) = (angle.cos(), angle.sin());
+                let a = x[base + i] as f64;
+                let b = x[base + i + half] as f64;
+                y[base + i] = (a * c - b * s) as f32;
+                y[base + i + half] = (a * s + b * c) as f32;
+            }
+        }
+    }
+    y
+}
+
+/// The *interleaved* pairs `(2i, 2i + 1)` of GPT-J, the layout lesson 10 compares against.
+fn cpu_rope_interleaved(x: &[f32], rows: usize, heads: usize, positions: &[i32], theta: f64) -> Vec<f32> {
     let mut y = x.to_vec();
     let half = HEAD / 2;
     for r in 0..rows {
@@ -64,10 +85,12 @@ fn rope_matches_the_cpu_reference() {
     let positions: Vec<i32> = vec![0, 1, 7, 200, 485];
     let x = rnd(rows * heads * HEAD, 81, 2.0);
     let rounded: Vec<f32> = x.iter().map(|&v| f16::from_f32(v).to_f32()).collect();
-    let want = cpu_rope(&rounded, rows, heads, &positions, theta as f64);
-    for kind in [RopeKind::Naive, RopeKind::Shared] {
+    let want_half = cpu_rope_half(&rounded, rows, heads, &positions, theta as f64);
+    let want_interleaved = cpu_rope_interleaved(&rounded, rows, heads, &positions, theta as f64);
+    for kind in [RopeKind::HalfSplit, RopeKind::HalfSplitShared, RopeKind::Interleaved] {
+        let want = if kind == RopeKind::Interleaved { &want_interleaved } else { &want_half };
         let got = run_rope(&gpu, kind, &x, rows, heads, &positions, theta);
-        assert_close(&format!("rope {kind:?}"), &got, &want, Tol { abs: 2e-3, rel: 5e-3 });
+        assert_close(&format!("rope {kind:?}"), &got, want, Tol { abs: 2e-3, rel: 5e-3 });
 
         // Position 0 must leave the row as it was: cos 0 = 1, sin 0 = 0.
         for k in 0..heads * HEAD {
@@ -83,11 +106,19 @@ fn rope_keeps_the_norm_of_each_pair() {
     let positions: Vec<i32> = vec![3, 140];
     let x = rnd(rows * heads * HEAD, 82, 1.0);
     let before: Vec<f32> = x.iter().map(|&v| f16::from_f32(v).to_f32()).collect();
-    for kind in [RopeKind::Naive, RopeKind::Shared] {
+    let half = HEAD / 2;
+    for kind in [RopeKind::HalfSplit, RopeKind::HalfSplitShared, RopeKind::Interleaved] {
         let got = run_rope(&gpu, kind, &x, rows, heads, &positions, 1_000_000.0);
-        // A rotation keeps a pair's length; f16 rounding is the only difference.
-        for p in 0..rows * heads * (HEAD / 2) {
-            let (i, j) = (2 * p, 2 * p + 1);
+        // A rotation keeps a pair's length; f16 rounding is the only difference. The pair of
+        // index p is (p, p + half) for the half-split layout and (2p, 2p + 1) for the other.
+        for p in 0..rows * heads * half {
+            let (i, j) = if kind == RopeKind::Interleaved {
+                (2 * p, 2 * p + 1)
+            } else {
+                let head_base = p / half * HEAD;
+                let within = p % half;
+                (head_base + within, head_base + within + half)
+            };
             let n0 = before[i] * before[i] + before[j] * before[j];
             let n1 = got[i] * got[i] + got[j] * got[j];
             assert!((n0 - n1).abs() <= 4e-3 * n0.max(1.0), "{kind:?} pair {p}: {n0} -> {n1}");
@@ -95,18 +126,31 @@ fn rope_keeps_the_norm_of_each_pair() {
     }
 }
 
-/// The two rope kinds must agree: the shared sine and cosine are the same values.
+/// The two half-split kernels must agree: the shared sine and cosine are the same values.
 #[test]
-fn the_two_rope_kinds_agree() {
+fn the_two_half_split_kinds_agree() {
     let gpu = Gpu::open(0).unwrap();
     let (rows, heads) = (4usize, 5usize);
     let positions: Vec<i32> = vec![0, 9, 81, 486];
     let x = rnd(rows * heads * HEAD, 85, 1.5);
-    let a = run_rope(&gpu, RopeKind::Naive, &x, rows, heads, &positions, 1_000_000.0);
-    let b = run_rope(&gpu, RopeKind::Shared, &x, rows, heads, &positions, 1_000_000.0);
-    assert_eq!(a, b, "the naive and the shared rope must give the same values");
+    let a = run_rope(&gpu, RopeKind::HalfSplit, &x, rows, heads, &positions, 1_000_000.0);
+    let b = run_rope(&gpu, RopeKind::HalfSplitShared, &x, rows, heads, &positions, 1_000_000.0);
+    assert_eq!(a, b, "the naive and the shared half-split rope must give the same values");
 }
 
+/// The two layouts rotate different pairs, so they give different values on the same input.
+/// Qwen3 needs the half-split one: the interleaved one is lesson 10's counter-example.
+#[test]
+fn the_two_layouts_differ() {
+    let gpu = Gpu::open(0).unwrap();
+    let (rows, heads) = (2usize, 2usize);
+    let positions: Vec<i32> = vec![5, 77];
+    let x = rnd(rows * heads * HEAD, 86, 1.5);
+    let half = run_rope(&gpu, RopeKind::HalfSplit, &x, rows, heads, &positions, 1_000_000.0);
+    let inter = run_rope(&gpu, RopeKind::Interleaved, &x, rows, heads, &positions, 1_000_000.0);
+    let differ = half.iter().zip(&inter).filter(|(a, b)| a != b).count();
+    assert!(differ > rows * heads * HEAD / 2, "only {differ} values differ between the layouts");
+}
 /// Runs one rmsnorm kind and gives the rows back as f32.
 fn run_rmsnorm(gpu: &Gpu, naive: bool, x: &[f32], rows: usize, w: &[f32]) -> Vec<f32> {
     let mut plan = ArenaPlan::new();

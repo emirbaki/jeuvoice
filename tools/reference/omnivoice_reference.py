@@ -12,7 +12,7 @@ It writes, into `target/reference/omnivoice/` (not committed):
 |---|---|
 | `<id>.det.npz` | the deterministic tokens `[8, T]` int32, the prompt frames `[8, T_ref]`, the text, the language, the target length |
 | `<id>.product.npz` | the same, from the product mode (`position_temperature` 5.0, the app's settings) |
-| `s1.taps.safetensors` | `embed` and `hidden_00` … `hidden_27` `[T, 1024]` f32 of the first pass, and `cond_logits_00` / `uncond_logits_00` `[8, T_target, 1025]` |
+| `s1.taps.safetensors` | `embed` and `hidden_00` … `hidden_27` `[T, 1024]` f32 of the first pass, `post_norm` / `head_in` `[T, 1024]` and `head_out` `[T, 8200]` of its final norm and audio head, `cond_logits_00` / `uncond_logits_00` `[8, T_target, 1025]`, and `ids0` / `audio_mask0` / `positions0` of that pass |
 
 The deterministic mode sets `position_temperature = 0.0` and `class_temperature = 0.0`, so the
 position choice is the plain score order. The engine's default adds Gumbel noise to the
@@ -48,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--guidance", type=float, default=2.5)
     ap.add_argument("--num-step", type=int, default=32)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--dtype", default="fp16", choices=["fp16", "fp32"], help="the model dtype: the engine uses fp16")
     ap.add_argument("--bench", type=int, default=0, help="render s1 this many times for the baseline")
     ap.add_argument("--skip-product", action="store_true")
     ap.add_argument("--skip-taps", action="store_true")
@@ -145,6 +146,23 @@ def capture_taps(model, prompt, script: dict, language: str, speed: float, cfg, 
         if marked["first"]:
             taps["embed"] = inputs[0][0].detach().float().to("cpu").numpy()
 
+    def llm_hook(_module, _inputs, output):
+        """The final hidden state, after `llm.norm`: the input of the audio head."""
+        if not marked["first"]:
+            return None
+        h = output[0] if isinstance(output, tuple) else output.last_hidden_state
+        taps["post_norm"] = h[0].detach().float().to("cpu").numpy()
+
+    handles.append(llm.register_forward_hook(llm_hook))
+
+    def head_hook(_module, inputs, output):
+        if not marked["first"]:
+            return None
+        taps["head_in"] = inputs[0][0].detach().float().to("cpu").numpy()
+        taps["head_out"] = output[0].detach().float().to("cpu").numpy()
+
+    handles.append(model.audio_heads.register_forward_hook(head_hook))
+
     for i, layer in enumerate(layers):
         handles.append(layer.register_forward_hook(layer_hook(i)))
     handles.append(layers[0].register_forward_pre_hook(embed_hook))
@@ -154,8 +172,10 @@ def capture_taps(model, prompt, script: dict, language: str, speed: float, cfg, 
 
     def wrapped(c_logits, u_logits, gen_config):
         if marked["first"]:
-            taps["cond_logits_00"] = c_logits[0].detach().float().to("cpu").numpy()
-            taps["uncond_logits_00"] = u_logits[0].detach().float().to("cpu").numpy()
+            # `.contiguous()` before numpy: `c_logits` is a strided slice of the batch logits,
+            # and `save_file` writes the storage of a strided array, not its values.
+            taps["cond_logits_00"] = c_logits[0].detach().float().to("cpu").contiguous().numpy()
+            taps["uncond_logits_00"] = u_logits[0].detach().float().to("cpu").contiguous().numpy()
             marked["first"] = False
         else:
             marked["first"] = False
@@ -279,7 +299,8 @@ def main() -> None:
 
     torch.manual_seed(args.seed)
     t0 = time.perf_counter()
-    model = OmniVoice.from_pretrained(args.model, device_map="cuda", dtype=torch.float16)
+    dtype = torch.float16 if args.dtype == "fp16" else torch.float32
+    model = OmniVoice.from_pretrained(args.model, device_map="cuda", dtype=dtype)
     if args.adapter:
         model = load_lora_adapter(model, args.adapter)
     model.eval()
@@ -288,7 +309,7 @@ def main() -> None:
     model.audio_tokenizer = model.audio_tokenizer.to("cpu")
     torch.cuda.empty_cache()
     load_s = time.perf_counter() - t0
-    print(f"model loaded in {load_s:.1f} s, device {model.device}")
+    print(f"model loaded in {load_s:.1f} s, device {model.device}, dtype {args.dtype}")
 
     t0 = time.perf_counter()
     prompt = model.create_voice_clone_prompt(ref_audio=ref_audio, ref_text=ref_text)

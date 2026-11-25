@@ -23,52 +23,85 @@ pub const T_MAX: usize = 1024;
 /// The two rows of a pass: the conditioned and the unconditioned input of the guidance.
 pub const BATCH: usize = 2;
 
-/// The activations of one pass. The residual stream `x` is f32, as in the Whisper path: the
-/// f16 residual lost a token on a near tie there, and it costs little at this size.
+/// The activations of one pass, flattened over the batch: a row of the sequence is one row of
+/// the tensors, so the GEMMs and the row kernels take slices with `Tensor::rows`.
 pub struct Activations {
+    /// `[batches·t, hidden]` f32: the residual stream.
     pub x: Tensor,
-    /// The LayerNorm output, the f16 input of the projections.
+    /// `[batches·t, hidden]` f16: the LayerNorm output, the GEMM input.
     pub h: Tensor,
-    /// `[BATCH, T, q_width]`: the queries before RoPE, then the rotated queries.
+    /// `[batches·t, q_width]` f16: the query projection.
+    pub q_row: Tensor,
+    /// `[batches·t, kv_width]` f16.
+    pub k_row: Tensor,
+    pub v_row: Tensor,
+    /// `[batches, heads_q, t, head_dim]` f16: the queries with the head layout of attention.
     pub q: Tensor,
-    /// `[BATCH, T, kv_width]`.
+    /// `[batches, heads_kv, t, head_dim]` f16.
     pub k: Tensor,
     pub v: Tensor,
-    /// `[BATCH, T, q_width]`: the attention output before the out projection.
+    /// `[batches·codebooks, t]` i32: the token ids of the pass, uploaded by the forward pass.
+    pub ids: Tensor,
+    /// `[batches, t]` i32: 1 where the position is an audio frame, else 0.
+    pub mask: Tensor,
+    /// `[batches]` i32: the real length of each row of a padded pass.
+    pub valid: Tensor,
+    /// `[batches, heads_q, t, head_dim]` f16: the attention output.
     pub att: Tensor,
-    /// `[BATCH, T, d_mlp]`: the gate, then `silu(gate)·up` in place.
-    pub gate: Tensor,
-    /// `[BATCH, T, d_mlp]`.
-    pub up: Tensor,
-    /// `[BATCH, T, hidden]`: a projection result, the residual addend, and the MLP output.
+    /// `[batches·t, q_width]` f16: the attention output in the row layout.
+    pub att_row: Tensor,
+    /// `[batches·t, hidden]` f16: a projection result, the residual addend.
     pub proj: Tensor,
-    /// `[BATCH, T, audio_head_rows]` f32: the logits of every codebook.
+    /// `[batches·t, d_mlp]` f16: the gate, then `silu(gate)·up` in place.
+    pub gate: Tensor,
+    /// `[batches·t, d_mlp]` f16.
+    pub up: Tensor,
+    /// `[batches·t, audio_head_rows]` f32: the logits of every codebook.
     pub logits: Tensor,
-    /// `[T]` i32: the sequence positions for RoPE.
+    /// `[batches·heads_q·t]` i32: the position of every query head row, for RoPE.
     pub positions: Tensor,
+    /// `[batches·heads_kv·t]` i32: the same for the key heads, which are fewer.
+    pub positions_kv: Tensor,
     /// `[head_dim / 2]` f32: the RoPE inverse frequencies.
     pub inv_freq: Tensor,
+ 	/// `[batches·heads_q, t, t]` f16: the attention scores.
+    pub scores: Tensor,
+    /// `[batches, heads_q, t, head_dim]` f16: the expanded key heads.
+    pub kx: Tensor,
+    /// `[batches, heads_q, t, head_dim]` f16: the expanded value heads.
+    pub vx: Tensor,
 }
 
 impl Activations {
-    fn plan(plan: &mut ArenaPlan, cfg: &OmniVoiceConfig) -> Activations {
-        let d = cfg.hidden_size;
-        let (q, kv, mlp) = (cfg.q_width(), cfg.kv_width(), cfg.intermediate_size);
-        let t = T_MAX;
-        let b = BATCH;
+    pub fn plan(plan: &mut jeuvoice_gpu::ArenaPlan, cfg: &OmniVoiceConfig) -> Activations {
+        use jeuvoice_gpu::DType;
+        let (d, q_w, kv_w, mlp) = (cfg.hidden_size, cfg.q_width(), cfg.kv_width(), cfg.intermediate_size);
+        let (t, b, hq, hkv, hd) = (crate::weights::T_MAX, crate::weights::BATCH, cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim);
+        let rows = b * t;
         Activations {
-            x: plan.add(DType::F32, &[b, t, d]),
-            h: plan.add(DType::F16, &[b, t, d]),
-            q: plan.add(DType::F16, &[b, t, q]),
-            k: plan.add(DType::F16, &[b, t, kv]),
-            v: plan.add(DType::F16, &[b, t, kv]),
-            att: plan.add(DType::F16, &[b, t, q]),
-            gate: plan.add(DType::F16, &[b, t, mlp]),
-            up: plan.add(DType::F16, &[b, t, mlp]),
-            proj: plan.add(DType::F16, &[b, t, q]),
-            logits: plan.add(DType::F32, &[b, t, cfg.audio_head_rows()]),
-            positions: plan.add(DType::I32, &[t]),
-            inv_freq: plan.add(DType::F32, &[cfg.head_dim / 2]),
+            x: plan.add(DType::F32, &[rows, d]),
+            h: plan.add(DType::F16, &[rows, d]),
+            q_row: plan.add(DType::F16, &[rows, q_w]),
+            k_row: plan.add(DType::F16, &[rows, kv_w]),
+            v_row: plan.add(DType::F16, &[rows, kv_w]),
+            q: plan.add(DType::F16, &[b, hq, t, hd]),
+            k: plan.add(DType::F16, &[b, hkv, t, hd]),
+            v: plan.add(DType::F16, &[b, hkv, t, hd]),
+            att: plan.add(DType::F16, &[b, hq, t, hd]),
+            att_row: plan.add(DType::F16, &[rows, q_w]),
+            proj: plan.add(DType::F16, &[rows, d]),
+            gate: plan.add(DType::F16, &[rows, mlp]),
+            up: plan.add(DType::F16, &[rows, mlp]),
+            logits: plan.add(DType::F32, &[rows, cfg.audio_head_rows()]),
+            positions: plan.add(DType::I32, &[b * hq * t]),
+            positions_kv: plan.add(DType::I32, &[b * hkv * t]),
+            inv_freq: plan.add(DType::F32, &[hd / 2]),
+            scores: plan.add(DType::F16, &[b * hq, t, t]),
+            ids: plan.add(DType::I32, &[b * cfg.num_audio_codebook, t]),
+            mask: plan.add(DType::I32, &[b, t]),
+            valid: plan.add(DType::I32, &[b]),
+            kx: plan.add(DType::F16, &[b, hq, t, hd]),
+            vx: plan.add(DType::F16, &[b, hq, t, hd]),
         }
     }
 }
@@ -157,11 +190,10 @@ impl OmniVoiceWeights {
             tensors.insert(name, t);
         }
 
-        // The RoPE table and the positions, once.
+        // The RoPE table, once. The positions follow the head-row layout of the pass, and
+        // the forward pass uploads the prefix it uses.
         let inv = jeuvoice_gpu::ops::rope_inv_freq(cfg.rope_theta, cfg.head_dim);
         arena.upload(gpu, &act.inv_freq, &inv)?;
-        let positions: Vec<i32> = (0..T_MAX as i32).collect();
-        arena.upload(gpu, &act.positions, &positions)?;
 
         Ok(OmniVoiceWeights { arena, act, weight_bytes, activation_bytes, load_seconds: started.elapsed().as_secs_f64(), tensors })
     }

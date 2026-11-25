@@ -141,7 +141,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // RoPE and the per-head RMSNorm rows of the Qwen3 backbone (Phase 2, lesson 10).
     // 8 MB in and 8 MB out: big enough that the 4 MB L2 does not hold the tensor.
-    for (name, kind) in [("rope_f16", RopeKind::Shared), ("rope_f16_naive", RopeKind::Naive)] {
+    for (name, kind) in [
+        ("rope_f16", RopeKind::HalfSplitShared),
+        ("rope_f16_naive", RopeKind::HalfSplit),
+        ("rope_f16_interleaved", RopeKind::Interleaved),
+    ] {
         if name.contains(&filter) {
             rows.push(bench_rope(&gpu, name, kind, 2000, 16, 128)?);
         }

@@ -17,24 +17,28 @@ pub fn rope_inv_freq(theta: f32, d: usize) -> Vec<f32> {
 }
 
 /// Rotates the pairs of `x` (`[rows, heads, d]`, `F16`) in place. `positions` is `I32 [rows]`
-/// and `inv_freq` is `F32 [d/2]` (see `rope_inv_freq`). The pair `(2i, 2i+1)` of a head
-/// rotates by `position · inv_freq[i]`.
+/// and `inv_freq` is `F32 [d/2]` (see `rope_inv_freq`). The half-split pair `(i, i + d/2)`
+/// of a head rotates by `position · inv_freq[i]`, the layout of Qwen3.
 ///
 /// # Panics
 /// On a wrong dtype or shape, an odd `d`, or a `positions` tensor that is not `[rows]`.
 pub fn rope(gpu: &Gpu, arena: &Arena, x: &Tensor, positions: &Tensor, inv_freq: &Tensor) -> Result<(), GpuError> {
-    rope_with(gpu, arena, x, positions, inv_freq, RopeKind::Shared)
+    let d = *x.shape().last().unwrap_or(&0);
+    let kind = if d > 0 && d / 2 <= 64 { RopeKind::HalfSplitShared } else { RopeKind::HalfSplit };
+    rope_with(gpu, arena, x, positions, inv_freq, kind)
 }
 
-/// How the RoPE kernel gets the sine and cosine of a pair.
+/// Which kernel rotates the pairs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RopeKind {
-    /// `sinf` and `cosf` in every thread, that is once per (row, head, pair) (the lesson's
-    /// first version).
-    Naive,
-    /// The sine and cosine of a pair go to shared memory once per row, and the heads of the
-    /// row reuse them (the product uses this). Needs `d <= 128`.
-    Shared,
+    /// The half-split pairs `(i, i + d/2)` of Qwen3, one thread per pair. The product uses
+    /// this.
+    HalfSplit,
+    /// The interleaved pairs `(2i, 2i+1)` of GPT-J, for lesson 10.
+    Interleaved,
+    /// The half-split pairs with the sine and cosine of a pair in shared memory once per row,
+    /// so the heads of a row reuse them. Needs `d <= 128`. The product uses this.
+    HalfSplitShared,
 }
 
 /// `rope` with a chosen kernel.
@@ -42,8 +46,13 @@ pub fn rope_with(gpu: &Gpu, arena: &Arena, x: &Tensor, positions: &Tensor, inv_f
     assert_eq!(x.dtype(), DType::F16, "rope: x must be F16");
     assert_eq!(positions.dtype(), DType::I32, "rope: positions must be I32");
     assert_eq!(inv_freq.dtype(), DType::F32, "rope: inv_freq must be F32");
-    assert_eq!(x.shape().len(), 3, "rope: x must be [rows, heads, d]");
-    let (rows, heads, d) = (x.shape()[0], x.shape()[1], x.shape()[2]);
+    // A 2-D tensor is one head per row: the head rows of the attention are contiguous, so
+    // the caller reshapes `[batches, heads, t, d]` and passes `[rows·heads, d]`.
+    assert!(matches!(x.shape().len(), 2 | 3), "rope: x must be [rows, heads, d] or [rows, d]");
+    let (rows, heads, d) = match x.shape().len() {
+        2 => (x.shape()[0], 1, x.shape()[1]),
+        _ => (x.shape()[0], x.shape()[1], x.shape()[2]),
+    };
     assert!(d % 2 == 0, "rope: the head width {d} must be even");
     assert_eq!(positions.numel(), rows, "rope: positions must have one value per row");
     assert_eq!(inv_freq.numel(), d / 2, "rope: inv_freq must hold d/2 values");
@@ -53,18 +62,23 @@ pub fn rope_with(gpu: &Gpu, arena: &Arena, x: &Tensor, positions: &Tensor, inv_f
     let (xs, ps, fs) = (arena.slice::<f16>(x), arena.slice::<i32>(positions), arena.slice::<f32>(inv_freq));
     let k = gpu.kernels()?;
     match kind {
-        RopeKind::Naive => {
+        RopeKind::HalfSplit => {
             let cfg = LaunchConfig::for_num_elems(grid_elems(rows * heads * (d / 2)));
             // SAFETY: one thread per pair, rows * heads * d/2 threads, and the pair of a
             // thread is inside x. positions and inv_freq are read only.
+            unsafe { k.rope_half_f16(gpu.stream(), cfg, xs.as_mut_ptr().cast(), ps.as_ptr(), fs.as_ptr(), heads, d) }?;
+        }
+        RopeKind::Interleaved => {
+            let cfg = LaunchConfig::for_num_elems(grid_elems(rows * heads * (d / 2)));
+            // SAFETY: as the half-split path.
             unsafe { k.rope_f16(gpu.stream(), cfg, xs.as_mut_ptr().cast(), ps.as_ptr(), fs.as_ptr(), heads, d) }?;
         }
-        RopeKind::Shared => {
+        RopeKind::HalfSplitShared => {
             assert!(d / 2 <= 64, "rope: the shared path needs a head width of at most 128, not {d}");
             let cfg = LaunchConfig { grid_dim: (grid_elems(rows), 1, 1), block_dim: ((d / 2) as u32, 1, 1), shared_mem_bytes: 0 };
             // SAFETY: one block per row and d/2 threads, so every pair of the row has one
             // thread, and the shared slots hold two values per pair (at most 128).
-            unsafe { k.rope_f16_shared(gpu.stream(), cfg, xs.as_mut_ptr().cast(), ps.as_ptr(), fs.as_ptr(), heads, d) }?;
+            unsafe { k.rope_half_f16_shared(gpu.stream(), cfg, xs.as_mut_ptr().cast(), ps.as_ptr(), fs.as_ptr(), heads, d) }?;
         }
     }
     Ok(())

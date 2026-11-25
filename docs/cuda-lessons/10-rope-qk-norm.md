@@ -2,21 +2,23 @@
 
 OmniVoice'ın dil modeli Qwen3'tür. Whisper'dan iki farkı bu dersin konusu: her dikkat kafası, sorgu ve anahtar vektörünü konuma göre **döndürür** (RoPE), ve her kafanın kendi **RMSNorm**'u vardır (q/k norm). İkisi de 128 değerlik satırlar üzerinde çalışır ve her katmanda iki kez koşar.
 
-Kod: `crates/jeuvoice-gpu/src/kernels/mod.rs` (`rope_f16`, `rope_f16_shared`, `rmsnorm_rows_f16`, `rmsnorm_rows_f16_small`, `block_sum_4`), `crates/jeuvoice-gpu/src/ops/rope.rs`.
+Kod: `crates/jeuvoice-gpu/src/kernels/mod.rs` (`rope_half_f16`, `rope_half_f16_shared`, `rope_f16`, `rmsnorm_rows_f16`, `rmsnorm_rows_f16_small`, `block_sum_4`), `crates/jeuvoice-gpu/src/ops/rope.rs`.
 
 Ölçümler: RTX 3050 Ti Laptop, bellek sınırı 192 GB/s. `target\release\gpu-bench.exe rope_f16`, `... rmsnorm_rows`. Boyutlar bilerek büyük: 8 MB girer, 8 MB çıkar, yani 4 MB'lık L2 tensörü tutamaz.
 
 ## 1. Ne yapıyorlar?
 
-**RoPE** (rotary position embedding) bir çifti döndürür. Qwen3'te çift bitişiktir: `(2i, 2i+1)`. Açı konumdan gelir:
+**RoPE** (rotary position embedding) bir çifti döndürür. Qwen3'te çift **yarıya bölünmüştür**: `(i, i + d/2)`, yani `i` ile `i + 64`. Hugging Face bunu `rotate_half` diye yazar. Açı konumdan gelir:
 
 ```
 angle = pos · theta^(-2i/d),   theta = 1e6, d = 128
-q'[2i]   = q[2i]·cos(angle) - q[2i+1]·sin(angle)
-q'[2i+1] = q[2i]·sin(angle) + q[2i+1]·cos(angle)
+q'[i]      = q[i]·cos(angle) - q[i + 64]·sin(angle)
+q'[i + 64] = q[i]·sin(angle) + q[i + 64]·cos(angle)
 ```
 
 Döndürme uzunluğu korur, yani bir çiftin normu değişmez. İki vektörün iç çarpımı yalnızca **aradaki konum farkına** bağlı olur. Model "kim nerede" bilgisini böyle taşır.
+
+**Çift düzeni görünmez bir ayrıntıdır ama modeli bozar.** GPT-J'in kullandığı düzen bitişiktir: çift `(2i, 2i+1)`. İlk sürüm bu düzeni yazdı, çünkü şekil ve hız aynı görünüyordu. Ölçüm konuştu: yanlış düzenle ilk geçişin logitleri f32 PyTorch referansıyla 1712 konumun yalnızca **111'inde** aynı argmax'ı verdi (%6,5). Doğru düzenle **1692** konumda (%98,8). Kalan 20 fark, referansın kendi fp16 yuvarlamasıyla aynı mertebede. Yani hata "biraz sayısal gürültü" değil, modelin tamamen başka bir çıktı üretmesiydi.
 
 **q/k RMSNorm** her kafayı ayrı normalleştirir (Whisper'da LayerNorm tüm satırı normalleştiriyordu):
 
@@ -43,7 +45,7 @@ let angle = pos * inv_freq[pair];
 let (s, c) = (sinf(angle), cosf(angle));
 ```
 
-Ölçüm (`[2000, 16, 128]`): **108,5 µs, 151 GB/s, sınırın %79'u.**
+Ölçüm (`[2000, 16, 128]`): **117,9 µs, 138,9 GB/s, sınırın %72'si.**
 
 **RMSNorm, ilk sürüm:** satır başına 256 thread (d = 128 olduğu hâlde), ve yazma geçişinde `x` **ikinci kez** okunur:
 
@@ -58,7 +60,7 @@ let v = *x.add(base + c) as f32;    // 2. okuma
 
 ## 4. Hızlandırma adımları
 
-### 4.1. RoPE: açıyı satır başına bir kez (108,5 → 98,2 µs)
+### 4.1. RoPE: açıyı satır başına bir kez (117,9 → 98,9 µs)
 
 Bir satırın 16 kafası **aynı açıları** kullanır. İlk sürüm aynı `sinf/cosf` çiftini 16 kez hesaplıyor. Yeni sürümde blok bir satırdır, 64 thread (d/2) açıyı bir kez hesaplar, `sin` ve `cos`'u shared memory'ye yazar, sonra her thread 16 kafayı dolaşır:
 
@@ -69,9 +71,11 @@ let (s, c) = (ANG[2*pair], ANG[2*pair+1]);
 while h < heads { /* çifti döndür */ h += 1; }
 ```
 
-Ölçüm: **98,2 µs, 167 GB/s, %87.** Kazanç 1,1 kat.
+Ölçüm: **98,9 µs, 165,6 GB/s, %86.** Kazanç 1,19 kat.
 
-Neden bu kadar az? Çünkü kernel **bellek sınırlı**. 2M çiftde tetik hesabı 32k'ya indi, ama süre yalnızca %10 düştü: `sinf`/`cosf` PTX'te birkaç komut (`sin.approx.f32` benzeri), ve bellek gecikmesi zaten baskın. Bu, "hesabı azaltmak her zaman hız demek değildir" kuralının bir örneği daha. Yine de bu değişiklik kalıyor: küçük tensörlerde (L2'de kalan) fark büyür.
+Neden bu kadar az? Çünkü kernel **bellek sınırlı**. 2M çiftde tetik hesabı 32k'ya indi, ama süre yalnızca %16 düştü: `sinf`/`cosf` PTX'te birkaç komut (`sin.approx.f32` benzeri), ve bellek gecikmesi zaten baskın. Bu, "hesabı azaltmak her zaman hız demek değildir" kuralının bir örneği daha. Yine de bu değişiklik kalıyor: küçük tensörlerde (L2'de kalan) fark büyür.
+
+Bitişik düzenin paylaşımlı sürümü aynı kodla 109,0 µs (%78) ölçüldü: düzen yalnızca indekstir, hızı değiştirmez. Fark **doğrulukta**.
 
 ### 4.2. RMSNorm: 128 thread ve register (372,6 → 154,2 µs)
 
@@ -94,10 +98,10 @@ Neden %100 değil? Trafik 16 MB, 154 µs'de 106 GB/s. Kalan kayıp işlem boyutu
 
 | Kernel | Önce | Sonra | Sınırın yüzdesi |
 |---|---|---|---|
-| `rope_f16` | 108,5 µs (naive) | **98,2 µs** | %79 → **%87** |
+| `rope_f16` | 117,9 µs (naive) | **98,9 µs** | %72 → **%86** |
 | `rmsnorm_rows_f16` | 372,6 µs (naive) | **154,2 µs** | %23 → **%55** |
 
-RoPE için sınır bellek: 1M f16 oku + yaz = 4 MB... hayır, 2000 satır × 16 kafa × 128 × 2 bayt = 8 MB, oku + yaz = **16,4 MB**. 98,2 µs'de 167 GB/s, 192 GB/s'nin %87'si. Bu, kartta bir bellek kernel'i için iyi bir sonuç.
+RoPE için sınır bellek: 1M f16 oku + yaz = 4 MB... hayır, 2000 satır × 16 kafa × 128 × 2 bayt = 8 MB, oku + yaz = **16,4 MB**. 98,9 µs'de 165,6 GB/s, 192 GB/s'nin %86'sı. Bu, kartta bir bellek kernel'i için iyi bir sonuç.
 
 RMSNorm'un %55'i, blok başına işin küçüklüğünden. Geçiş başına maliyet: RoPE 56 × ~0,05 ms ≈ 2,8 ms değil, ölçek küçük olduğu için gerçek toplam geçiş başına ~5 ms; 32 geçişte ~160 ms. Bu yüzden alıştırma 1 önemli: %55'i %80'e çıkarmak geçiş başına ~2 ms kazandırır.
 
@@ -105,7 +109,7 @@ RMSNorm'un %55'i, blok başına işin küçüklüğünden. Geçiş başına mali
 
 PTX (`target\oxide-ptx\jeuvoice_gpu.ptx`):
 
-- `rope_f16_shared`: `sin.approx.f32` / `cos.approx.f32` (ya da libm'in polinomu), `st.shared.f32` × 2, `bar.sync`, sonra kafa döngüsünde `ld.global.b16` × 2 + `fma.rn.f32` × 4 + `st.global.b16` × 2.
+- `rope_half_f16_shared`: `sin.approx.f32` / `cos.approx.f32` (ya da libm'in polinomu), `st.shared.f32` × 2, `bar.sync`, sonra kafa döngüsünde `ld.global.b16` × 2 + `fma.rn.f32` × 4 + `st.global.b16` × 2.
 - `rmsnorm_rows_f16_small`: **tek** `ld.global.b16` (ikinci okuma yok), `shfl.sync.bfly` × 5, `bar.sync` × 2, `ld.shared.f32` × 4, `st.global.b16` × 1. Naive sürümde iki `ld.global.b16` görürsün: dersin ölçtüğü fark tam olarak bu.
 - `block_sum_4`: 4 slot (256 thread'lik `block_sum` 8 slot kullanır). Daha az shared trafik.
 
@@ -127,3 +131,4 @@ ncu --set full -k regex:rmsnorm_rows -o rms target\release\gpu-bench.exe rmsnorm
 3. **RoPE'u q/k projeksiyonuna kat.** Projeksiyon GEMM'inin çıktısını yazarken döndür (epilogue). Hangi tensör hiç yazılmaz, kaç µs kazanılır?
 4. **Tablo.** Bir geçişte tüm konumların `sin/cos` tablosunu bir kez hesapla (486 × 64 × 2 f32 = 249 KB), RoPE onu okusun. Trig tamamen kalkınca süre ne oluyor?
 5. **`sinf` yerine polinom.** Kendi sinüs polinomunu yaz (5. derece yeterli) ve `libm::sinf` ile karşılaştır: hız ve hata. Attention skorları ne kadar kayıyor?
+6. **Çift düzeni.** Aynı girdiyle `rope_half_f16` ve `rope_f16` kernel'lerini koştur. Farkın hangi indekslerde olduğunu yaz. `rotate_half` ile yarıya bölünmüş düzenin neden bitişik düzenden farklı olduğunu göster. Aynı şeyi bir test iddiasına çevir: yanlış düzen kaç logit argmax'ını bozar?
