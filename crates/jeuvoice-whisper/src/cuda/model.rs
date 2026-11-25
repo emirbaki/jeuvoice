@@ -27,6 +27,7 @@ impl GpuWhisper {
     /// of `model`.
     pub fn load(model: &GgmlModel) -> Result<GpuWhisper, WhisperError> {
         model.check_gpu_encoder()?;
+        model.check_large_v3_turbo()?;
         let gpu = Gpu::open(0)?;
         let blas = Blas::load(&gpu)?;
         let mel = GpuMel::new(&gpu, &model.mel_filters.2)?;

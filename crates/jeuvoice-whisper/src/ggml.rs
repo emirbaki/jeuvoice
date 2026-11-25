@@ -191,8 +191,7 @@ impl GgmlModel {
 
     /// Checks that the GPU encoder can run this model: the large-v3-turbo encoder shapes
     /// (128 mel bands with 201 filter bins, 1500 positions, heads of 64, at least one layer).
-    pub fn check_gpu_encoder(&self) -> Result<(), WhisperError> {
-        let h = &self.hparams;
+    pub fn check_gpu_encoder(&self) -> Result<(), WhisperError> {        let h = &self.hparams;
         let fail = |what: String| Err(bad(format!("the GPU path supports Whisper large-v3 models only: {what}")));
         if h.n_mels != 128 || self.mel_filters.0 != 128 || self.mel_filters.1 != 201 {
             return fail(format!("{} mel bands with {}x{} filters, not 128 with 128x201", h.n_mels, self.mel_filters.0, self.mel_filters.1));
@@ -207,6 +206,23 @@ impl GgmlModel {
             return fail(format!("{} encoder layers", h.n_audio_layer));
         }
         Ok(())
+    }
+
+    /// Checks that this model is large-v3-turbo: 32 encoder layers, 4 decoder layers, width
+    /// 1280 and the 51866 tokens. The GPU path assumes it. The decoder arenas fit 4 blocks,
+    /// and `decode::dtw::ALIGNMENT_HEADS` holds the heads of this model only, so another
+    /// model would give wrong word times in silence. Whisper large-v3 has the same
+    /// vocabulary, encoder shape and width, so only the layer counts catch it.
+    pub fn check_large_v3_turbo(&self) -> Result<(), WhisperError> {
+        let h = &self.hparams;
+        let ok = h.n_audio_layer == 32 && h.n_text_layer == 4 && h.n_audio_state == 1280 && h.n_text_state == 1280 && h.n_vocab == 51866;
+        if ok {
+            return Ok(());
+        }
+        Err(WhisperError::ModelLoad(format!(
+            "the GPU path needs Whisper large-v3-turbo (32 encoder layers, 4 decoder layers, width 1280, 51866 tokens), but this model has {} encoder layers, {} decoder layers, width {}/{}, {} tokens",
+            h.n_audio_layer, h.n_text_layer, h.n_audio_state, h.n_text_state, h.n_vocab
+        )))
     }
 
     pub fn tensor(&self, name: &str) -> Option<&GgmlTensor> {

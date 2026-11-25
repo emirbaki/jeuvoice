@@ -54,15 +54,16 @@ fn cuda_requested(value: Option<&str>) -> bool {
 }
 
 /// Loads the model for one transcription. The CUDA path runs only when the environment asks
-/// for it. If it fails to load, whisper.cpp takes over: every load failure is
-/// `WhisperError::ModelLoad`, so a build without the GPU kernels still transcribes.
+/// for it and the settings allow the GPU. If it fails to load, whisper.cpp takes over: every
+/// load failure is `WhisperError::ModelLoad`, so a build without the GPU kernels still
+/// transcribes.
 fn load_with(
     use_gpu: bool,
     cuda_requested: bool,
     cuda: impl FnOnce() -> Result<Loaded, WhisperError>,
     whisper: impl FnOnce(bool) -> Result<Loaded, WhisperError>,
 ) -> Result<Loaded, WhisperError> {
-    if cuda_requested {
+    if cuda_requested && use_gpu {
         match cuda() {
             Ok(loaded) => return Ok(loaded),
             Err(e) => eprintln!("the CUDA path did not load, so whisper.cpp runs: {e}"),
@@ -262,5 +263,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(asked.get(), Some(false));
+    }
+
+    /// The settings win over the variable: "GPU off" means the GPU, also when
+    /// `JEUVOICE_CUDA_WHISPER=1` asks for the CUDA path.
+    #[test]
+    fn the_gpu_setting_off_skips_the_cuda_path() {
+        let tried = Cell::new(0);
+        let loaded = load_with(
+            false,
+            true,
+            || {
+                tried.set(tried.get() + 1);
+                Err(WhisperError::ModelLoad("must not run".into()))
+            },
+            |use_gpu| {
+                assert!(!use_gpu, "whisper.cpp must load on the CPU");
+                Ok(fake(Some(false)))
+            },
+        )
+        .unwrap();
+        assert_eq!(tried.get(), 0, "the CUDA loader ran although the GPU setting is off");
+        assert_eq!(loaded.on_gpu, Some(false));
     }
 }

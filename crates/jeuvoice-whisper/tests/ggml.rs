@@ -115,6 +115,8 @@ fn rejects_truncated_file() {
 #[ignore = "needs the downloaded model"]
 fn reads_large_v3_turbo() {
     let m = GgmlModel::open(&jeuvoice_whisper::model_path()).unwrap();
+    m.check_large_v3_turbo().expect("the test model is large-v3-turbo");
+    m.check_gpu_encoder().expect("the test model fits the GPU encoder");
     let h = &m.hparams;
     assert_eq!((h.n_mels, h.n_audio_layer, h.n_text_layer, h.n_vocab), (128, 32, 4, 51866));
     assert_eq!((h.n_audio_ctx, h.n_audio_state, h.n_audio_head), (1500, 1280, 20));
@@ -147,3 +149,19 @@ fn checks_the_encoder_shape() {
         other => panic!("a 2-band model must be rejected, got {other:?}"),
     }
 }
+
+/// A whisper large-v3 model (not turbo) has the same vocabulary, encoders and width, so the
+/// GPU path must refuse it by its layer counts: the DTW alignment heads are turbo only.
+#[test]
+fn a_model_that_is_not_large_v3_turbo_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = GgmlModel::open(&tiny(dir.path(), 1)).unwrap();
+    match m.check_large_v3_turbo() {
+        Err(WhisperError::ModelLoad(why)) => {
+            assert!(why.contains("large-v3-turbo"), "{why}");
+            assert!(why.contains("encoder layers"), "{why}");
+        }
+        other => panic!("a model that is not large-v3-turbo must be ModelLoad, got {:?}", other),
+    }
+}
+

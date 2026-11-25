@@ -91,6 +91,9 @@ impl Decoder {
     /// Plans the weights, the caches and the activations in one arena, allocates it, and
     /// uploads the decoder weights of `model`.
     pub fn load(gpu: &Gpu, model: &GgmlModel) -> Result<Decoder, WhisperError> {
+        // The alignment heads of the DTW pass are the large-v3-turbo ones, and the arenas
+        // fit 4 blocks.
+        model.check_large_v3_turbo()?;
         let mut plan = ArenaPlan::new();
         let w = DecoderWeights::plan(&mut plan, model)?;
         let weight_bytes = plan.total_bytes();
