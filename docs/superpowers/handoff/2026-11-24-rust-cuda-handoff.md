@@ -1,5 +1,7 @@
 # Handoff: Rust CUDA inference (Whisper and OmniVoice in Rust kernels)
 
+> **Superseded for the current work** by `2026-11-25-rust-cuda-phase1b-handoff.md`. This file keeps the history of Phase 0 and Phase 1a.
+
 Date: 2026-11-24. Written by the previous agent for the next agent. Read `AGENTS.md` at the repo root first. It has the rules and the commands.
 
 ## 1. Start here
