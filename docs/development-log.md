@@ -492,3 +492,16 @@ The near tie of my_voice2 window 1 (token 80) does not move: "uy" with p 0.509 a
 - PyTorch f32 (transformers, teacher forced, window 1 of my_voice2) prefers "uy" (id 7493, p 0.5448) over "u" (id 84, p 0.4528). Our token matches the f32 model. whisper.cpp is the outlier at this step.
 
 So criterion 1 (WER against whisper.cpp) counts one substitution and one deletion for a token where we agree with the f32 model. The reference for that check was `target/reference/whisper/my_voice2.win1.rs.json`: the first five segments of the whisper-rs fixture (they end before 3000), because the reference tool refuses a clip longer than one window. That file is not committed.
+
+### The six criteria after Task 13 and Task 14 (2026-11-25)
+
+| Criterion | Limit | whisper.cpp | CudaWhisper | Pass |
+|---|---|---|---|---|
+| 1. WER on each file | 2% | — | worst 2.86% | **no** (see the tie below) |
+| 2. Median word-start difference | 50 ms | — | 0 ms | yes |
+| 3. Time of the 69 s set | 4.3 s | 4.007 s | 3.877 s | yes |
+| 4. Peak VRAM of the card | not more than whisper.cpp | 2148 MiB | 1799 MiB | yes |
+| 5. The tests and the real-model tests with CudaWhisper | all pass | — | 67 + 4 real-model | yes |
+| 6. The app transcribes on the CPU without CUDA | works | — | `load_with` falls back on `ModelLoad`; the no-GPU load is a test | yes (two tests, no manual UI run) |
+
+Criterion 1 is the one near tie of my_voice2 window 1. PyTorch f32 prefers "uy" at p 0.5448 against "u" at 0.4528, so the CudaWhisper token is the model answer and whisper.cpp is the outlier (it accumulates its matmuls in f16). Only the user can change a criterion.
