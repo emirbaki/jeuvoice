@@ -4,7 +4,7 @@
 use cuda_core::LaunchConfig;
 use half::f16;
 
-use super::{grid_elems, softmax_rows};
+use super::{grid_elems, llm::repeat_heads, softmax_rows};
 use crate::blas::{Blas, Op};
 use crate::kernels::{FLASH_BR, FLASH_D, FTC_ROWS, FTC_THREADS};
 use crate::{Arena, DType, Gpu, GpuError, Tensor};
@@ -107,6 +107,86 @@ pub fn attention(
             }?;
         }
     }
+    Ok(())
+}
+
+/// The scratch of `attention_bidir`.
+pub struct BidirScratch<'a> {
+    /// `[batches, heads_q, t, d]` F16: the key heads after the repeat.
+    pub kx: &'a Tensor,
+    /// `[batches, heads_q, t, d]` F16.
+    pub vx: &'a Tensor,
+    /// `[batches·heads_q, t, t]` F16: the scores, then the probabilities.
+    pub scores: &'a Tensor,
+}
+
+/// Bidirectional grouped-query attention over the whole sequence, the attention of the
+/// OmniVoice (Qwen3) backbone: `out = softmax(q·kᵀ/√d) · v` for every batch and head, with no
+/// causal mask. Query head `h` reads key head `h / group`.
+///
+/// `q` and `out` are `[batches, heads_q, t, d]`, `k` and `v` are `[batches, heads_kv, t, d]`.
+/// `valid` (`I32 [batches]`, optional) holds the real length of each row: a score past it is
+/// dropped, and a query position past it sees only itself, as in `omnivoice.py:1339-1347`.
+///
+/// # Panics
+/// On a wrong dtype, shape, or scratch size.
+#[allow(clippy::too_many_arguments)]
+pub fn attention_bidir(
+    gpu: &Gpu,
+    arena: &Arena,
+    blas: &Blas,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    out: &Tensor,
+    scratch: BidirScratch<'_>,
+    valid: Option<&Tensor>,
+) -> Result<(), GpuError> {
+    for (name, t) in [("q", q), ("k", k), ("v", v), ("out", out)] {
+        assert_eq!(t.dtype(), DType::F16, "attention_bidir: {name} must be F16");
+    }
+    let (b, hq, t_len, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
+    let h_kv = k.shape()[1];
+    assert_eq!(q.shape().len(), 4, "attention_bidir: q must be [batches, heads, t, d]");
+    assert_eq!(k.shape(), &[b, h_kv, t_len, d], "attention_bidir: k must be [batches, heads_kv, t, d]");
+    assert_eq!(v.shape(), k.shape(), "attention_bidir: v must have the shape of k");
+    assert_eq!(out.shape(), q.shape(), "attention_bidir: out must have the shape of q");
+    assert!(h_kv > 0 && hq % h_kv == 0, "attention_bidir: {hq} query heads with {h_kv} key heads");
+    assert_eq!(scratch.kx.shape(), q.shape(), "attention_bidir: kx must have the shape of q");
+    assert_eq!(scratch.vx.shape(), q.shape(), "attention_bidir: vx must have the shape of q");
+    assert_eq!(scratch.scores.shape(), &[b * hq, t_len, t_len], "attention_bidir: scores must be [batches·heads, t, t]");
+    if let Some(mask) = valid {
+        assert_eq!(mask.dtype(), DType::I32, "attention_bidir: valid must be I32");
+        assert_eq!(mask.numel(), b, "attention_bidir: valid needs one value per batch");
+    }
+    if b == 0 || t_len == 0 || d == 0 {
+        return Ok(());
+    }
+    // 1. The key and value heads of a group are the same, so expand them once.
+    repeat_heads(gpu, arena, k, scratch.kx)?;
+    repeat_heads(gpu, arena, v, scratch.vx)?;
+    // 2. The scores, a batched product over every batch and head.
+    let (qs, kxs, ss, vxs, os) = (
+        arena.slice::<f16>(q),
+        arena.slice::<f16>(scratch.kx),
+        arena.slice::<f16>(scratch.scores),
+        arena.slice::<f16>(scratch.vx),
+        arena.slice::<f16>(out),
+    );
+    let batch = b * hq;
+    let row_d = t_len * d;
+    blas.gemm_f16_batched(gpu, &qs, Op::N, row_d, &kxs, Op::T, row_d, &ss, t_len * t_len, t_len, t_len, d, batch, 1.0, 0.0)?;
+    // 3. The padding mask of the batch rows, when the caller has shorter rows.
+    if let Some(mask) = valid {
+        let ms = arena.slice::<i32>(mask);
+        let cfg = LaunchConfig::for_num_elems(grid_elems(batch * t_len * t_len));
+        // SAFETY: one thread per score value, and the mask has one value per batch.
+        unsafe { gpu.kernels()?.attn_pad_mask_f16(gpu.stream(), cfg, ss.as_mut_ptr().cast(), ms.as_ptr(), t_len, hq, b) }?;
+    }
+    // 4. The softmax over the keys, with the scale of the head width.
+    softmax_rows(gpu, arena, scratch.scores, 1.0 / (d as f32).sqrt(), None)?;
+    // 5. The weighted sum of the values.
+    blas.gemm_f16_batched(gpu, &ss, Op::N, t_len * t_len, &vxs, Op::N, row_d, &os, row_d, t_len, d, t_len, batch, 1.0, 0.0)?;
     Ok(())
 }
 

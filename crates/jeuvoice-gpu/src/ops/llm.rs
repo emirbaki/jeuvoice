@@ -102,19 +102,27 @@ pub fn rmsnorm_to_f16(gpu: &Gpu, arena: &Arena, x: &Tensor, w: &Tensor, y: &Tens
 pub fn repeat_heads(gpu: &Gpu, arena: &Arena, src: &Tensor, dst: &Tensor) -> Result<(), GpuError> {
     assert_eq!(src.dtype(), DType::F16, "repeat_heads: src must be F16");
     assert_eq!(dst.dtype(), DType::F16, "repeat_heads: dst must be F16");
-    assert_eq!(src.shape().len(), 3, "repeat_heads: src must be [heads, rows, d]");
-    assert_eq!(dst.shape().len(), 3, "repeat_heads: dst must be [heads, rows, d]");
-    let (h_kv, h_q) = (src.shape()[0], dst.shape()[0]);
+    assert!(
+        matches!(src.shape().len(), 3 | 4) && src.shape().len() == dst.shape().len(),
+        "repeat_heads: the shapes must be [heads, rows, d] or [batches, heads, rows, d]"
+    );
+    // The last two dimensions are the rows and the width; the one before them is the head.
+    let last = src.shape().len();
+    assert_eq!(src.shape()[last - 2..], dst.shape()[last - 2..], "repeat_heads: rows and width differ");
+    assert_eq!(&src.shape()[..last - 3], &dst.shape()[..last - 3], "repeat_heads: the batch dimensions differ");
+    let (h_kv, h_q) = (src.shape()[last - 3], dst.shape()[last - 3]);
     assert!(h_kv > 0 && h_q % h_kv == 0, "repeat_heads: {h_q} heads do not divide by {h_kv}");
-    assert_eq!(src.shape()[1..], dst.shape()[1..], "repeat_heads: rows and width differ");
     let n = dst.numel();
     if n == 0 {
         return Ok(());
     }
     let (ss, ds) = (arena.slice::<f16>(src), arena.slice::<f16>(dst));
     let cfg = LaunchConfig::for_num_elems(grid_elems(n));
-    // SAFETY: one thread per output value; the source head is h / g < h_kv, so the read is
-    // inside src, and dst is its own tensor.
-    unsafe { gpu.kernels()?.repeat_heads_f16(gpu.stream(), cfg, ss.as_ptr().cast(), ds.as_mut_ptr().cast(), n, src.numel() / h_kv, h_q / h_kv) }?;
+    // SAFETY: one thread per output value; the source head of a batch is below h_kv, so the
+    // read is inside src, and dst is its own tensor.
+    // The rows of one head: the last two dimensions. (Not `numel / heads`: that counts the
+    // batches too, and the kernel walks the batches itself.)
+    let rows_d = src.shape()[last - 2] * src.shape()[last - 1];
+    unsafe { gpu.kernels()?.repeat_heads_f16(gpu.stream(), cfg, ss.as_ptr().cast(), ds.as_mut_ptr().cast(), n, rows_d, h_q, h_kv) }?;
     Ok(())
 }

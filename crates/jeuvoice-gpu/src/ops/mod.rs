@@ -16,7 +16,7 @@ mod rmsnorm;
 mod rope;
 mod swiglu;
 mod softmax;
-pub use attention::{ATTN_SCALE, AttnKind, attention, merge_heads, split_heads};
+pub use attention::{ATTN_SCALE, AttnKind, BidirScratch, attention, attention_bidir, merge_heads, split_heads};
 pub use attention_decode::{DecodeAttnKind, ProbsOut, attention_decode, attention_decode_with, decode_split_scratch};
 pub use conv1d::{ConvKind, Layout, conv1d, conv1d_with_layout};
 pub use elementwise::{Width, add_into, add_into_f32, add_rows, bias_add, bias_gelu, bias_gelu_with, add_into_f32_f32, f16_to_f32};

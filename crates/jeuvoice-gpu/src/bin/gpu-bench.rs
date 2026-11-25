@@ -7,7 +7,7 @@ use jeuvoice_gpu::bench::{Timing, pct_of_memory_limit, pct_of_tensor_limit, time
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
     AttnKind, ConvKind, DecodeAttnKind, ProbsOut, attention_decode_with, decode_split_scratch, GemmKind, LayerNormKind, SoftmaxKind, Width, attention, bias_gelu_with, conv1d, embed_one, embed_with, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive,
-    RopeKind, SwigluKind, embed_audio_sum, rmsnorm_rows, rmsnorm_rows_naive, rope_with, softmax_rows_with, swiglu_with,
+    BidirScratch, RopeKind, SwigluKind, attention_bidir, embed_audio_sum, rmsnorm_rows, rmsnorm_rows_naive, rope_with, softmax_rows_with, swiglu_with,
 };
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
 
@@ -149,6 +149,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, naive) in [("rmsnorm_rows_f16", false), ("rmsnorm_rows_naive", true)] {
         if name.contains(&filter) {
             rows.push(bench_rmsnorm_rows(&gpu, name, naive, 32_000, 128)?);
+        }
+    }
+    // The bidirectional GQA attention of one OmniVoice pass: 2 rows, 16 heads of 128, 486 positions.
+    for (name, heads) in [("attention_bidir_f16", 16usize)] {
+        if name.contains(&filter) {
+            rows.push(bench_attention_bidir(&gpu, name, heads, 486, 128)?);
         }
     }
     // The 8-codebook audio embedding of one pass: [8, 486] ids into [8200, 1024].
@@ -498,6 +504,35 @@ fn bench_rmsnorm_rows(gpu: &Gpu, name: &str, naive: bool, rows: usize, d: usize)
         t,
         rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
         pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+/// The GQA attention of OmniVoice: q·kᵀ, the softmax, then probs·v, per batch and head.
+fn bench_attention_bidir(gpu: &Gpu, name: &str, heads: usize, t_len: usize, d: usize) -> Result<Row, GpuError> {
+    let blas = Blas::load(gpu)?;
+    let mut plan = ArenaPlan::new();
+    let q = plan.add(DType::F16, &[2, heads, t_len, d]);
+    let k = plan.add(DType::F16, &[2, heads / 2, t_len, d]);
+    let v = plan.add(DType::F16, &[2, heads / 2, t_len, d]);
+    let out = plan.add(DType::F16, &[2, heads, t_len, d]);
+    let kx = plan.add(DType::F16, &[2, heads, t_len, d]);
+    let vx = plan.add(DType::F16, &[2, heads, t_len, d]);
+    let scores = plan.add(DType::F16, &[2 * heads, t_len, t_len]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &q, &vec![f16::from_f32(0.01); 2 * heads * t_len * d])?;
+    arena.upload(gpu, &k, &vec![f16::from_f32(0.01); heads * t_len * d])?;
+    arena.upload(gpu, &v, &vec![f16::from_f32(0.01); heads * t_len * d])?;
+    let scratch = BidirScratch { kx: &kx, vx: &vx, scores: &scores };
+    let t = time_on_stream(gpu, 3, 10, || attention_bidir(gpu, &arena, &blas, &q, &k, &v, &out, BidirScratch { kx: &kx, vx: &vx, scores: &scores }, None))?;
+    let _ = scratch;
+    // Two products of q·kᵀ and probs·v per batch and head.
+    let flops = 4 * (2 * heads * t_len * t_len * d) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("2x{heads}x{t_len}x{d}"),
+        t,
+        rate: (flops as f64 / (t.us * 1e-6) / 1e12, "TF/s"),
+        pct: pct_of_tensor_limit(flops, &t, gpu.info()),
     })
 }
 

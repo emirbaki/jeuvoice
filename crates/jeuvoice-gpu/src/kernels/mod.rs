@@ -1824,22 +1824,56 @@ pub mod device {
     }
 
     /// `dst[.., h] = src[.., h / g]`: one thread per output value, for the key and value heads
-    /// of the grouped-query attention (`g` query heads share one key head).
+    /// of the grouped-query attention (`g` query heads share one key head). The flat head
+    /// index walks the batches first, so a batch keeps its own heads.
     ///
     /// # Safety
-    /// `src` is valid for `heads_kv * row_len` f16 values and `dst` for `n` f16 values, with
-    /// `n == heads_q * row_len` and `heads_q % heads_kv == 0`. The tensors do not overlap.
+    /// `src` is valid for `batches * heads_kv * row_len` f16 values and `dst` for `n` f16
+    /// values with `n == batches * heads_q * row_len` and `heads_q % heads_kv == 0`. The
+    /// tensors do not overlap.
     #[kernel]
-    pub unsafe fn repeat_heads_f16(src: *const f16, dst: *mut f16, n: usize, row_len: usize, group: usize) {
+    pub unsafe fn repeat_heads_f16(src: *const f16, dst: *mut f16, n: usize, row_len: usize, heads_q: usize, heads_kv: usize) {
         let i = thread::index_1d().get() as usize;
         if i >= n {
             return;
         }
-        // SAFETY: the source head is h / group, which is below heads_kv, so the read is inside
-        // src; the write is inside dst.
+        // SAFETY: the source head of a batch is below heads_kv, so the read is inside src; the
+        // write is inside dst.
         unsafe {
             let head = i / row_len;
-            *dst.add(i) = *src.add((head / group) * row_len + i % row_len);
+            let group = heads_q / heads_kv;
+            let b = head / heads_q;
+            let hq = head % heads_q;
+            let src_head = b * heads_kv + hq / group;
+            *dst.add(i) = *src.add(src_head * row_len + i % row_len);
+        }
+    }
+
+    /// The padding mask of a bidirectional attention: for the head of a batch, a score past
+    /// the valid length of that batch is `-inf`, and a row that is itself past the valid
+    /// length keeps only its diagonal. `score` is `[batches·heads][t][t]` f16 in place.
+    ///
+    /// # Safety
+    /// `score` is valid for `batches * heads * t * t` f16 values and `valid` for `batches`
+    /// i32 values (each at most `t`). One thread per score value.
+    #[kernel]
+    pub unsafe fn attn_pad_mask_f16(score: *mut f16, valid: *const i32, t: usize, heads: usize, batches: usize) {
+        let i = thread::index_1d().get() as usize;
+        if i >= batches * heads * t * t {
+            return;
+        }
+        // The score tensor holds `batches * heads * t * t` values; `heads` counts one batch.
+        // SAFETY: the caller launches one thread per value of the whole tensor.
+        unsafe {
+            let row = (i / t) % t; // the query position
+            let col = i % t; // the key position
+            let bh = i / (t * t);
+            let b = bh / heads;
+            let valid_b = *valid.add(b) as usize;
+            let keep = if row < valid_b { col < valid_b } else { col == row };
+            if !keep {
+                *score.add(i) = f16::from_bits(0xFC00); // -inf in f16
+            }
         }
     }
 
