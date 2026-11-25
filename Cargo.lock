@@ -2067,6 +2067,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jeuvoice-omnivoice"
+version = "0.0.1"
+dependencies = [
+ "half",
+ "jeuvoice-gpu",
+ "safetensors",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "jeuvoice-whisper"
 version = "0.0.1"
 dependencies = [

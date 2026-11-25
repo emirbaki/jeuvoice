@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/jeuvoice-core", "crates/jeuvoice-whisper", "crates/jeuvoice-app", "crates/jeuvoice-engine-client", "crates/jeuvoice-kaggle", "crates/jeuvoice-gpu"]
+members = ["crates/jeuvoice-core", "crates/jeuvoice-whisper", "crates/jeuvoice-app", "crates/jeuvoice-engine-client", "crates/jeuvoice-kaggle", "crates/jeuvoice-omnivoice", "crates/jeuvoice-gpu"]
 # jeuvoice-gpu needs the cuda-oxide tools (scripts\cargo.cmd oxide ...). Plain `cargo build`
 # and `cargo test` leave it out, so the app builds without those tools.
-default-members = ["crates/jeuvoice-core", "crates/jeuvoice-whisper", "crates/jeuvoice-app", "crates/jeuvoice-engine-client", "crates/jeuvoice-kaggle"]
+default-members = ["crates/jeuvoice-core", "crates/jeuvoice-whisper", "crates/jeuvoice-app", "crates/jeuvoice-engine-client", "crates/jeuvoice-kaggle", "crates/jeuvoice-omnivoice"]
 
 [workspace.package]
 version = "0.0.1"
