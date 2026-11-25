@@ -1,4 +1,4 @@
-// CudaWhisper (plan 1b, Task 11): the Transcriber on the Rust kernels, against the
+﻿// CudaWhisper (plan 1b, Task 11): the Transcriber on the Rust kernels, against the
 // whisper-rs fixtures of Task 0. Run the ignored tests one at a time (4 GB of VRAM):
 //   scripts\cargo.cmd oxide test -- -p jeuvoice-whisper --features cuda-kernels --release --test cuda_transcribe -- --ignored --nocapture --test-threads 1
 #![cfg(feature = "cuda-kernels")]
@@ -12,7 +12,7 @@ use jeuvoice_core::transcript::Word;
 use jeuvoice_whisper::cuda::model::GpuWhisper;
 use jeuvoice_whisper::cuda::transcriber::CudaWhisper;
 use jeuvoice_whisper::decode::vocab::Vocab;
-use jeuvoice_whisper::decode::window::{DecodeParams, transcribe_tokens};
+use jeuvoice_whisper::decode::window::{DecodeParams, WhisperModel, transcribe_tokens};
 use jeuvoice_whisper::ggml::GgmlModel;
 use jeuvoice_whisper::{TranscribeOptions, Transcriber, WhisperError, tokens_to_words};
 
@@ -200,5 +200,58 @@ fn dtw_cost_in_a_transcription() {
     let off = times.iter().filter(|(l, _)| *l == "off").map(|(_, s)| *s).fold(f64::MAX, f64::min);
     let on = times.iter().filter(|(l, _)| *l == "on").map(|(_, s)| *s).fold(f64::MAX, f64::min);
     eprintln!("DTW adds {:.3} s to the best of each", on - off);
+}
+
+
+/// The two candidates at the near tie of my_voice2 window 1, from our own logits (plan 1b,
+/// criterion 1). The test teacher-forces the whisper.cpp token list up to the tie, so both
+/// sides read the same prefix, and prints the top of the distribution with the softmax over
+/// the whole vocabulary. It is a measurement, not a check: run it with `--nocapture`.
+#[test]
+#[ignore = "needs the model file and the my_voice2 fixture"]
+fn the_two_candidates_at_the_near_tie() {
+    // [SOT, tr, transcribe], then the whisper.cpp tokens of the window, with the second
+    // timestamp of a pair added again (the rule of tools/reference/whisper_decoder_reference.py).
+    const SOT: u32 = 50258;
+    const TR: u32 = 50259 + 9;
+    const TRANSCRIBE: u32 = 50360;
+    const BEG: u32 = 50365;
+    let f = common::load("my_voice2");
+    let mut seq: Vec<u32> = Vec::new();
+    for (i, s) in f.segments.iter().enumerate() {
+        let ids: Vec<u32> = s.tokens.iter().map(|t| t.id).collect();
+        if let Some(&last) = ids.last() {
+            seq.extend(&ids);
+            if i + 1 < f.segments.len() && last >= BEG {
+                seq.push(last);
+            }
+        }
+    }
+    let mut steps = vec![SOT, TR, TRANSCRIBE];
+    steps.extend(seq);
+    // The tie: whisper.cpp takes 84 ("u") after 532 ("ud"); we take 7493 ("uy").
+    let tie = (1..steps.len()).find(|&i| steps[i - 1] == 532 && steps[i] == 84).expect("the tie is in the fixture");
+    let samples = common::samples(&f);
+    let model = GgmlModel::open(&jeuvoice_whisper::model_path()).unwrap();
+    let mut gw = GpuWhisper::load(&model).unwrap();
+    gw.set_audio(&samples).unwrap();
+    gw.encode(0).unwrap();
+    let mut logits = gw.decode_first(&steps[..3]).unwrap();
+    for &t in &steps[3..tie] {
+        logits = gw.decode_next(t).unwrap();
+    }
+    // The softmax over the whole vocabulary.
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let sum: f64 = logits.iter().map(|&v| ((v - max) as f64).exp()).sum();
+    let prob = |id: u32| ((logits[id as usize] - max) as f64).exp() / sum;
+    let mut top: Vec<usize> = (0..logits.len()).collect();
+    top.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+    eprintln!("the tie is at steps[{tie}], the prompt has {} tokens", tie);
+    for &id in &top[..5] {
+        eprintln!("  id {id:>6}  p {:.4}", prob(id as u32));
+    }
+    eprintln!("  candidate 84 (u): p {:.4}", prob(84));
+    eprintln!("  candidate 7493 (uy): p {:.4}", prob(7493));
+    assert!(prob(7493) > 0.0 && prob(84) > 0.0, "both candidates must be reachable");
 }
 

@@ -46,7 +46,7 @@ Criterion 1 is **one token** of my_voice2 window 1:
 
 The model prefers `uy`. Our token is the model answer and whisper.cpp is the outlier at this step, because whisper.cpp converts its f32 activations to f16 and runs `cublasGemmEx` with half alpha and a half output, so it accumulates its matmuls in f16. Our matmuls accumulate in f32. Matching whisper.cpp would mean being less accurate.
 
-The user was asked and decided: **go on with Task 13 first**. The decision about criterion 1 is still open. Do not change a criterion. Only the user can.
+The user was asked and decided: **go on with Task 13 first**, then merge. **The full record with every number and command is `docs/phase1-criterion-1-tie.md`** (our raw logits: `uy` 0.5469 against `u` 0.4506, which is 0.002 from PyTorch f32). Do not change a criterion. Only the user can.
 
 ## 4. What is left
 

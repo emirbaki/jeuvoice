@@ -504,7 +504,7 @@ So criterion 1 (WER against whisper.cpp) counts one substitution and one deletio
 | 5. The tests and the real-model tests with CudaWhisper | all pass | — | 69 + 4 real-model | yes |
 | 6. The app transcribes on the CPU without CUDA | works | — | `load_with` falls back on `ModelLoad`; the no-GPU load is a test | yes (two tests, no manual UI run) |
 
-Criterion 1 is the one near tie of my_voice2 window 1. PyTorch f32 prefers "uy" at p 0.5448 against "u" at 0.4528, so the CudaWhisper token is the model answer and whisper.cpp is the outlier (it accumulates its matmuls in f16). Only the user can change a criterion.
+Criterion 1 is the one near tie of my_voice2 window 1. PyTorch f32 prefers "uy" at p 0.5448 against "u" at 0.4528, and the raw CudaWhisper logits give 0.5469 against 0.4506: our distribution is 0.002 from the f32 model. whisper.cpp accumulates its matmuls in f16 (`CUBLAS_COMPUTE_16F`) and takes "u". Only the user can change a criterion. **The full record, with every number and command: `docs/phase1-criterion-1-tie.md`.**
 
 ### The app path and the package (Task 13, 2026-11-25)
 
