@@ -1531,6 +1531,151 @@ pub mod device {
         out
     }
 
+    // ---- RoPE and the per-head RMSNorm (lesson 10: docs/cuda-lessons/10-rope-qk-norm.md) ----
+    // The Qwen3 backbone rotates every query and key head with RoPE before the attention, and
+    // normalises each head with its own RMSNorm. Both work on rows of 128 values.
+
+    /// `w[i] = w[i] / sqrt(mean(x²) + eps) · w[i]` over each row of `c` columns, in place, with
+    /// f32 math. One block of `ROW_BLOCK` threads per row, as `rmsnorm_f16`, but the weight is
+    /// f32 (the model keeps `q_norm` and `k_norm` in f32).
+    ///
+    /// # Safety
+    /// `x` is valid for `rows * d` f16 values, `w` for `d` f32 values. The grid has one block
+    /// per row and `ROW_BLOCK` threads.
+    #[kernel]
+    pub unsafe fn rmsnorm_rows_f16(x: *mut f16, w: *const f32, d: usize, eps: f32) {
+        let base = thread::blockIdx_x() as usize * d;
+        let tid = thread::threadIdx_x() as usize;
+        let mut sum = 0.0f32;
+        let mut c = tid;
+        while c < d {
+            // SAFETY: c < d, one block per row.
+            let v = unsafe { *x.add(base + c) } as f32;
+            sum += v * v;
+            c += ROW_BLOCK as usize;
+        }
+        let scale = 1.0 / (block_sum(sum) / d as f32 + eps).sqrt();
+        let mut c = tid;
+        while c < d {
+            // SAFETY: each (row, c) belongs to exactly one thread.
+            unsafe {
+                let v = *x.add(base + c) as f32 * scale * *w.add(c);
+                *x.add(base + c) = v as f16;
+            }
+            c += ROW_BLOCK as usize;
+        }
+    }
+
+    /// Rotary position embedding on `[rows, heads, 128]` f16 in place: the pair
+    /// `(2i, 2i+1)` of every head rotates by `pos · inv_freq[i]`, the interleaved layout of
+    /// Qwen3 (`x[..., ::2]` and `x[..., 1::2]`). One thread per pair.
+    ///
+    /// `inv_freq` holds `theta^(-2i/d)` for `i` in `0..d/2`, computed once on the host.
+    ///
+    /// # Safety
+    /// `x` is valid for `rows * heads * d` f16 values, `positions` for `rows` i32 values and
+    /// `inv_freq` for `d / 2` f32 values. `d` is even.
+    #[kernel]
+    pub unsafe fn rope_f16(x: *mut f16, positions: *const i32, inv_freq: *const f32, heads: usize, d: usize) {
+        let i = thread::index_1d().get() as usize;
+        let pairs = d / 2;
+        let row = i / (heads * pairs);
+        let pair = i % pairs;
+        // SAFETY: the grid has exactly rows * heads * pairs threads, so row < rows and
+        // pair < pairs. The pair starts at 2 * pair inside the head.
+        unsafe {
+            let pos = *positions.add(row) as f32;
+            let angle = pos * *inv_freq.add(pair);
+            let (s, c) = (libm::sinf(angle), libm::cosf(angle));
+            let base = i * 2;
+            let a = *x.add(base) as f32;
+            let b = *x.add(base + 1) as f32;
+            *x.add(base) = (a * c - b * s) as f16;
+            *x.add(base + 1) = (a * s + b * c) as f16;
+        }
+    }
+
+    /// The sum of `v` over four warps (128 threads). `block_sum` needs exactly `ROW_BLOCK`
+    /// threads, so a kernel with a 128 wide row uses this one.
+    #[device]
+    pub fn block_sum_4(v: f32) -> f32 {
+        static mut SLOTS: SharedArray<f32, 4> = SharedArray::UNINIT;
+        let tid = thread::threadIdx_x() as usize;
+        let w = warp::reduce_sum_f32(v);
+        if warp::lane_id() == 0 {
+            // SAFETY: only lane 0 of warp k writes slot k, and tid / 32 < 4.
+            unsafe { SLOTS[tid / 32] = w };
+        }
+        thread::sync_threads();
+        // SAFETY: the barrier above separates these reads from the writes.
+        let total = unsafe { SLOTS[0] + SLOTS[1] + SLOTS[2] + SLOTS[3] };
+        thread::sync_threads();
+        total
+    }
+
+    /// The fast `rmsnorm_rows_f16` for a row of at most 128 values: one block of 128 threads
+    /// per row, the value of a thread in a register, so `x` is read once and written once.
+    /// `rmsnorm_rows_f16` reads `x` twice and runs 256 threads for a 128 wide row.
+    ///
+    /// # Safety
+    /// `x` is valid for `rows * d` f16 values with `d <= 128`, `w` for `d` f32 values. The
+    /// grid has one block per row and 128 threads.
+    #[kernel]
+    pub unsafe fn rmsnorm_rows_f16_small(x: *mut f16, w: *const f32, d: usize, eps: f32) {
+        let base = thread::blockIdx_x() as usize * d;
+        let c = thread::threadIdx_x() as usize;
+        // SAFETY: c < 128 and d <= 128, so either c is inside the row or this thread has no
+        // value; the register keeps it for the write.
+        let mut v = 0.0f32;
+        let inside = c < d;
+        if inside {
+            v = unsafe { *x.add(base + c) } as f32;
+        }
+        let scale = 1.0 / (block_sum_4(v * v) / d as f32 + eps).sqrt();
+        if inside {
+            // SAFETY: as above. The value comes from the register, not a second read.
+            unsafe { *x.add(base + c) = (v * scale * *w.add(c)) as f16 };
+        }
+    }
+
+    /// Rotary position embedding with the sine and cosine of a pair computed once per row and
+    /// kept in shared memory: all heads of a row share the same angles. One block of `d/2`
+    /// threads per row, and each thread walks the heads.
+    ///
+    /// # Safety
+    /// `x` is valid for `rows * heads * d` f16 values, `positions` for `rows` i32 values and
+    /// `inv_freq` for `d / 2` f32 values. `d` is even and at most 128.
+    #[kernel]
+    pub unsafe fn rope_f16_shared(x: *mut f16, positions: *const i32, inv_freq: *const f32, heads: usize, d: usize) {
+        static mut ANG: SharedArray<f32, 128> = SharedArray::UNINIT; // sin and cos of one pair
+        let row = thread::blockIdx_x() as usize;
+        let pair = thread::threadIdx_x() as usize;
+        let pairs = d / 2;
+        // SAFETY: row < rows and pair < pairs, so both reads are inside their tensors.
+        let (pos, freq) = unsafe { (*positions.add(row) as f32, *inv_freq.add(pair)) };
+        let angle = pos * freq;
+        // SAFETY: two slots per pair, and pair < pairs = d/2 <= 64.
+        unsafe {
+            ANG[2 * pair] = libm::sinf(angle);
+            ANG[2 * pair + 1] = libm::cosf(angle);
+        }
+        thread::sync_threads();
+        // SAFETY: the barrier separates the shared writes from these reads.
+        let (s, c) = unsafe { (ANG[2 * pair], ANG[2 * pair + 1]) };
+        let mut h = 0;
+        while h < heads {
+            let base = ((row * heads + h) * d) + 2 * pair;
+            // SAFETY: the head and the pair are inside the row, and this thread owns the pair.
+            unsafe {
+                let a = *x.add(base) as f32;
+                let b = *x.add(base + 1) as f32;
+                *x.add(base) = (a * c - b * s) as f16;
+                *x.add(base + 1) = (a * s + b * c) as f16;
+            }
+            h += 1;
+        }
+    }
+
     // ---- Attention (lesson 5: docs/cuda-lessons/05-attention.md) ----
 
     /// Flash attention: online softmax, K and V tiles in shared memory, no score matrix in

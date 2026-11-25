@@ -7,7 +7,7 @@ use jeuvoice_gpu::bench::{Timing, pct_of_memory_limit, pct_of_tensor_limit, time
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
     AttnKind, ConvKind, DecodeAttnKind, ProbsOut, attention_decode_with, decode_split_scratch, GemmKind, LayerNormKind, SoftmaxKind, Width, attention, bias_gelu_with, conv1d, embed_one, embed_with, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive,
-    softmax_rows_with,
+    RopeKind, rmsnorm_rows, rmsnorm_rows_naive, rope_with, softmax_rows_with,
 };
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
 
@@ -137,6 +137,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if "ids_upload".contains(&filter) {
         rows.push(bench_ids_upload(&gpu)?);
+    }
+
+    // RoPE and the per-head RMSNorm rows of the Qwen3 backbone (Phase 2, lesson 10).
+    // 8 MB in and 8 MB out: big enough that the 4 MB L2 does not hold the tensor.
+    for (name, kind) in [("rope_f16", RopeKind::Shared), ("rope_f16_naive", RopeKind::Naive)] {
+        if name.contains(&filter) {
+            rows.push(bench_rope(&gpu, name, kind, 2000, 16, 128)?);
+        }
+    }
+    for (name, naive) in [("rmsnorm_rows_f16", false), ("rmsnorm_rows_naive", true)] {
+        if name.contains(&filter) {
+            rows.push(bench_rmsnorm_rows(&gpu, name, naive, 32_000, 128)?);
+        }
     }
 
     println!("{:<20} {:>16} {:>10} {:>14} {:>8}", "kernel", "size", "us", "rate", "% limit");
@@ -426,6 +439,52 @@ fn bench_gemm_f32out(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, Gpu
     Ok(Row {
         name: "gemm_f16_f32out".into(),
         size: format!("{m}x{n}x{k}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+/// RoPE rotates in place: read and write every value once.
+fn bench_rope(gpu: &Gpu, name: &str, kind: RopeKind, rows: usize, heads: usize, d: usize) -> Result<Row, GpuError> {
+    let mut plan = ArenaPlan::new();
+    let x = plan.add(DType::F16, &[rows, heads, d]);
+    let p = plan.add(DType::I32, &[rows]);
+    let f = plan.add(DType::F32, &[d / 2]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &x, &vec![f16::from_f32(0.5); rows * heads * d])?;
+    arena.upload(gpu, &p, &vec![3i32; rows])?;
+    arena.upload(gpu, &f, &jeuvoice_gpu::ops::rope_inv_freq(1_000_000.0, d))?;
+    let t = time_on_stream(gpu, 3, 50, || rope_with(gpu, &arena, &x, &p, &f, kind))?;
+    let bytes = (2 * rows * heads * d * 2) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{rows}x{heads}x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+/// As `bench_rope`, for the per-head RMSNorm.
+fn bench_rmsnorm_rows(gpu: &Gpu, name: &str, naive: bool, rows: usize, d: usize) -> Result<Row, GpuError> {
+    let mut plan = ArenaPlan::new();
+    let x = plan.add(DType::F16, &[rows, d]);
+    let w = plan.add(DType::F32, &[d]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &x, &vec![f16::from_f32(0.5); rows * d])?;
+    arena.upload(gpu, &w, &vec![1.0f32; d])?;
+    let t = time_on_stream(gpu, 3, 50, || {
+        if naive {
+            rmsnorm_rows_naive(gpu, &arena, &x, &w, 1e-6)
+        } else {
+            rmsnorm_rows(gpu, &arena, &x, &w, 1e-6)
+        }
+    })?;
+    let bytes = (2 * rows * d * 2) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{rows}x{d}"),
         t,
         rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
         pct: pct_of_memory_limit(bytes, &t, gpu.info()),

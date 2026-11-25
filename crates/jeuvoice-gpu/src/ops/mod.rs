@@ -12,6 +12,7 @@ mod gemm_lesson;
 mod layernorm;
 mod mel;
 mod rmsnorm;
+mod rope;
 mod softmax;
 pub use attention::{ATTN_SCALE, AttnKind, attention, merge_heads, split_heads};
 pub use attention_decode::{DecodeAttnKind, ProbsOut, attention_decode, attention_decode_with, decode_split_scratch};
@@ -22,6 +23,7 @@ pub use gemm_lesson::{GemmKind, gemm_lesson, mma_probe};
 pub use mel::{log10_max, log10_max_partials, mel_frames, mel_window, power_spectrum};
 pub use layernorm::{LayerNormKind, layernorm, layernorm_to_f16, layernorm_with};
 pub use rmsnorm::{rmsnorm, rmsnorm_naive};
+pub use rope::{RopeKind, rmsnorm_rows, rmsnorm_rows_naive, rope, rope_inv_freq, rope_with};
 pub use softmax::{SoftmaxKind, softmax_rows, softmax_rows_with};
 
 use crate::{Arena, DType, Gpu, GpuError, Tensor};
