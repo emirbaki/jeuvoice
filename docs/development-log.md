@@ -501,7 +501,7 @@ So criterion 1 (WER against whisper.cpp) counts one substitution and one deletio
 | 2. Median word-start difference | 50 ms | — | 0 ms | yes |
 | 3. Time of the 69 s set | 4.3 s | 4.007 s | 3.877 s | yes |
 | 4. Peak VRAM of the card | not more than whisper.cpp | 2148 MiB | 1799 MiB | yes |
-| 5. The tests and the real-model tests with CudaWhisper | all pass | — | 67 + 4 real-model | yes |
+| 5. The tests and the real-model tests with CudaWhisper | all pass | — | 69 + 4 real-model | yes |
 | 6. The app transcribes on the CPU without CUDA | works | — | `load_with` falls back on `ModelLoad`; the no-GPU load is a test | yes (two tests, no manual UI run) |
 
 Criterion 1 is the one near tie of my_voice2 window 1. PyTorch f32 prefers "uy" at p 0.5448 against "u" at 0.4528, so the CudaWhisper token is the model answer and whisper.cpp is the outlier (it accumulates its matmuls in f16). Only the user can change a criterion.

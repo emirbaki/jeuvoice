@@ -7,7 +7,7 @@ Date: 2026-11-25. Written by the previous agent for the next agent. Read `AGENTS
 1. Switch to the branch: `git switch rust-cuda-phase1b`. It has 23 commits on top of `main`. It is **not merged and not pushed**. Merge and push only when the user says so.
 2. Run the plain tests: `scripts\cargo.cmd test`. Expected: 405 pass, 0 fail.
 3. Run the GPU kernel tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-gpu`. Expected: 93 pass.
-4. Run the Whisper GPU tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-whisper --features cuda-kernels`. Expected: 67 pass (the rest are `#[ignore]`).
+4. Run the Whisper GPU tests: `scripts\cargo.cmd oxide test -- -p jeuvoice-whisper --features cuda-kernels`. Expected: 69 pass (the rest are `#[ignore]`).
 5. Run the real-model tests one file at a time, with `--release --test-threads 1` (the card has 4 GB):
    `scripts\cargo.cmd oxide test -- -p jeuvoice-whisper --features cuda-kernels --release --test cuda_transcribe -- --ignored --nocapture --test-threads 1`
    and the same for `cuda_decoder` and `cuda_encoder`.
@@ -32,7 +32,7 @@ The plan: `docs/superpowers/plans/2026-11-25-rust-cuda-phase1b-decoder.md` (16 t
 | 2. Median word-start difference | 50 ms | — | 0 ms | yes |
 | 3. Time of the 69 s set | 4.3 s | 3.954 s | 2.813 s | yes |
 | 4. Peak VRAM (whole card, peak minus idle) | not more than whisper.cpp | 2157 MiB | 1798 MiB | yes |
-| 5. The tests and the real-model tests with CudaWhisper | all pass | — | 67 + 4 real-model | yes |
+| 5. The tests and the real-model tests with CudaWhisper | all pass | - | 69 + 4 real-model | yes |
 | 6. The app transcribes on the CPU without CUDA | works | — | two tests (the fallback and the no-GPU load) | yes (no manual UI run) |
 
 Criterion 1 is **one token** of my_voice2 window 1:
