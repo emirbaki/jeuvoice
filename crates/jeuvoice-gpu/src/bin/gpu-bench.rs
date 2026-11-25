@@ -7,7 +7,7 @@ use jeuvoice_gpu::bench::{Timing, pct_of_memory_limit, pct_of_tensor_limit, time
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
     AttnKind, ConvKind, DecodeAttnKind, ProbsOut, attention_decode_with, decode_split_scratch, GemmKind, LayerNormKind, SoftmaxKind, Width, attention, bias_gelu_with, conv1d, embed_one, embed_with, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive,
-    BidirScratch, RopeKind, SwigluKind, attention_bidir, embed_audio_sum, rmsnorm_rows, rmsnorm_rows_naive, rope_with, softmax_rows_with, swiglu_with,
+    BidirScratch, RopeKind, SwigluKind, attention_bidir_grouped, attention_flash128, embed_audio_sum, rmsnorm_rows, rmsnorm_rows_naive, rmsnorm_rows_warp, rope_with, softmax_rows_with, swiglu_strided, swiglu_with,
 };
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
 
@@ -168,10 +168,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rows.push(bench_rope(&gpu, name, kind, 2000, 16, 128)?);
         }
     }
-    for (name, naive) in [("rmsnorm_rows_f16", false), ("rmsnorm_rows_naive", true)] {
+    for (name, kind) in [("rmsnorm_rows_f16", "block"), ("rmsnorm_rows_warp", "warp"), ("rmsnorm_rows_naive", "naive")] {
         if name.contains(&filter) {
-            rows.push(bench_rmsnorm_rows(&gpu, name, naive, 32_000, 128)?);
+            rows.push(bench_rmsnorm_rows(&gpu, name, kind, 32_000, 128)?);
         }
+    }
+    // The derived-position RoPE of P4: the same 8 MB tensor as the rows above (32 000 head rows
+    // are 16 heads of 2000 positions), with the position from the row and no table.
+    if "rope_half_f16_rows".contains(&filter) {
+        rows.push(bench_rope_rows(&gpu, "rope_half_f16_rows", 32_000, 128, 2000)?);
     }
     // The bidirectional GQA attention of one OmniVoice pass: 2 rows, 16 heads of 128, 486 positions.
     for (name, valid) in [
@@ -195,6 +200,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rows.push(bench_swiglu(&gpu, name, kind, 486, 3072)?);
             // The production pass has two rows of 486 positions.
             rows.push(bench_swiglu(&gpu, name, kind, 972, 3072)?);
+        }
+    }
+    // The fused gate/up row of P3: the same 486 x 3072 elements, read from one [rows, 6144]
+    // tensor, so the three tensors are 6144, 6144 and 3072 values per row.
+    if "swiglu_strided_f16".contains(&filter) {
+        for rows_n in [486usize, 214] {
+            rows.push(bench_swiglu_strided(&gpu, "swiglu_strided_f16", rows_n, 3072)?);
+        }
+    }
+
+    // P3: the fused projections against the separate ones, at the two real pass shapes. One
+    // conditioned pass is 486 rows, the unconditioned pass 214.
+    for (name, m, n, k) in [
+        ("gemm_p3_qkv_486", 486usize, 4096usize, 1024usize),
+        ("gemm_p3_q_486", 486, 2048, 1024),
+        ("gemm_p3_kv_486", 486, 1024, 1024),
+        ("gemm_p3_qkv_214", 214, 4096, 1024),
+        ("gemm_p3_q_214", 214, 2048, 1024),
+        ("gemm_p3_kv_214", 214, 1024, 1024),
+        ("gemm_p3_gate_up_486", 486, 6144, 1024),
+        ("gemm_p3_gate_486", 486, 3072, 1024),
+        ("gemm_p3_gate_up_214", 214, 6144, 1024),
+        ("gemm_p3_gate_214", 214, 3072, 1024),
+    ] {
+        if name.contains(&filter) {
+            rows.push(bench_gemm(&gpu, name, m, n, k)?);
+        }
+    }
+
+    // The d128 flash attention of P5 against the grouped path at the two production shapes:
+    // one conditioned pass of 486 positions and one unconditioned pass of 214.
+    if "attn_p5".contains(&filter) {
+        for t_len in [486usize, 214] {
+            for (name, flash) in [("attn_p5_grouped", false), ("attn_p5_flash128", true)] {
+                let row = format!("{name}_{t_len}");
+                if row.contains(&filter) || filter.is_empty() {
+                    rows.push(bench_attention_p5(&gpu, &row, t_len, flash)?);
+                }
+            }
         }
     }
 
@@ -512,20 +556,37 @@ fn bench_rope(gpu: &Gpu, name: &str, kind: RopeKind, rows: usize, heads: usize, 
     })
 }
 
+/// RoPE with the position taken from the row: the same traffic as `bench_rope`, no table read.
+fn bench_rope_rows(gpu: &Gpu, name: &str, rows: usize, d: usize, positions: usize) -> Result<Row, GpuError> {
+    let mut plan = ArenaPlan::new();
+    let x = plan.add(DType::F16, &[rows, d]);
+    let f = plan.add(DType::F32, &[d / 2]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &x, &vec![f16::from_f32(0.5); rows * d])?;
+    arena.upload(gpu, &f, &jeuvoice_gpu::ops::rope_inv_freq(1_000_000.0, d))?;
+    let t = time_on_stream(gpu, 3, 50, || jeuvoice_gpu::ops::rope_rows(gpu, &arena, &x, &f, positions))?;
+    let bytes = (2 * rows * d * 2) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{rows}x{d}, {positions} positions"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
 /// As `bench_rope`, for the per-head RMSNorm.
-fn bench_rmsnorm_rows(gpu: &Gpu, name: &str, naive: bool, rows: usize, d: usize) -> Result<Row, GpuError> {
+fn bench_rmsnorm_rows(gpu: &Gpu, name: &str, kind: &str, rows: usize, d: usize) -> Result<Row, GpuError> {
     let mut plan = ArenaPlan::new();
     let x = plan.add(DType::F16, &[rows, d]);
     let w = plan.add(DType::F32, &[d]);
     let arena = Arena::new(gpu, &plan)?;
     arena.upload(gpu, &x, &vec![f16::from_f32(0.5); rows * d])?;
     arena.upload(gpu, &w, &vec![1.0f32; d])?;
-    let t = time_on_stream(gpu, 3, 50, || {
-        if naive {
-            rmsnorm_rows_naive(gpu, &arena, &x, &w, 1e-6)
-        } else {
-            rmsnorm_rows(gpu, &arena, &x, &w, 1e-6)
-        }
+    let t = time_on_stream(gpu, 3, 50, || match kind {
+        "warp" => rmsnorm_rows_warp(gpu, &arena, &x, &w, 1e-6),
+        "naive" => rmsnorm_rows_naive(gpu, &arena, &x, &w, 1e-6),
+        _ => rmsnorm_rows(gpu, &arena, &x, &w, 1e-6),
     })?;
     let bytes = (2 * rows * d * 2) as u64;
     Ok(Row {
@@ -545,25 +606,54 @@ fn bench_attention_bidir(gpu: &Gpu, name: &str, heads: usize, t_len: usize, d: u
     let k = plan.add(DType::F16, &[2, heads / 2, t_len, d]);
     let v = plan.add(DType::F16, &[2, heads / 2, t_len, d]);
     let out = plan.add(DType::F16, &[2, heads, t_len, d]);
-    let kx = plan.add(DType::F16, &[2, heads, t_len, d]);
-    let vx = plan.add(DType::F16, &[2, heads, t_len, d]);
     let scores = plan.add(DType::F16, &[2 * heads, t_len, t_len]);
     let lens = valid.map(|_| plan.add(DType::I32, &[2]));
     let arena = Arena::new(gpu, &plan)?;
     arena.upload(gpu, &q, &vec![f16::from_f32(0.01); 2 * heads * t_len * d])?;
     arena.upload(gpu, &k, &vec![f16::from_f32(0.01); heads * t_len * d])?;
     arena.upload(gpu, &v, &vec![f16::from_f32(0.01); heads * t_len * d])?;
-    let scratch = BidirScratch { kx: &kx, vx: &vx, scores: &scores };
     if let (Some(v), Some(t)) = (valid, lens.as_ref()) {
         arena.upload(gpu, t, &v)?;
     }
-    let t = time_on_stream(gpu, 3, 10, || attention_bidir(gpu, &arena, &blas, &q, &k, &v, &out, BidirScratch { kx: &kx, vx: &vx, scores: &scores }, lens.as_ref()))?;
-    let _ = scratch;
+    let t = time_on_stream(gpu, 3, 10, || attention_bidir_grouped(gpu, &arena, &blas, &q, &k, &v, &out, BidirScratch { scores: &scores }, lens.as_ref()))?;
     // Two products of q·kᵀ and probs·v per batch and head.
     let flops = 4 * (2 * heads * t_len * t_len * d) as u64;
     Ok(Row {
         name: name.into(),
         size: format!("2x{heads}x{t_len}x{d}{}", if valid.is_some() { " padded" } else { "" }),
+        t,
+        rate: (flops as f64 / (t.us * 1e-6) / 1e12, "TF/s"),
+        pct: pct_of_tensor_limit(flops, &t, gpu.info()),
+    })
+}
+
+/// The d128 attention of one OmniVoice pass: the grouped path (cuBLAS plus a score plane in
+/// DRAM) or the flash kernel, at `batches = 1`.
+fn bench_attention_p5(gpu: &Gpu, name: &str, t_len: usize, flash: bool) -> Result<Row, GpuError> {
+    let blas = Blas::load(gpu)?;
+    let (heads, h_kv, d) = (16usize, 8usize, 128usize);
+    let mut plan = ArenaPlan::new();
+    let q = plan.add(DType::F16, &[1, heads, t_len, d]);
+    let k = plan.add(DType::F16, &[1, h_kv, t_len, d]);
+    let v = plan.add(DType::F16, &[1, h_kv, t_len, d]);
+    let out = plan.add(DType::F16, &[1, heads, t_len, d]);
+    let scores = plan.add(DType::F16, &[heads, t_len, t_len]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &q, &vec![f16::from_f32(0.01); heads * t_len * d])?;
+    arena.upload(gpu, &k, &vec![f16::from_f32(0.01); h_kv * t_len * d])?;
+    arena.upload(gpu, &v, &vec![f16::from_f32(0.01); h_kv * t_len * d])?;
+    let t = time_on_stream(gpu, 3, 20, || {
+        if flash {
+            attention_flash128(gpu, &arena, &q, &k, &v, &out)
+        } else {
+            attention_bidir_grouped(gpu, &arena, &blas, &q, &k, &v, &out, BidirScratch { scores: &scores }, None)
+        }
+    })?;
+    // Two products of q·kᵀ and probs·v per head.
+    let flops = 4 * (heads * t_len * t_len * d) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("1x{heads}x{t_len}x{d}"),
         t,
         rate: (flops as f64 / (t.us * 1e-6) / 1e12, "TF/s"),
         pct: pct_of_tensor_limit(flops, &t, gpu.info()),
@@ -605,6 +695,25 @@ fn bench_swiglu(gpu: &Gpu, name: &str, kind: SwigluKind, rows: usize, d: usize) 
     Ok(Row {
         name: name.into(),
         size: format!("{rows}x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+fn bench_swiglu_strided(gpu: &Gpu, name: &str, rows: usize, d: usize) -> Result<Row, GpuError> {
+    let mut plan = ArenaPlan::new();
+    let fused = plan.add(DType::F16, &[rows, 2 * d]);
+    let out = plan.add(DType::F16, &[rows, d]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &fused, &vec![f16::from_f32(0.5); rows * 2 * d])?;
+    let t = time_on_stream(gpu, 3, 50, || swiglu_strided(gpu, &arena, &fused, 0, d, &out))?;
+    // Two reads of one wide row and one write of the narrow row: the same bytes as the
+    // separate version, only the addresses differ.
+    let bytes = (3 * rows * d * 2) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{rows}x{d} of {rows}x{}", 2 * d),
         t,
         rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
         pct: pct_of_memory_limit(bytes, &t, gpu.info()),

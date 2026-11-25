@@ -8,6 +8,7 @@ mod attention_decode;
 mod conv1d;
 mod elementwise;
 mod embed;
+mod fastdiv;
 mod gemm_lesson;
 mod guide;
 mod heads;
@@ -18,23 +19,39 @@ mod rmsnorm;
 mod rope;
 mod swiglu;
 mod softmax;
-pub use attention::{ATTN_SCALE, AttnKind, BidirScratch, attention, attention_bidir, merge_heads, split_heads};
+pub use attention::{ATTN_SCALE, AttnKind, BidirScratch, attention, attention_bidir, attention_bidir_grouped, attention_flash128, merge_heads, split_heads};
 pub use attention_decode::{DecodeAttnKind, ProbsOut, attention_decode, attention_decode_with, decode_split_scratch};
 pub use conv1d::{ConvKind, Layout, conv1d, conv1d_with_layout};
 pub use elementwise::{Width, add_into, add_into_f32, add_rows, bias_add, bias_gelu, bias_gelu_with, add_into_f32_f32, f16_to_f32};
 pub use embed::{embed, embed_audio_sum, embed_f32, embed_one, embed_one_f32, embed_with};
+pub use fastdiv::{FastDiv, fast_div, fast_div_test};
 pub use gemm_lesson::{GemmKind, gemm_lesson, mma_probe};
 pub use mel::{log10_max, log10_max_partials, mel_frames, mel_window, power_spectrum};
 pub use layernorm::{LayerNormKind, layernorm, layernorm_to_f16, layernorm_with};
 pub use guide::guide_peak;
-pub use heads::{from_heads, to_heads};
+pub use heads::{from_heads, to_heads, to_heads_at};
 pub use llm::{embed_mixed, repeat_heads, rmsnorm_to_f16};
 pub use rmsnorm::{rmsnorm, rmsnorm_naive};
-pub use rope::{RopeKind, rmsnorm_rows, rmsnorm_rows_naive, rope, rope_inv_freq, rope_with};
+pub use rope::{RopeKind, rmsnorm_rows, rmsnorm_rows_naive, rmsnorm_rows_warp, rope, rope_inv_freq, rope_rows, rope_with};
 pub use softmax::{SoftmaxKind, softmax_rows, softmax_rows_with};
-pub use swiglu::{SwigluKind, swiglu, swiglu_with};
+pub use swiglu::{SwigluKind, swiglu, swiglu_strided, swiglu_with};
 
 use crate::{Arena, DType, Gpu, GpuError, Tensor};
+
+/// Test-only launch of the approximate intrinsic probe. It writes `[rsqrt, rcp]` per index.
+#[doc(hidden)]
+pub fn fast_math_probe(gpu: &Gpu, arena: &Arena, out: &Tensor, n: usize) -> Result<(), GpuError> {
+    assert_eq!(out.dtype(), DType::F32, "fast_math_probe: out must be F32");
+    assert_eq!(out.numel(), n * 2, "fast_math_probe: out needs two values per index");
+    if n == 0 {
+        return Ok(());
+    }
+    let o = arena.slice::<f32>(out);
+    let cfg = LaunchConfig::for_num_elems(grid_elems(n));
+    // SAFETY: `out` has 2n values and the kernel writes one pair per index below n.
+    unsafe { gpu.kernels()?.fast_math_probe_kernel(gpu.stream(), cfg, o.as_mut_ptr(), n) }?;
+    Ok(())
+}
 
 /// `out = a + b`, element by element. All three are `F32` with the same element count.
 pub fn add_f32(gpu: &Gpu, arena: &Arena, a: &Tensor, b: &Tensor, out: &Tensor) -> Result<(), GpuError> {

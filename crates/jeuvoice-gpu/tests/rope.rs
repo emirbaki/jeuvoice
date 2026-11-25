@@ -6,7 +6,7 @@
 
 use half::f16;
 use jeuvoice_gpu::check::{Tol, assert_close};
-use jeuvoice_gpu::ops::{RopeKind, rmsnorm_rows, rmsnorm_rows_naive, rope_inv_freq, rope_with};
+use jeuvoice_gpu::ops::{RopeKind, rmsnorm_rows, rmsnorm_rows_naive, rmsnorm_rows_warp, rope_inv_freq, rope_rows, rope_with};
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, Tensor};
 
 const HEAD: usize = 128;
@@ -157,6 +157,48 @@ fn the_two_layouts_differ() {
     let differ = half.iter().zip(&inter).filter(|(a, b)| a != b).count();
     assert!(differ > rows * heads * HEAD / 2, "only {differ} values differ between the layouts");
 }
+
+/// The position of a flat head row is its place in a run of `t` positions, so the pass needs no
+/// position tensor at all (P4). The derived positions must equal the uploaded `0..t-1` ones, for
+/// several batches of rows and a tail that does not fill the grid.
+#[test]
+fn the_position_comes_from_the_row() {
+    let gpu = Gpu::open(0).unwrap();
+    // (rows of sequences, heads, t): the production shapes plus an odd one.
+    for (batches, heads, t) in [(1usize, 1usize, 486usize), (1, 16, 214), (2, 3, 5), (1, 1, 1)] {
+        let rows = batches * heads * t; // head rows of the flat layout
+        let x = rnd(rows * HEAD, 87, 2.0);
+        let posed: Vec<i32> = (0..rows).map(|i| (i % t) as i32).collect();
+        let want = run_rope(&gpu, RopeKind::HalfSplit, &x, rows, 1, &posed, 1_000_000.0);
+
+        let mut plan = ArenaPlan::new();
+        let tx = plan.add(DType::F16, &[rows, HEAD]);
+        let canary = plan.add(DType::F16, &[4096]);
+        let tf = plan.add(DType::F32, &[HEAD / 2]);
+        let arena = Arena::new(&gpu, &plan).unwrap();
+        arena.upload(&gpu, &tx, &x.iter().map(|&v| f16::from_f32(v)).collect::<Vec<_>>()).unwrap();
+        arena.upload(&gpu, &canary, &vec![f16::from_f32(7.5); 4096]).unwrap();
+        arena.upload(&gpu, &tf, &rope_inv_freq(1_000_000.0, HEAD)).unwrap();
+        rope_rows(&gpu, &arena, &tx, &tf, t).unwrap();
+        let after = arena.download::<f16>(&gpu, &canary).unwrap();
+        assert!(after.iter().all(|v| v.to_f32() == 7.5), "rope_rows wrote past the end of x ({batches} rows of {t} positions)");
+        let got: Vec<f32> = arena.download::<f16>(&gpu, &tx).unwrap().iter().map(|v| v.to_f32()).collect();
+        assert_eq!(got, want, "the derived positions differ at {batches} rows of {t} positions");
+    }
+}
+
+/// A flat row count that is not a whole number of `t` runs is a programming error: a partial run
+/// would wrap the position back to zero in the middle of a sequence.
+#[test]
+#[should_panic(expected = "a whole number of")]
+fn a_partial_run_of_positions_panics() {
+    let gpu = Gpu::open(0).unwrap();
+    let mut plan = ArenaPlan::new();
+    let tx = plan.add(DType::F16, &[7, HEAD]);
+    let tf = plan.add(DType::F32, &[HEAD / 2]);
+    let arena = Arena::new(&gpu, &plan).unwrap();
+    rope_rows(&gpu, &arena, &tx, &tf, 3).unwrap();
+}
 /// Runs one rmsnorm kind and gives the rows back as f32.
 fn run_rmsnorm(gpu: &Gpu, naive: bool, x: &[f32], rows: usize, w: &[f32]) -> Vec<f32> {
     let mut plan = ArenaPlan::new();
@@ -170,6 +212,19 @@ fn run_rmsnorm(gpu: &Gpu, naive: bool, x: &[f32], rows: usize, w: &[f32]) -> Vec
     } else {
         rmsnorm_rows(gpu, &arena, &tx, &tw, 1e-6).unwrap();
     }
+    let _: Tensor = tx;
+    arena.download::<f16>(gpu, &tx).unwrap().iter().map(|v| v.to_f32()).collect()
+}
+
+/// Runs the warp kernel and gives the rows back as f32.
+fn run_rmsnorm_warp(gpu: &Gpu, x: &[f32], rows: usize, w: &[f32]) -> Vec<f32> {
+    let mut plan = ArenaPlan::new();
+    let tx = plan.add(DType::F16, &[rows, HEAD]);
+    let tw = plan.add(DType::F32, &[HEAD]);
+    let arena = Arena::new(gpu, &plan).unwrap();
+    arena.upload(gpu, &tx, &x.iter().map(|&v| f16::from_f32(v)).collect::<Vec<_>>()).unwrap();
+    arena.upload(gpu, &tw, w).unwrap();
+    rmsnorm_rows_warp(gpu, &arena, &tx, &tw, 1e-6).unwrap();
     let _: Tensor = tx;
     arena.download::<f16>(gpu, &tx).unwrap().iter().map(|v| v.to_f32()).collect()
 }
@@ -196,6 +251,33 @@ fn rmsnorm_rows_normalises_each_head() {
         let got = run_rmsnorm(&gpu, naive, &x, rows, &w);
         assert_close(&format!("rmsnorm_rows naive={naive}"), &got, &want, Tol { abs: 2e-3, rel: 5e-3 });
     }
+}
+
+/// One warp per row and four rows per block must give the same result as the block-per-row
+/// kernel. The last block may have fewer than four rows, and its extra warps must stay quiet.
+#[test]
+fn the_warp_rmsnorm_matches_the_row_kernel() {
+    let gpu = Gpu::open(0).unwrap();
+    let w: Vec<f32> = rnd(HEAD, 98, 0.1).iter().map(|&v| 1.0 + v).collect();
+    for rows in [1usize, 3, 5, 33] {
+        let x = rnd(rows * HEAD, 99, 3.0);
+        let want = run_rmsnorm(&gpu, false, &x, rows, &w);
+        let got = run_rmsnorm_warp(&gpu, &x, rows, &w);
+        assert_close(&format!("warp rmsnorm {rows} rows"), &got, &want, Tol { abs: 1e-3, rel: 1e-3 });
+    }
+    // A canary directly after x catches a warp that writes outside its row count.
+    let (rows, d) = (5usize, HEAD);
+    let mut plan = ArenaPlan::new();
+    let tx = plan.add(DType::F16, &[rows, d]);
+    let canary = plan.add(DType::F16, &[512]);
+    let tw = plan.add(DType::F32, &[d]);
+    let arena = Arena::new(&gpu, &plan).unwrap();
+    arena.upload(&gpu, &tx, &rnd(rows * d, 100, 3.0).iter().map(|&v| f16::from_f32(v)).collect::<Vec<_>>()).unwrap();
+    arena.upload(&gpu, &canary, &vec![f16::from_f32(7.5); 512]).unwrap();
+    arena.upload(&gpu, &tw, &w).unwrap();
+    rmsnorm_rows_warp(&gpu, &arena, &tx, &tw, 1e-6).unwrap();
+    let after = arena.download::<f16>(&gpu, &canary).unwrap();
+    assert!(after.iter().all(|v| v.to_f32() == 7.5), "warp rmsnorm wrote past the last row");
 }
 
 /// One pair is one work item: the rounded-up grid has 255 threads that own nothing, and they

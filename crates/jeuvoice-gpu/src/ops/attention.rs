@@ -6,7 +6,7 @@ use half::f16;
 
 use super::{grid_elems, softmax_rows};
 use crate::blas::{Blas, Op};
-use crate::kernels::{FLASH_BR, FLASH_D, FTC_ROWS, FTC_THREADS};
+use crate::kernels::{FLASH_BR, FLASH_D, FT8_D, FT8_ROWS, FT8_THREADS, FTC_ROWS, FTC_THREADS};
 use crate::{Arena, DType, Gpu, GpuError, Tensor};
 
 /// How `attention` computes the result.
@@ -110,28 +110,100 @@ pub fn attention(
     Ok(())
 }
 
+/// `out = softmax(scale · q·kᵀ) · v` for the Qwen3 head width of 128, on tensor cores
+/// (P5, lesson 13). `q` and `out` are `[batches, heads_q, t, 128]` f16, `k` and `v` are
+/// `[batches, heads_kv, t, 128]`, and query head `h` reads key head `h / group`. There is no
+/// mask: a caller with short rows uses `attention_bidir`.
+///
+/// The softmax is the online one of flash attention, so the result is algebraically equal to
+/// the grouped path and not bit-exact.
+///
+/// # Panics
+/// On a wrong dtype or shape, or when `heads_q` is not a multiple of `heads_kv`.
+pub fn attention_flash128(gpu: &Gpu, arena: &Arena, q: &Tensor, k: &Tensor, v: &Tensor, out: &Tensor) -> Result<(), GpuError> {
+    for (name, t) in [("q", q), ("k", k), ("v", v), ("out", out)] {
+        assert_eq!(t.dtype(), DType::F16, "attention_flash128: {name} must be F16");
+        assert_eq!(t.shape().len(), 4, "attention_flash128: {name} must be [batches, heads, t, 128]");
+        assert_eq!(t.shape()[3], FT8_D, "attention_flash128: {name} must have a head width of {FT8_D}");
+    }
+    let (b, hq, t_len) = (q.shape()[0], q.shape()[1], q.shape()[2]);
+    let h_kv = k.shape()[1];
+    assert_eq!(k.shape(), &[b, h_kv, t_len, FT8_D], "attention_flash128: k must be [batches, heads_kv, t, 128]");
+    assert_eq!(v.shape(), k.shape(), "attention_flash128: v must have the shape of k");
+    assert_eq!(out.shape(), q.shape(), "attention_flash128: out must have the shape of q");
+    assert!(h_kv > 0 && hq % h_kv == 0, "attention_flash128: {hq} query heads with {h_kv} key heads");
+    if b == 0 || t_len == 0 {
+        return Ok(());
+    }
+    let (qs, ks, vs, os) = (arena.slice::<f16>(q), arena.slice::<f16>(k), arena.slice::<f16>(v), arena.slice::<f16>(out));
+    // Not `ATTN_SCALE`: that one is the 1/√64 of the Whisper head. A 128-wide head needs
+    // 1/√128, or every score is 1.41x too large.
+    let scale = 1.0 / (FT8_D as f32).sqrt();
+    let cfg = LaunchConfig {
+        grid_dim: (grid_elems(t_len.div_ceil(FT8_ROWS)), grid_elems(hq), grid_elems(b)),
+        block_dim: (FT8_THREADS, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    // SAFETY: one block per FT8_ROWS query rows, head and batch, with FT8_THREADS threads. The
+    // shapes are checked above, so every read stays inside its tensor and `out` has one owner
+    // per element.
+    unsafe {
+        gpu.kernels()?.flash_attn_tc128_f16(
+            gpu.stream(),
+            cfg,
+            qs.as_ptr().cast(),
+            ks.as_ptr().cast(),
+            vs.as_ptr().cast(),
+            os.as_mut_ptr().cast(),
+            t_len,
+            hq,
+            h_kv,
+            scale,
+        )
+    }?;
+    Ok(())
+}
+
 /// The scratch of `attention_bidir`.
 pub struct BidirScratch<'a> {
-    /// `[batches, heads_q, t, d]` F16: the key heads after the repeat.
-    pub kx: &'a Tensor,
-    /// `[batches, heads_q, t, d]` F16.
-    pub vx: &'a Tensor,
     /// `[batches·heads_q, t, t]` F16: the scores, then the probabilities.
     pub scores: &'a Tensor,
 }
 
-/// Bidirectional grouped-query attention over the whole sequence, the attention of the
-/// OmniVoice (Qwen3) backbone: `out = softmax(q·kᵀ/√d) · v` for every batch and head, with no
-/// causal mask. Query head `h` reads key head `h / group`.
+/// The bidirectional attention of the backbone: the flash kernel when the head width is 128
+/// and there is no padding mask (P5), else the grouped path. The two are algebraically equal.
 ///
 /// `q` and `out` are `[batches, heads_q, t, d]`, `k` and `v` are `[batches, heads_kv, t, d]`.
 /// `valid` (`I32 [batches]`, optional) holds the real length of each row: a score past it is
 /// dropped, and a query position past it sees only itself, as in `omnivoice.py:1339-1347`.
 ///
 /// # Panics
-/// On a wrong dtype, shape, or scratch size.
+/// As the path it takes.
 #[allow(clippy::too_many_arguments)]
 pub fn attention_bidir(
+    gpu: &Gpu,
+    arena: &Arena,
+    blas: &Blas,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    out: &Tensor,
+    scratch: BidirScratch<'_>,
+    valid: Option<&Tensor>,
+) -> Result<(), GpuError> {
+    if valid.is_none() && q.shape().len() == 4 && q.shape()[3] == FT8_D {
+        return attention_flash128(gpu, arena, q, k, v, out);
+    }
+    attention_bidir_grouped(gpu, arena, blas, q, k, v, out, scratch, valid)
+}
+
+/// `attention_bidir` with cuBLAS: the scores of every head in a DRAM plane (`scratch.scores`),
+/// then a softmax kernel, then `probs · v`. It handles the padding mask of short rows.
+///
+/// # Panics
+/// On a wrong dtype, shape, or scratch size.
+#[allow(clippy::too_many_arguments)]
+pub fn attention_bidir_grouped(
     gpu: &Gpu,
     arena: &Arena,
     blas: &Blas,
@@ -152,8 +224,6 @@ pub fn attention_bidir(
     assert_eq!(v.shape(), k.shape(), "attention_bidir: v must have the shape of k");
     assert_eq!(out.shape(), q.shape(), "attention_bidir: out must have the shape of q");
     assert!(h_kv > 0 && hq % h_kv == 0, "attention_bidir: {hq} query heads with {h_kv} key heads");
-    assert_eq!(scratch.kx.shape(), q.shape(), "attention_bidir: kx must have the shape of q");
-    assert_eq!(scratch.vx.shape(), q.shape(), "attention_bidir: vx must have the shape of q");
     assert_eq!(scratch.scores.shape(), &[b * hq, t_len, t_len], "attention_bidir: scores must be [batches·heads, t, t]");
     if let Some(mask) = valid {
         assert_eq!(mask.dtype(), DType::I32, "attention_bidir: valid must be I32");

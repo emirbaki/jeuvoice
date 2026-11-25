@@ -2,7 +2,7 @@
 //! PTX into this crate, and make a host-side `device::load(&ctx)` with one typed launch
 //! method for each `#[kernel]`.
 
-use cuda_device::{DisjointSlice, SharedArray, cuda_module, device, kernel, thread, warp};
+use cuda_device::{DisjointSlice, SharedArray, cuda_module, device, float, kernel, thread, warp};
 
 /// Threads per block of the row kernels (RMSNorm, LayerNorm). 256 threads = 8 warps of 32.
 pub const ROW_BLOCK: u32 = 256;
@@ -34,6 +34,18 @@ pub const FTC_KEYS: usize = 64;
 pub const FTC_THREADS: u32 = 128;
 /// The shared row stride of the K and V tiles: 64 + 8 halfs (144 bytes, a multiple of 16).
 const FTC_LD: usize = FLASH_D + 8;
+/// The head width of the OmniVoice attention (Qwen3) and the shape of its tensor-core flash
+/// kernel: 128 values per head, 64 query rows per block (4 warps of 16), 32 keys per tile.
+pub const FT8_D: usize = 128;
+pub const FT8_ROWS: usize = 64;
+pub const FT8_KEYS: usize = 32;
+pub const FT8_THREADS: u32 = 128;
+/// 128 + 8 halfs is 272 bytes, a multiple of 16 (ldmatrix) and 68 words, so each row of the
+/// tiles moves 4 memory banks and the eight rows of an `ldmatrix` hit eight different banks.
+const FT8_LD: usize = FT8_D + 8;
+/// The K/V tile copy of `flash_attn_tc128_f16` gives each thread whole 8-value chunks. The
+/// `unroll!(NT in ...)` lists of that kernel follow `FT8_KEYS / 8`: change both together.
+const _: () = assert!(FT8_KEYS * (FT8_D / 8) % FT8_THREADS as usize == 0);
 /// The query rows one flash-attention block owns. The K and V tiles are loaded once for all
 /// of them (lesson 5 shows the difference between 1 and 8).
 pub const FLASH_BR: usize = 8;
@@ -76,6 +88,53 @@ pub struct Q16(pub [u32; 4]);
 #[cuda_module]
 pub mod device {
     use super::*;
+
+    /// `n / d` from a host-checked multiply-shift pair. A GPU has no integer division
+    /// hardware, so this replaces a long `div`/`rem` sequence with a widening product.
+    #[device]
+    pub fn fast_div(n: u32, magic: u32, shift: u32) -> u32 {
+        ((u64::from(n) * u64::from(magic)) >> shift) as u32
+    }
+
+    /// Test-only launch of `fast_div`. It writes `[q, r]` for each index.
+    #[kernel]
+    pub unsafe fn fast_div_test_kernel(out: *mut u32, n: usize, magic: u32, shift: u32, d: u32) {
+        let i = thread::index_1d().get() as usize;
+        if i >= n {
+            return;
+        }
+        let q = fast_div(i as u32, magic, shift);
+        // SAFETY: `out` has two values per index, and this thread owns index `i`.
+        unsafe {
+            *out.add(2 * i) = q;
+            *out.add(2 * i + 1) = i as u32 - q * d;
+        }
+    }
+
+    /// Test-only probe of the approximate intrinsics. The inputs are fixed so the host needs
+    /// no extra tensor. It writes `[rsqrt, rcp]` for each index.
+    #[kernel]
+    pub unsafe fn fast_math_probe_kernel(out: *mut f32, n: usize) {
+        let i = thread::index_1d().get() as usize;
+        if i >= n {
+            return;
+        }
+        let v = match i {
+            0 => 1.0f32,
+            1 => 2.0,
+            2 => 4.0,
+            3 => 9.0,
+            4 => 16.0,
+            5 => 0.25,
+            6 => 1e-4,
+            _ => 1e4,
+        };
+        // SAFETY: `out` has two values per index, and this thread owns index `i`.
+        unsafe {
+            *out.add(2 * i) = float::rsqrt_approx_f32(v);
+            *out.add(2 * i + 1) = float::rcp_approx_ftz_f32(v);
+        }
+    }
 
     /// `out[i] = a[i] + b[i]`. One thread for each element. A toolchain smoke test.
     #[kernel]
@@ -1463,7 +1522,7 @@ pub mod device {
             }
             j += 1;
         }
-        let inv = 1.0 / block_sum(s);
+        let inv = float::rcp_approx_ftz_f32(block_sum(s));
         let mut j = 0;
         while j < MAX_COLS_PER_THREAD {
             let c = tid + j * step;
@@ -1599,8 +1658,51 @@ pub mod device {
         }
     }
 
-    /// Rotary position embedding on `[rows, heads, 128]` f16 in place with *interleaved* pairs:
-    /// the pair is `(2i, 2i+1)`, the form of GPT-J. Qwen uses `rope_half_f16` instead; this one
+    /// As `rope_half_f16`, but the position of a row comes from its place in a run of `t`
+    /// positions: `pos = row % t` (P4). The OmniVoice pass numbers its positions `0..t-1` in
+    /// every sequence, so it uploads no position table and the pass has one less copy.
+    ///
+    /// # Safety
+    /// `x` is valid for `n = rows * heads * d/2` pairs, `inv_freq` for `d / 2` f32 values,
+    /// `t > 0` and `rows` is a whole number of `t` runs. `d` is even. A thread at or past `n`
+    /// returns.
+    #[kernel]
+    pub unsafe fn rope_half_f16_rows(
+        x: *mut f16,
+        inv_freq: *const f32,
+        d: usize,
+        n: usize,
+        pair_d: u32,
+        pair_magic: u32,
+        pair_shift: u32,
+        t_d: u32,
+        t_magic: u32,
+        t_shift: u32,
+    ) {
+        let i = thread::index_1d().get() as usize;
+        // The grid is rounded up to a whole block, so this guard owns the tail.
+        if i >= n {
+            return;
+        }
+        let iu = i as u32;
+        let row = fast_div(iu, pair_magic, pair_shift);
+        let pair = iu - row * pair_d;
+        let run = fast_div(row, t_magic, t_shift);
+        let pos = row - run * t_d;
+        let base = row as usize * d + pair as usize;
+        // SAFETY: every thread below `n` owns a pair, so row < rows and pair < d/2, and the
+        // two halves are inside the same head. The magic pairs are checked by the host op.
+        unsafe {
+            let angle = pos as f32 * *inv_freq.add(pair as usize);
+            let (s, c) = (libm::sinf(angle), libm::cosf(angle));
+            let a = *x.add(base) as f32;
+            let b = *x.add(base + d / 2) as f32;
+            *x.add(base) = (a * c - b * s) as f16;
+            *x.add(base + d / 2) = (a * s + b * c) as f16;
+        }
+    }
+
+    /// Rotary position embedding on `[rows, heads, 128]` f16 in place with *interleaved* pairs:    /// the pair is `(2i, 2i+1)`, the form of GPT-J. Qwen uses `rope_half_f16` instead; this one
     /// stays for lesson 10, which compares the two layouts. One thread per pair.
     ///
     /// # Safety
@@ -1665,11 +1767,48 @@ pub mod device {
         if inside {
             v = unsafe { *x.add(base + c) } as f32;
         }
-        let scale = 1.0 / (block_sum_4(v * v) / d as f32 + eps).sqrt();
+        let scale = float::rsqrt_approx_f32(block_sum_4(v * v) / d as f32 + eps);
         if inside {
             // SAFETY: as above. The value comes from the register, not a second read.
             unsafe { *x.add(base + c) = (v * scale * *w.add(c)) as f16 };
         }
+    }
+
+    /// `rmsnorm_rows_f16_small` with one warp per row and four rows per block (lesson 10,
+    /// exercise 1). The 128-wide row is four values per lane, so the reduction lives in warp
+    /// registers. No shared memory and no barriers are needed.
+    ///
+    /// # Safety
+    /// `x` is valid for `rows * d` f16 values with `d <= 128`, `w` for `d` f32 values, and `x`
+    /// is written in place. The grid has four warps per block and a row at or past `rows`
+    /// returns before it reads or writes.
+    #[kernel]
+    pub unsafe fn rmsnorm_rows_f16_warp(x: *mut f16, w: *const f32, d: usize, rows: usize, eps: f32) {
+        let tid = thread::threadIdx_x() as usize;
+        let row = thread::blockIdx_x() as usize * 4 + tid / 32;
+        let lane = tid % 32;
+        if row >= rows {
+            return;
+        }
+        let base = row * d;
+        let mut v = [0.0f32; 4];
+        unroll!(K in [0, 1, 2, 3] {
+            let c = lane + K * 32;
+            if c < d {
+                // SAFETY: c < d, one block per four rows, and this lane owns c.
+                v[K] = unsafe { *x.add(base + c) } as f32;
+            }
+        });
+        let sum = v[0] * v[0] + v[1] * v[1] + v[2] * v[2] + v[3] * v[3];
+        let scale = float::rsqrt_approx_f32(warp::reduce_sum_f32(sum) / d as f32 + eps);
+        unroll!(K in [0, 1, 2, 3] {
+            let c = lane + K * 32;
+            if c < d {
+                // SAFETY: the value comes from the register and c < d, so the write is inside
+                // this row and this lane owns it.
+                unsafe { *x.add(base + c) = (v[K] * scale * *w.add(c)) as f16 };
+            }
+        });
     }
 
     /// Rotary position embedding with the half-split pairs of Qwen3, and the sine and cosine of
@@ -1814,7 +1953,7 @@ pub mod device {
     /// the quotient is 0, which is the right limit and not a NaN.
     #[device]
     pub fn silu(v: f32) -> f32 {
-        v / (1.0 + libm::expf(-v))
+        v * float::rcp_approx_ftz_f32(1.0 + libm::expf(-v))
     }
 
     /// `out[i] = silu(gate[i]) · up[i]`, one element per thread.
@@ -1852,6 +1991,32 @@ pub mod device {
             let g = *gate.add(i);
             let u = *up.add(i);
             *out.add(i) = [(silu(g[0] as f32) * u[0] as f32) as f16, (silu(g[1] as f32) * u[1] as f32) as f16];
+        }
+    }
+
+    /// `out[row][col] = silu(src[row][gate_col + col]) · src[row][up_col + col]`: SwiGLU over
+    /// one row of a wider row-major tensor, which is how the fused gate/up projection stores
+    /// its two halves (P3). `out` is contiguous `[rows, row_width]`.
+    ///
+    /// # Safety
+    /// `gate` and `up` point into a tensor of at least `(rows - 1) · row_stride + row_width`
+    /// f16 values from the block's first column, `out` is valid for `rows · row_width`
+    /// values, and the two ranges do not overlap. The grid has one thread per output value.
+    #[kernel]
+    pub unsafe fn swiglu_strided_f16(gate: *const f16, up: *const f16, out: *mut f16, row_width: u32, row_stride: usize, magic: u32, shift: u32, n: usize) {
+        let i = thread::index_1d().get() as usize;
+        if i >= n {
+            return;
+        }
+        let iu = i as u32;
+        let row = fast_div(iu, magic, shift);
+        let src = row as usize * row_stride + (iu - row * row_width) as usize;
+        // SAFETY: i < rows · row_width, so the source index is inside the two blocks and out
+        // has room for i.
+        unsafe {
+            let g = *gate.add(src) as f32;
+            let u = *up.add(src) as f32;
+            *out.add(i) = (silu(g) * u) as f16;
         }
     }
 
@@ -1944,7 +2109,7 @@ pub mod device {
             sum += v * v;
             c += ROW_BLOCK as usize;
         }
-        let scale = 1.0 / (block_sum(sum) / d as f32 + eps).sqrt();
+        let scale = float::rsqrt_approx_f32(block_sum(sum) / d as f32 + eps);
         let mut c = tid;
         while c < d {
             // SAFETY: each (row, c) belongs to exactly one thread.
@@ -2011,30 +2176,48 @@ pub mod device {
     }
 
     /// `dst[b][h][t] = src[(b·t + t)][h·d .. h·d + d]`: the row-major projection output into
-    /// the head layout of the attention.
+    /// the head layout of the attention. The source row is `src_stride` values wide, so the
+    /// fused QKV projection can hand one block of its row (P3).
     ///
     /// # Safety
-    /// `src` is valid for `batches * t * heads * d` f16 values and `dst` for the same count,
-    /// which is `n`. They do not overlap. One thread per value, and a thread at or past `n`
-    /// returns.
+    /// `src` is valid for `batches * t * src_stride` f16 values from its first column `h·d`,
+    /// which needs `heads * d <= src_stride`, and `dst` for `n = batches * t * heads * d`
+    /// values. They do not overlap. One thread per value, and a thread at or past `n` returns.
     #[kernel]
-    pub unsafe fn to_heads_f16(src: *const f16, dst: *mut f16, t: usize, heads: usize, d: usize, n: usize) {
+    pub unsafe fn to_heads_f16(
+        src: *const f16,
+        dst: *mut f16,
+        src_stride: usize,
+        t: u32,
+        n: usize,
+        total_d: u32,
+        total_magic: u32,
+        total_shift: u32,
+        td_d: u32,
+        td_magic: u32,
+        td_shift: u32,
+        d_d: u32,
+        d_magic: u32,
+        d_shift: u32,
+    ) {
         let i = thread::index_1d().get() as usize;
         // The grid is rounded up to a whole block, so this guard owns the tail.
         if i >= n {
             return;
         }
-        let total = t * heads * d;
-        let b = i / total;
-        let rest = i % total;
-        let h = rest / (t * d);
-        let pos = (rest / d) % t;
-        let col = rest % d;
+        let iu = i as u32;
+        let b = fast_div(iu, total_magic, total_shift);
+        let rest = iu - b * total_d;
+        let h = fast_div(rest, td_magic, td_shift);
+        let in_head = rest - h * td_d;
+        let pos = fast_div(in_head, d_magic, d_shift);
+        let col = in_head - pos * d_d;
         // SAFETY: the source row (b·t + pos) and the head column h·d + col are inside src for
-        // every i below batches·t·heads·d, and dst has the same size.
+        // every i below batches·t·heads·d, and dst has the same size. The magic pairs are
+        // checked over the index range by the host op.
         unsafe {
-            let src_row = b * t + pos;
-            *dst.add(i) = *src.add(src_row * heads * d + h * d + col);
+            let src_row = b as usize * t as usize + pos as usize;
+            *dst.add(i) = *src.add(src_row * src_stride + h as usize * d_d as usize + col as usize);
         }
     }
 
@@ -2043,22 +2226,39 @@ pub mod device {
     /// # Safety
     /// As `to_heads_f16`.
     #[kernel]
-    pub unsafe fn from_heads_f16(src: *const f16, dst: *mut f16, t: usize, heads: usize, d: usize, n: usize) {
+    pub unsafe fn from_heads_f16(
+        src: *const f16,
+        dst: *mut f16,
+        t: u32,
+        heads: u32,
+        n: usize,
+        total_d: u32,
+        total_magic: u32,
+        total_shift: u32,
+        td_d: u32,
+        td_magic: u32,
+        td_shift: u32,
+        d_d: u32,
+        d_magic: u32,
+        d_shift: u32,
+    ) {
         let i = thread::index_1d().get() as usize;
         // The grid is rounded up to a whole block, so this guard owns the tail.
         if i >= n {
             return;
         }
-        let total = t * heads * d;
-        let b = i / total;
-        let rest = i % total;
-        let h = rest / (t * d);
-        let pos = (rest / d) % t;
-        let col = rest % d;
-        // SAFETY: as `to_heads_f16`, with the two pointers swapped.
+        let iu = i as u32;
+        let b = fast_div(iu, total_magic, total_shift);
+        let rest = iu - b * total_d;
+        let h = fast_div(rest, td_magic, td_shift);
+        let in_head = rest - h * td_d;
+        let pos = fast_div(in_head, d_magic, d_shift);
+        let col = in_head - pos * d_d;
+        // SAFETY: as `to_heads_f16`, with the two pointers swapped. The magic pairs are checked
+        // over the index range by the host op.
         unsafe {
-            let dst_row = b * t + pos;
-            *dst.add(dst_row * heads * d + h * d + col) = *src.add(i);
+            let dst_row = b as usize * t as usize + pos as usize;
+            *dst.add(dst_row * heads as usize * d_d as usize + h as usize * d_d as usize + col as usize) = *src.add(i);
         }
     }
 
@@ -2781,7 +2981,7 @@ pub mod device {
         unroll!(H in [0, 1] {
             let r = row0 + g + H * 8;
             if r < seq {
-                let inv = 1.0 / l[H];
+                let inv = float::rcp_approx_ftz_f32(l[H]);
                 unroll!(DT in [0, 1, 2, 3, 4, 5, 6, 7] {
                     let c = DT * 8 + 2 * t;
                     // SAFETY: r < seq and c + 1 < 64, and each output has one owner lane.
@@ -2794,8 +2994,178 @@ pub mod device {
         });
     }
 
-    // ---- The log-mel spectrogram (lesson 7: docs/cuda-lessons/07-mel.md) ----
-    // The steps: frames with a Hann window, the DFT as an f32 GEMM (cuBLAS), the power,
+    /// Flash attention on tensor cores for a head width of 128 (lesson 13): `out =
+    /// softmax(scale · Q·Kᵀ) · V` with no mask. One head of Q per `blockIdx.y`, one batch per
+    /// `blockIdx.z`, and `FT8_ROWS` query rows per block, 16 per warp. The contraction of a
+    /// head is 16 k steps of 8 (not 4), so each warp keeps 16 Q fragments.
+    ///
+    /// For each tile of `FT8_KEYS` keys: the block copies K and V to shared memory (zeros past
+    /// `seq`), `S = Q·Kᵀ` with mma, the online softmax on the S registers, and `O += P·V`.
+    ///
+    /// # Safety
+    /// `q` and `out` are `[batches, heads, seq, 128]` f16, `k` and `v` are
+    /// `[batches, kv_heads, seq, 128]`, `heads % kv_heads == 0`, and `out` overlaps none of the
+    /// others. The grid is `(ceil(seq / FT8_ROWS), heads, batches)` with `FT8_THREADS` threads.
+    #[kernel]
+    pub unsafe fn flash_attn_tc128_f16(q: *const f16, k: *const f16, v: *const f16, out: *mut f16, seq: usize, heads: usize, kv_heads: usize, scale: f32) {
+        static mut SK8: SharedArray<f16, { FT8_KEYS * FT8_LD }, 16> = SharedArray::UNINIT;
+        static mut SV8: SharedArray<f16, { FT8_KEYS * FT8_LD }, 16> = SharedArray::UNINIT;
+        let tid = thread::threadIdx_x() as usize;
+        let lane = tid % 32;
+        let (g, tt) = (lane / 4, lane % 4);
+        let head = thread::blockIdx_y() as usize;
+        let batch = thread::blockIdx_z() as usize;
+        let kv_head = head / (heads / kv_heads);
+        let q_base = (batch * heads + head) * seq * FT8_D;
+        let kv_base = (batch * kv_heads + kv_head) * seq * FT8_D;
+        let row0 = thread::blockIdx_x() as usize * FT8_ROWS + (tid / 32) * 16;
+        // SAFETY: as in `flash_attn_tc_f16`: the pointers come from `&raw mut`, each thread
+        // writes a different slot, and the barriers order the reads after the writes.
+        let (sk, sv) = unsafe { (SharedArray::as_raw_mut_ptr(&raw mut SK8), SharedArray::as_raw_mut_ptr(&raw mut SV8)) };
+
+        // 1. This warp's Q slice as A fragments: qa[ks] covers head dims ks*8 .. ks*8+8.
+        let mut qa = [[0u32; 2]; 16];
+        unroll!(KS in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
+            unroll!(H in [0, 1] {
+                let r = row0 + g + H * 8;
+                let c = KS * 8 + 2 * tt;
+                if r < seq {
+                    // SAFETY: r < seq and c + 1 < 128, inside this head of Q.
+                    qa[KS][H] = unsafe { pack_h2(*q.add(q_base + r * FT8_D + c), *q.add(q_base + r * FT8_D + c + 1)) };
+                }
+            });
+        });
+
+        let mut o = [[0.0f32; 4]; 16];
+        // The running max and sum of rows g (index 0) and g + 8 (index 1).
+        let mut m = [f32::NEG_INFINITY; 2];
+        let mut l = [0.0f32; 2];
+        let chunks = FT8_D / 8; // 16 chunks of 8 halfs per row
+        let per_thread = FT8_KEYS * chunks / FT8_THREADS as usize;
+        let mut key0 = 0;
+        while key0 < seq {
+            // 2. Copy the K and V tiles: `per_thread` chunks of 8 halfs each.
+            let mut i = 0;
+            while i < per_thread {
+                let qi = tid + i * FT8_THREADS as usize;
+                let (r, c8) = (qi / chunks, (qi % chunks) * 8);
+                let key = key0 + r;
+                let off = kv_base + key * FT8_D + c8;
+                // SAFETY: load_chunk8 reads only inside row `key` of this head when key < seq.
+                // The stores are inside SK8 and SV8, 16-byte aligned.
+                unsafe {
+                    *(sk.add(r * FT8_LD + c8) as *mut Q16) = load_chunk8(k.wrapping_add(off), key < seq, c8, FT8_D);
+                    *(sv.add(r * FT8_LD + c8) as *mut Q16) = load_chunk8(v.wrapping_add(off), key < seq, c8, FT8_D);
+                }
+                i += 1;
+            }
+            thread::sync_threads();
+
+            // 3. S = Q·Kᵀ: FT8_KEYS / 8 key tiles of 8, each over the 16 head-dim steps.
+            let mut s = [[0.0f32; 4]; FT8_KEYS / 8];
+            unroll!(NT in [0, 1, 2, 3] {
+                let kr = NT * 8 + (lane % 8);
+                // SAFETY: kr < 32 and the columns stay inside the 128 head dims of the row.
+                // Every lane reaches these calls.
+                let (b0, b1, b2, b3) = unsafe {
+                    (
+                        cuda_device::wmma::ldmatrix_x4(sk.add(kr * FT8_LD + (lane / 8) * 8) as *const u32),
+                        cuda_device::wmma::ldmatrix_x4(sk.add(kr * FT8_LD + 32 + (lane / 8) * 8) as *const u32),
+                        cuda_device::wmma::ldmatrix_x4(sk.add(kr * FT8_LD + 64 + (lane / 8) * 8) as *const u32),
+                        cuda_device::wmma::ldmatrix_x4(sk.add(kr * FT8_LD + 96 + (lane / 8) * 8) as *const u32),
+                    )
+                };
+                unroll!(KS in [0, 1, 2, 3] {
+                    // SAFETY: all 32 lanes run these calls with their own fragments.
+                    unsafe {
+                        s[NT] = cuda_device::wmma::mma_m16n8k8_f32_f16(s[NT], qa[KS], b0[KS]);
+                        s[NT] = cuda_device::wmma::mma_m16n8k8_f32_f16(s[NT], qa[KS + 4], b1[KS]);
+                        s[NT] = cuda_device::wmma::mma_m16n8k8_f32_f16(s[NT], qa[KS + 8], b2[KS]);
+                        s[NT] = cuda_device::wmma::mma_m16n8k8_f32_f16(s[NT], qa[KS + 12], b3[KS]);
+                    }
+                });
+            });
+
+            // 4. The online softmax, per row half H (row g + 8H).
+            unroll!(H in [0, 1] {
+                let mut mx = f32::NEG_INFINITY;
+                unroll!(NT in [0, 1, 2, 3] {
+                    unroll!(JJ in [0, 1] {
+                        let key = key0 + NT * 8 + 2 * tt + JJ;
+                        let val = if key < seq { s[NT][2 * H + JJ] * scale } else { f32::NEG_INFINITY };
+                        s[NT][2 * H + JJ] = val;
+                        mx = mx.max(val);
+                    });
+                });
+                mx = mx.max(f32::from_bits(warp::shuffle_xor(mx.to_bits(), 1)));
+                mx = mx.max(f32::from_bits(warp::shuffle_xor(mx.to_bits(), 2)));
+                let m_new = m[H].max(mx);
+                // exp(-inf) = 0: the first tile drops the empty start values.
+                let alpha = libm::expf(m[H] - m_new);
+                let mut sum = 0.0f32;
+                unroll!(NT in [0, 1, 2, 3] {
+                    unroll!(JJ in [0, 1] {
+                        let p = libm::expf(s[NT][2 * H + JJ] - m_new);
+                        s[NT][2 * H + JJ] = p;
+                        sum += p;
+                    });
+                });
+                sum += f32::from_bits(warp::shuffle_xor(sum.to_bits(), 1));
+                sum += f32::from_bits(warp::shuffle_xor(sum.to_bits(), 2));
+                l[H] = l[H] * alpha + sum;
+                m[H] = m_new;
+                unroll!(DT in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
+                    o[DT][2 * H] *= alpha;
+                    o[DT][2 * H + 1] *= alpha;
+                });
+            });
+
+            // 5. O += P·V. Key tile NT is one k step: P from the S registers is its A fragment.
+            unroll!(NT in [0, 1, 2, 3] {
+                let pa = [pack_h2(s[NT][0] as f16, s[NT][1] as f16), pack_h2(s[NT][2] as f16, s[NT][3] as f16)];
+                let vr = NT * 8 + (lane % 8);
+                // SAFETY: vr < 32 and the columns stay inside the row. Every lane reaches these.
+                let (vb0, vb1, vb2, vb3) = unsafe {
+                    (
+                        cuda_device::wmma::ldmatrix_x4_trans(sv.add(vr * FT8_LD + (lane / 8) * 8) as *const u32),
+                        cuda_device::wmma::ldmatrix_x4_trans(sv.add(vr * FT8_LD + 32 + (lane / 8) * 8) as *const u32),
+                        cuda_device::wmma::ldmatrix_x4_trans(sv.add(vr * FT8_LD + 64 + (lane / 8) * 8) as *const u32),
+                        cuda_device::wmma::ldmatrix_x4_trans(sv.add(vr * FT8_LD + 96 + (lane / 8) * 8) as *const u32),
+                    )
+                };
+                unroll!(DT in [0, 1, 2, 3] {
+                    // SAFETY: all 32 lanes run these calls with their own fragments.
+                    unsafe {
+                        o[DT] = cuda_device::wmma::mma_m16n8k8_f32_f16(o[DT], pa, vb0[DT]);
+                        o[DT + 4] = cuda_device::wmma::mma_m16n8k8_f32_f16(o[DT + 4], pa, vb1[DT]);
+                        o[DT + 8] = cuda_device::wmma::mma_m16n8k8_f32_f16(o[DT + 8], pa, vb2[DT]);
+                        o[DT + 12] = cuda_device::wmma::mma_m16n8k8_f32_f16(o[DT + 12], pa, vb3[DT]);
+                    }
+                });
+            });
+            // The next copy overwrites the tiles: wait until every warp is done with them.
+            thread::sync_threads();
+            key0 += FT8_KEYS;
+        }
+
+        // Write O / l: rows g and g + 8, head dims DT*8 + 2t and + 1.
+        unroll!(H in [0, 1] {
+            let r = row0 + g + H * 8;
+            if r < seq {
+                let inv = float::rcp_approx_ftz_f32(l[H]);
+                unroll!(DT in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
+                    let c = DT * 8 + 2 * tt;
+                    // SAFETY: r < seq and c + 1 < 128, and each output has one owner lane.
+                    unsafe {
+                        *out.add(q_base + r * FT8_D + c) = (o[DT][2 * H] * inv) as f16;
+                        *out.add(q_base + r * FT8_D + c + 1) = (o[DT][2 * H + 1] * inv) as f16;
+                    }
+                });
+            }
+        });
+    }
+
+    // ---- The log-mel spectrogram (lesson 7: docs/cuda-lessons/07-mel.md) ----    // The steps: frames with a Hann window, the DFT as an f32 GEMM (cuBLAS), the power,
     // the mel projection as a second f32 GEMM (cuBLAS), then log10 and the max over the
     // whole file, then one 3000-frame window clamped, normalized and transposed to f16.
 
