@@ -34,3 +34,28 @@ The files go to `target\reference\whisper\` and are not committed.
 | `embed` | `[1500, 1280]` | after the positional embedding |
 | `block_00`, `block_15`, `block_31` | `[1500, 1280]` | hidden states after those blocks |
 | `ln_post` | `[1500, 1280]` | the encoder output |
+
+## Make the Whisper decoder reference files
+
+The decoder test feeds the PyTorch encoder output into the Rust decoder, so it checks the decoder alone. Use a clip shorter than 30 s: the Hugging Face feature extractor normalizes each 30 s window, whisper.cpp the whole file.
+
+1. Write the samples (step 1 above) and the whisper-rs fixture:
+
+   ```powershell
+   scripts\cargo.cmd run -p jeuvoice-whisper --release --example dump_whisper_rs -- D:\MLProjelerim\tts_lab\data\ref\my_voice.ogg target\reference\whisper\my_voice.rs.json
+   ```
+
+2. Write the decoder reference:
+
+   ```powershell
+   engine\.venv\Scripts\python.exe -I tools\reference\whisper_decoder_reference.py target\reference\whisper\my_voice.f32 target\reference\whisper\my_voice.rs.json target\reference\whisper\my_voice.decoder.safetensors
+   ```
+
+3. Do the same for `sesim\ses_001_0007.wav`.
+
+| Key | Shape | Content |
+|---|---|---|
+| `steps`, `dtw_tokens` | `[T]`, `[Td]` int64 | the teacher-forced token lists |
+| `enc_out` | `[1500, 1280]` | the fp32 encoder output |
+| `logits32`, `logits16` | `[T - 2, 51866]` | the logits after each token from the third on |
+| `align32`, `align16` | `[6, Td, 1500]` | the cross-attention softmax of the 6 alignment heads |

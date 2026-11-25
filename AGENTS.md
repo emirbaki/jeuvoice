@@ -2,7 +2,7 @@
 
 Rules and commands for coding agents in this repo. Read this first.
 
-**Current work:** the Rust CUDA inference project. Read `docs/superpowers/handoff/2026-11-24-rust-cuda-handoff.md` for where it stopped and what comes next.
+**Current work:** the Rust CUDA inference project, Phase 1b (the Whisper decoder), on the branch `rust-cuda-phase1b`. Read `docs/superpowers/handoff/2026-11-25-rust-cuda-phase1b-handoff.md` for where it stopped and what comes next. The older handoff `docs/superpowers/handoff/2026-11-24-rust-cuda-handoff.md` has the history of Phase 0 and 1a.
 
 ## The project
 
@@ -25,9 +25,11 @@ JeuVoice is a Windows desktop app in Rust for Turkish speech: transcription (Whi
 |---|---|
 | `scripts\cargo.cmd test` | plain tests of the default members. No cuda-oxide tools needed. |
 | `scripts\cargo.cmd oxide test -- -p jeuvoice-gpu` | GPU kernel tests through the cuda-oxide backend |
-| `scripts\cargo.cmd oxide test -- -p jeuvoice-whisper --features cuda-kernels` | Whisper GPU tests (after plan 1a Task 9 adds the feature) |
+| `scripts\cargo.cmd oxide test -- -p jeuvoice-whisper --features cuda-kernels` | Whisper GPU tests. Add `--release --test <file> -- --ignored --nocapture --test-threads 1` for the real-model tests, one file at a time. |
 | `scripts\cargo.cmd oxide build -- -p jeuvoice-gpu --bin gpu-bench --release` | build the benchmark table |
 | `target\release\gpu-bench.exe [filter]` | run it. Put `%CUDA_PATH%\bin\x64` on PATH first, for cuBLAS. |
+| `powershell -ExecutionPolicy Bypass -File scripts\compare-whisper.ps1` | the Phase 1 criteria: whisper.cpp against `CudaWhisper` (WER, word starts, time, VRAM) |
+| `powershell -ExecutionPolicy Bypass -File packaging\windows\collect.ps1` | the release bundle; it builds the app with the `cuda-kernels` feature through the oxide backend (about 9 minutes) |
 
 Always use `scripts\cargo.cmd`, not `cargo`. It sets up Visual Studio, bindgen and the cuda-oxide environment. Tests that need the model file or the test audio are `#[ignore]`: run them with `-- --ignored` or `--include-ignored`.
 
@@ -65,3 +67,10 @@ The GPU tools on this machine: Rust 1.99.1 (pinned), CUDA 13.4, LLVM (`C:\Progra
 - Two GPU test runs at the same time can run out of the 4 GB of video memory. Run one at a time.
 - **Save every file as UTF-8 without a BOM.** One edit tool read UTF-8 files as Windows-1252 and saved them again, so `Q·Kᵀ` became `QÂ·Káµ€` in 7 files. Commit `fix: repair double-encoded comments` repaired them. After an edit, check that non-ASCII characters (`·`, `ᵀ`, `²`, Turkish letters) still look right.
 - An `[f16; 2]` load compiles to two 2-byte loads. That is fine here: the L1 cache merges them (lesson 1).
+- A kernel change can break a test in the other crate. After a change in `jeuvoice-gpu`, run the tests of `jeuvoice-gpu` and of `jeuvoice-whisper --features cuda-kernels`.
+- The real-model tests of one file run in parallel by default and can use more than 4 GB of video memory. Use `--test-threads 1`.
+- A Bash heredoc with quotes in it breaks the Bash tool. Write the script to a file first and run that file.
+- A Python string with Windows paths turns `\t` and `\r` into control characters. Use raw strings (`r'...'`) or write the text with a file tool.
+- `Start-Process -PassThru` in PowerShell 5.1 leaves `ExitCode` empty unless the script reads `$p.Handle` right after the start.
+- The Windows driver (WDDM) does not report video memory per process. Measure the whole card (`nvidia-smi --query-gpu=memory.used`) minus the idle value.
+- When the plan and the whisper.cpp source disagree, the source wins. Record the case as a ruling in the ledger.

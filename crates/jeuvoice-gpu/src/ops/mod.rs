@@ -4,19 +4,23 @@
 use cuda_core::LaunchConfig;
 
 mod attention;
+mod attention_decode;
 mod conv1d;
 mod elementwise;
+mod embed;
 mod gemm_lesson;
 mod layernorm;
 mod mel;
 mod rmsnorm;
 mod softmax;
 pub use attention::{ATTN_SCALE, AttnKind, attention, merge_heads, split_heads};
+pub use attention_decode::{DecodeAttnKind, ProbsOut, attention_decode, attention_decode_with, decode_split_scratch};
 pub use conv1d::{ConvKind, Layout, conv1d, conv1d_with_layout};
-pub use elementwise::{Width, add_into, add_rows, bias_add, bias_gelu, bias_gelu_with};
+pub use elementwise::{Width, add_into, add_into_f32, add_rows, bias_add, bias_gelu, bias_gelu_with, add_into_f32_f32, f16_to_f32};
+pub use embed::{embed, embed_f32, embed_one, embed_one_f32, embed_with};
 pub use gemm_lesson::{GemmKind, gemm_lesson, mma_probe};
 pub use mel::{log10_max, log10_max_partials, mel_frames, mel_window, power_spectrum};
-pub use layernorm::{LayerNormKind, layernorm, layernorm_with};
+pub use layernorm::{LayerNormKind, layernorm, layernorm_to_f16, layernorm_with};
 pub use rmsnorm::{rmsnorm, rmsnorm_naive};
 pub use softmax::{SoftmaxKind, softmax_rows, softmax_rows_with};
 

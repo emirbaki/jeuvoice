@@ -6,7 +6,7 @@ use half::f16;
 use jeuvoice_gpu::bench::{Timing, pct_of_memory_limit, pct_of_tensor_limit, time_on_stream};
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
-    AttnKind, ConvKind, GemmKind, LayerNormKind, SoftmaxKind, Width, attention, bias_gelu_with, conv1d, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive,
+    AttnKind, ConvKind, DecodeAttnKind, ProbsOut, attention_decode_with, decode_split_scratch, GemmKind, LayerNormKind, SoftmaxKind, Width, attention, bias_gelu_with, conv1d, embed_one, embed_with, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive,
     softmax_rows_with,
 };
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
@@ -34,6 +34,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let name = "gemm_f16".to_string();
         if name.contains(&filter) {
             rows.push(bench_gemm(&gpu, m, n, k)?);
+        }
+    }
+
+    // Logits rows: the decoder output times the token table, f32 out. One row is one decoder
+    // step: it reads the whole 133 MB table, so it shows the memory limit of a step.
+    if "gemm_f16_f32out".contains(&filter) {
+        for m in [1, 7] {
+            rows.push(bench_gemm_f32out(&gpu, m, 51866, 1280)?);
         }
     }
 
@@ -103,6 +111,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Embedding rows: one decoder step (1 row) and a long prompt or DTW pass (224 rows),
+    // with the real table of 51866 x 1280. Each call uploads the ids first, as the decoder
+    // does. The ids_upload row is that upload alone.
+    for (name, width) in [("embed_x1", Width::One), ("embed_x2", Width::Two)] {
+        if name.contains(&filter) {
+            for n in [1, 224] {
+                rows.push(bench_embed(&gpu, name, width, n)?);
+            }
+        }
+    }
+    // Decoder attention rows (20 heads of 64): one step against 448 cached keys, one step
+    // of cross-attention on the 1500 encoder positions, a causal prompt of 224 rows, and the
+    // DTW pass (224 rows of cross-attention with the softmax of 2 heads written out).
+    for (name, kind) in [("attn_dec_naive", DecodeAttnKind::Naive), ("attn_dec_split", DecodeAttnKind::Split)] {
+        if name.contains(&filter) {
+            for (nq, nk, causal, probs) in [(1, 448, false, false), (1, 1500, false, false), (224, 224, true, false), (224, 1500, false, true)] {
+                rows.push(bench_attn_decode(&gpu, name, kind, nq, nk, causal, probs)?);
+            }
+        }
+    }
+
+    if "embed_one".contains(&filter) {
+        rows.push(bench_embed_one(&gpu)?);
+    }
+    if "ids_upload".contains(&filter) {
+        rows.push(bench_ids_upload(&gpu)?);
+    }
+
     println!("{:<20} {:>16} {:>10} {:>14} {:>8}", "kernel", "size", "us", "rate", "% limit");
     for r in &rows {
         println!("{:<20} {:>16} {:>10.1} {:>9.1} {:<4} {:>7.0}%", r.name, r.size, r.t.us, r.rate.0, r.rate.1, r.pct);
@@ -123,6 +159,99 @@ fn bench_bias_gelu(gpu: &Gpu, name: &str, width: Width, rows: usize, d: usize) -
     Ok(Row {
         name: name.into(),
         size: format!("{rows}x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+fn bench_embed(gpu: &Gpu, name: &str, width: Width, n: usize) -> Result<Row, GpuError> {
+    let (vocab, d, n_ctx) = (51866, 1280, 448);
+    let mut plan = ArenaPlan::new();
+    let tok = plan.add(DType::F16, &[vocab, d]);
+    let pos = plan.add(DType::F32, &[n_ctx, d]);
+    let ids_t = plan.add(DType::I32, &[n_ctx]);
+    let out = plan.add(DType::F16, &[n_ctx, d]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &tok, &vec![f16::from_f32(0.25); vocab * d])?;
+    arena.upload(gpu, &pos, &vec![0.5f32; n_ctx * d])?;
+    // Ids spread over the table, so the rows come from all over the 133 MB.
+    let ids: Vec<u32> = (0..n as u32).map(|i| (i * 7919) % vocab as u32).collect();
+    let t = time_on_stream(gpu, 3, 50, || embed_with(gpu, &arena, &ids, &ids_t, &tok, &pos, 0, &out, width))?;
+    // Read one table row (f16) and one position row (f32), write one row (f16).
+    let bytes = (n * d * (2 + 4 + 2)) as u64;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{n}x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+fn bench_embed_one(gpu: &Gpu) -> Result<Row, GpuError> {
+    let (vocab, d, n_ctx) = (51866, 1280, 448);
+    let mut plan = ArenaPlan::new();
+    let tok = plan.add(DType::F16, &[vocab, d]);
+    let pos = plan.add(DType::F32, &[n_ctx, d]);
+    let out = plan.add(DType::F16, &[1, d]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &tok, &vec![f16::from_f32(0.25); vocab * d])?;
+    arena.upload(gpu, &pos, &vec![0.5f32; n_ctx * d])?;
+    let mut i = 0u32;
+    let t = time_on_stream(gpu, 3, 50, || {
+        i = (i + 7919) % vocab as u32;
+        embed_one(gpu, &arena, i, &tok, &pos, 0, &out)
+    })?;
+    let bytes = (d * (2 + 4 + 2)) as u64;
+    Ok(Row {
+        name: "embed_one".into(),
+        size: format!("1x{d}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+fn bench_attn_decode(gpu: &Gpu, name: &str, kind: DecodeAttnKind, nq: usize, nk: usize, causal: bool, with_probs: bool) -> Result<Row, GpuError> {
+    let (heads, w) = (20, 1280);
+    let mut plan = ArenaPlan::new();
+    let q = plan.add(DType::F16, &[nq, w]);
+    let k = plan.add(DType::F16, &[nk, w]);
+    let v = plan.add(DType::F16, &[nk, w]);
+    let out = plan.add(DType::F16, &[nq, w]);
+    let pt = plan.add(DType::F32, &[2, nq, nk]);
+    let scratch = plan.add(DType::F32, &[decode_split_scratch(heads, nq, nk)]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &q, &vec![f16::from_f32(0.1); nq * w])?;
+    arena.upload(gpu, &k, &vec![f16::from_f32(0.1); nk * w])?;
+    arena.upload(gpu, &v, &vec![f16::from_f32(0.1); nk * w])?;
+    let probs = with_probs.then_some(ProbsOut { probs: &pt, heads_mask: (1 << 4) | (1 << 11), slot0: 0 });
+    let t = time_on_stream(gpu, 3, 50, || attention_decode_with(gpu, &arena, &q, &k, &v, &out, heads, causal, probs, Some(&scratch), kind))?;
+    // The least memory traffic: K and V once, q and out once, and the probs.
+    let mut bytes = (2 * nk * w * 2 + 2 * nq * w * 2) as u64;
+    if with_probs {
+        bytes += (2 * nq * nk * 4) as u64;
+    }
+    Ok(Row {
+        name: name.into(),
+        size: format!("{nq}x{nk}{}", if causal { " c" } else if with_probs { " p" } else { "" }),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
+    })
+}
+
+fn bench_ids_upload(gpu: &Gpu) -> Result<Row, GpuError> {
+    let mut plan = ArenaPlan::new();
+    let ids_t = plan.add(DType::I32, &[448]);
+    let arena = Arena::new(gpu, &plan)?;
+    let host = vec![0i32; 448];
+    let t = time_on_stream(gpu, 3, 50, || arena.upload(gpu, &ids_t, &host))?;
+    let bytes = (448 * 4) as u64;
+    Ok(Row {
+        name: "ids_upload".into(),
+        size: "448 i32".into(),
         t,
         rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
         pct: pct_of_memory_limit(bytes, &t, gpu.info()),
@@ -278,6 +407,28 @@ fn bench_conv1d(gpu: &Gpu, name: &str, kind: ConvKind, c_in: usize, c_out: usize
         t,
         rate: (flops as f64 / (t.us * 1e-6) / 1e12, "TF/s"),
         pct: pct_of_tensor_limit(flops, &t, gpu.info()),
+    })
+}
+
+fn bench_gemm_f32out(gpu: &Gpu, m: usize, n: usize, k: usize) -> Result<Row, GpuError> {
+    let blas = Blas::load(gpu)?;
+    let mut plan = ArenaPlan::new();
+    let x = plan.add(DType::F16, &[m, k]);
+    let w = plan.add(DType::F16, &[n, k]);
+    let y = plan.add(DType::F32, &[m, n]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &x, &vec![f16::from_f32(0.01); m * k])?;
+    arena.upload(gpu, &w, &vec![f16::from_f32(0.02); n * k])?;
+    let (xs, ws, ys) = (arena.slice(&x), arena.slice(&w), arena.slice(&y));
+    let t = time_on_stream(gpu, 3, 20, || blas.gemm_f16_f32out(gpu, &xs, Op::N, &ws, Op::T, &ys, m, n, k, 1.0, 0.0))?;
+    // A few rows: the table read sets the time, so the limit is the memory.
+    let bytes = (n * k * 2 + m * k * 2 + m * n * 4) as u64;
+    Ok(Row {
+        name: "gemm_f16_f32out".into(),
+        size: format!("{m}x{n}x{k}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: pct_of_memory_limit(bytes, &t, gpu.info()),
     })
 }
 

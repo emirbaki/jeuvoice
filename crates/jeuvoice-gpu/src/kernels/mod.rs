@@ -43,6 +43,18 @@ pub const FLASH_BK: usize = 64;
 /// warp read 32 different banks (`t * 33 mod 32 = t`), so the score loop has no conflicts.
 pub const FLASH_LD: usize = FLASH_D + 2;
 const ROW_WARPS: usize = (ROW_BLOCK / 32) as usize;
+/// The most keys of one decoder attention row: the 1500 encoder positions of the
+/// cross-attention, rounded up to a multiple of `ROW_BLOCK`. The scores of one row live in
+/// shared memory (6 KB of f32).
+pub const DEC_MAX_KEYS: usize = 1536;
+/// Flash decoding: the keys of one chunk (one block), the query rows of one block, and the
+/// f32 values of one partial result (64 sums, the maximum, the sum of the exponents).
+pub const DEC_KC: usize = 64;
+pub const DEC_RB: usize = 4;
+pub const DEC_PART: usize = FLASH_D + 2;
+/// The shared row stride of the K and V tiles: 66 f16, so the 32 threads of a warp that
+/// read 32 key rows hit 32 different banks (as `FLASH_LD`).
+const DEC_LD: usize = FLASH_D + 2;
 
 /// Writes `$body` out once for each listed index, with `$i` a constant in each copy.
 /// A register array indexed by a loop variable goes to local memory (as slow as global
@@ -383,6 +395,493 @@ pub mod device {
         }
     }
 
+    // ---- Token embedding (lesson 8: docs/cuda-lessons/08-decoder.md) ----
+    // out[i][c] = tok[ids[i]][c] + pos[i][c]. A gather: each row reads a different row of
+    // the embedding table, chosen by the token id.
+
+    /// One element per thread: `out[i][c] = tok[ids[i]][c] + pos[i][c]` for `n` rows of
+    /// `d` values. `pos` starts at the first position of the rows.
+    ///
+    /// # Safety
+    /// `ids` is valid for `n` values, each one a row of `tok`. `tok` rows, `pos` and `out`
+    /// are valid for `d` values per row. `out` does not overlap the inputs.
+    #[kernel]
+    pub unsafe fn embed_f16(ids: *const i32, tok: *const f16, pos: *const f32, out: *mut f16, n: usize, d: usize) {
+        let i = thread::index_1d().get();
+        if i >= n * d {
+            return;
+        }
+        let (row, c) = (i / d, i % d);
+        // SAFETY: row < n, c < d, and ids[row] is a row of tok (the host checked it).
+        unsafe {
+            let id = *ids.add(row) as usize;
+            let v = *tok.add(id * d + c) as f32 + *pos.add(i);
+            *out.add(i) = v as f16;
+        }
+    }
+
+    /// As `embed_f16`, with two neighbor values per thread: one `[f16; 2]` of `tok`, one
+    /// `[f32; 2]` of `pos` and one `[f16; 2]` of `out`. `d2` counts pairs.
+    ///
+    /// # Safety
+    /// As `embed_f16` with `d = 2 * d2`. `tok` and `out` are 4-byte aligned, `pos` 8-byte.
+    #[kernel]
+    pub unsafe fn embed_f16x2(ids: *const i32, tok: *const [f16; 2], pos: *const [f32; 2], out: *mut [f16; 2], n: usize, d2: usize) {
+        let i = thread::index_1d().get();
+        if i >= n * d2 {
+            return;
+        }
+        let (row, c) = (i / d2, i % d2);
+        // SAFETY: row < n, c < d2, and ids[row] is a row of tok (the host checked it).
+        unsafe {
+            let id = *ids.add(row) as usize;
+            let t = *tok.add(id * d2 + c);
+            let p = *pos.add(i);
+            *out.add(i) = [(t[0] as f32 + p[0]) as f16, (t[1] as f32 + p[1]) as f16];
+        }
+    }
+
+    /// One row with the id as a launch argument: `out[c] = tok[id][c] + pos[c]`. A decoder
+    /// step has one token, so it needs no ids upload (and no wait for that copy).
+    ///
+    /// # Safety
+    /// `tok` is valid for row `id` of `d2` pairs, `pos` and `out` for `d2` pairs. `tok`
+    /// and `out` are 4-byte aligned, `pos` 8-byte. `out` does not overlap the inputs.
+    #[kernel]
+    pub unsafe fn embed_one_f16x2(id: u32, tok: *const [f16; 2], pos: *const [f32; 2], out: *mut [f16; 2], d2: usize) {
+        let c = thread::index_1d().get();
+        if c >= d2 {
+            return;
+        }
+        // SAFETY: c < d2, and row `id` of tok exists (the host checked it).
+        unsafe {
+            let t = *tok.add(id as usize * d2 + c);
+            let p = *pos.add(c);
+            *out.add(c) = [(t[0] as f32 + p[0]) as f16, (t[1] as f32 + p[1]) as f16];
+        }
+    }
+
+    /// `embed_one_f16x2` with an f32 output: the f32 residual stream of the decoder.
+    ///
+    /// # Safety
+    /// `tok` has the row `id` (the host checked it), `pos` and `out` have `d2` pairs.
+    #[kernel]
+    pub unsafe fn embed_one_f32(id: u32, tok: *const f16, pos: *const f32, out: *mut f32, d: usize) {
+        let c = thread::index_1d().get() as usize;
+        if c >= d {
+            return;
+        }
+        // SAFETY: c < d, and row `id` of tok exists (the host checked it).
+        unsafe { *out.add(c) = *tok.add(id as usize * d + c) as f32 + *pos.add(c) };
+    }
+
+    /// `embed_f16` with an f32 output.
+    ///
+    /// # Safety
+    /// As `embed_f16`, with `out` f32.
+    #[kernel]
+    pub unsafe fn embed_f32(ids: *const i32, tok: *const f16, pos: *const f32, out: *mut f32, n: usize, d: usize) {
+        let i = thread::index_1d().get();
+        if i >= n * d {
+            return;
+        }
+        let (row, c) = (i / d, i % d);
+        // SAFETY: row < n, c < d, and ids[row] is a row of tok (the host checked it).
+        unsafe {
+            let id = *ids.add(row) as usize;
+            *out.add(i) = *tok.add(id * d + c) as f32 + *pos.add(i);
+        }
+    }
+
+    /// `acc[i] += x[i]` with an f32 accumulator and an f16 addend: the residual add of the
+    /// f32 residual stream.
+    ///
+    /// # Safety
+    /// `acc` is valid for `n` f32 values and `x` for `n` f16 values. They do not overlap.
+    #[kernel]
+    pub unsafe fn add_f16_into_f32(acc: *mut f32, x: *const f16, n: usize) {
+        let i = thread::index_1d().get();
+        if i >= n {
+            return;
+        }
+        // SAFETY: i < n, and the two tensors are different arena tensors.
+        unsafe { *acc.add(i) += *x.add(i) as f32 };
+    }
+
+    /// `dst[i] = src[i]` with an f32 destination and an f16 source: the first rows of the f32
+    /// residual stream, written by a kernel that produces f16 (the encoder convolutions).
+    ///
+    /// # Safety
+    /// `dst` is valid for `n` f32 values and `src` for `n` f16 values. They do not overlap.
+    #[kernel]
+    pub unsafe fn f16_to_f32(dst: *mut f32, src: *const f16, n: usize) {
+        let i = thread::index_1d().get();
+        if i >= n {
+            return;
+        }
+        // SAFETY: i < n, and the two tensors are different arena tensors.
+        unsafe { *dst.add(i) = *src.add(i) as f32 };
+    }
+
+    /// `acc[i] += x[i]` with both f32: the positional embedding of the encoder, which the
+    /// model also keeps in f32.
+    ///
+    /// # Safety
+    /// Both tensors are valid for `n` f32 values and do not overlap.
+    #[kernel]
+    pub unsafe fn add_f32_into_f32(acc: *mut f32, x: *const f32, n: usize) {
+        let i = thread::index_1d().get();
+        if i >= n {
+            return;
+        }
+        // SAFETY: i < n, and the two tensors are different arena tensors.
+        unsafe { *acc.add(i) += *x.add(i) };
+    }
+
+    // ---- Decoder attention (lesson 8, part B: docs/cuda-lessons/08-decoder.md) ----    // out[r] = softmax(scale * q[r] k^T) v for each head, with q, k, v and out in the
+    // [rows, ld] layout of the GEMM outputs and the KV cache. Head h is columns 64h..64h+64.
+
+    /// The naive decoder attention: one block of `ROW_BLOCK` threads per (query row,
+    /// head). The block keeps the 64 query values and the scores of its row in shared
+    /// memory, computes the softmax in f32, and then `P * V`.
+    ///
+    /// With `causal != 0`, row `r` sees the keys `0 .. nk - nq + r + 1` (the KV cache holds
+    /// `nk - nq` older rows). When bit `h` of `probs_mask` is set, the softmax of head `h`
+    /// goes to slot `probs_slot0 + (the set bits below h)` of `probs` (`[slots, nq, nk]`,
+    /// 0.0 for a masked key).
+    ///
+    /// # Safety
+    /// Grid `(nq, heads)`, block `ROW_BLOCK`. `q` and `out` are valid for `nq` rows of `ld`,
+    /// `k` and `v` for `nk` rows of `ld`, with `64 * heads <= ld`. `nk <= DEC_MAX_KEYS`, and
+    /// `nq <= nk` when causal. `probs` is valid for the slots of `probs_mask`, or the mask
+    /// is 0. `out` and `probs` do not overlap the inputs.
+    #[kernel]
+    pub unsafe fn attn_decode_f16(
+        q: *const f16,
+        k: *const f16,
+        v: *const f16,
+        out: *mut f16,
+        probs: *mut f32,
+        nq: usize,
+        nk: usize,
+        ld: usize,
+        causal: u32,
+        scale: f32,
+        probs_mask: u32,
+        probs_slot0: u32,
+    ) {
+        static mut SQ: SharedArray<f32, FLASH_D> = SharedArray::UNINIT;
+        static mut SS: SharedArray<f32, DEC_MAX_KEYS> = SharedArray::UNINIT;
+        static mut SO: SharedArray<f32, { ROW_BLOCK as usize }> = SharedArray::UNINIT;
+        let t = thread::threadIdx_x() as usize;
+        let r = thread::blockIdx_x() as usize;
+        let h = thread::blockIdx_y() as usize;
+        let block = ROW_BLOCK as usize;
+        // The keys this row sees.
+        let n = if causal != 0 { nk - nq + r + 1 } else { nk };
+        let col = h * FLASH_D;
+        if t < FLASH_D {
+            // SAFETY: r < nq and col + t < 64 * heads <= ld.
+            unsafe { SQ[t] = *q.add(r * ld + col + t) as f32 };
+        }
+        thread::sync_threads();
+
+        // Scores: thread t takes the keys t, t + 256, ... and reads each key row whole.
+        let mut m = f32::NEG_INFINITY;
+        let mut j = t;
+        while j < n {
+            let mut d0 = 0.0f32;
+            let mut d1 = 0.0f32;
+            let mut d2 = 0.0f32;
+            let mut d3 = 0.0f32;
+            let mut dd = 0;
+            while dd < FLASH_D {
+                // SAFETY: j < n <= nk rows of k, and col + dd + 3 < 64 * heads <= ld. SQ has
+                // 64 values.
+                unsafe {
+                    let kr = k.add(j * ld + col + dd);
+                    d0 += SQ[dd] * (*kr as f32);
+                    d1 += SQ[dd + 1] * (*kr.add(1) as f32);
+                    d2 += SQ[dd + 2] * (*kr.add(2) as f32);
+                    d3 += SQ[dd + 3] * (*kr.add(3) as f32);
+                }
+                dd += 4;
+            }
+            let s = (d0 + d1 + d2 + d3) * scale;
+            // SAFETY: j < n <= nk <= DEC_MAX_KEYS, and only this thread writes slot j.
+            unsafe { SS[j] = s };
+            m = m.max(s);
+            j += block;
+        }
+        let m = block_max(m);
+
+        let mut sum = 0.0f32;
+        let mut j = t;
+        while j < n {
+            // SAFETY: j < n, and this thread wrote slot j above.
+            unsafe {
+                let e = libm::expf(SS[j] - m);
+                SS[j] = e;
+                sum += e;
+            }
+            j += block;
+        }
+        // block_sum has a barrier, so after it every thread sees all the exponents.
+        let inv = 1.0 / block_sum(sum);
+
+        if probs_mask & (1u32 << h) != 0 {
+            let slot = probs_slot0 as usize + (probs_mask & ((1u32 << h) - 1)).count_ones() as usize;
+            let base = (slot * nq + r) * nk;
+            let mut j = t;
+            while j < nk {
+                // SAFETY: the slot is one of probs_mask, r < nq and j < nk. SS[j] is read only
+                // for j < n.
+                unsafe { *probs.add(base + j) = if j < n { SS[j] * inv } else { 0.0 } };
+                j += block;
+            }
+        }
+
+        // P * V: thread t adds the keys grp, grp + 4, ... for dimension t % 64.
+        let dim = t % FLASH_D;
+        let grp = t / FLASH_D;
+        let mut acc = 0.0f32;
+        let mut j = grp;
+        while j < n {
+            // SAFETY: j < n <= nk rows of v, col + dim < ld, and SS[j] is set.
+            unsafe { acc += SS[j] * (*v.add(j * ld + col + dim) as f32) };
+            j += block / FLASH_D;
+        }
+        // SAFETY: t < ROW_BLOCK, and only this thread writes slot t.
+        unsafe { SO[t] = acc };
+        thread::sync_threads();
+        if t < FLASH_D {
+            // SAFETY: the barrier separates the writes of SO from these reads. r < nq and
+            // col + t < ld.
+            unsafe {
+                let o = (SO[t] + SO[t + FLASH_D] + SO[t + 2 * FLASH_D] + SO[t + 3 * FLASH_D]) * inv;
+                *out.add(r * ld + col + t) = o as f16;
+            }
+        }
+    }
+
+    /// Flash decoding, part 1: one block of `ROW_BLOCK` threads per (chunk of `DEC_KC` keys,
+    /// head, group of `DEC_RB` query rows). The block loads the K and V tiles of its chunk
+    /// once, with coalesced reads, and scores them for its rows from shared memory. Thread
+    /// `t` is query row `t / 64` and key (later dimension) `t % 64`. For each row it writes
+    /// a partial result to `part`: the 64 sums of `exp(s - m) v`, the chunk maximum `m` and
+    /// the sum `l` of the exponents. For a head of `probs_mask` it writes the raw scores
+    /// (or -inf for a masked key) to `probs`. `attn_decode_merge_f16` combines the chunks.
+    ///
+    /// # Safety
+    /// Grid `(n_chunks, heads, ceil(nq / DEC_RB))` with `n_chunks = ceil(nk / DEC_KC)`,
+    /// block `ROW_BLOCK`. `q` has `nq` rows of `ld`, `k` and `v` have `nk` rows of `ld`, with
+    /// `64 * heads <= ld`, and `nq <= nk` when causal. `part` is valid for
+    /// `heads * nq * n_chunks * DEC_PART` values. `probs` is valid for the slots of
+    /// `probs_mask`, or the mask is 0. No output overlaps an input.
+    #[kernel]
+    pub unsafe fn attn_decode_split_f16(
+        q: *const f16,
+        k: *const f16,
+        v: *const f16,
+        part: *mut f32,
+        probs: *mut f32,
+        nq: usize,
+        nk: usize,
+        ld: usize,
+        causal: u32,
+        scale: f32,
+        probs_mask: u32,
+        probs_slot0: u32,
+        n_chunks: usize,
+    ) {
+        static mut SQ: SharedArray<f32, { DEC_RB * FLASH_D }> = SharedArray::UNINIT;
+        static mut SK: SharedArray<f16, { DEC_KC * DEC_LD }> = SharedArray::UNINIT;
+        static mut SV: SharedArray<f16, { DEC_KC * DEC_LD }> = SharedArray::UNINIT;
+        static mut SP: SharedArray<f32, { DEC_RB * DEC_KC }> = SharedArray::UNINIT;
+        static mut SM: SharedArray<f32, { 2 * DEC_RB }> = SharedArray::UNINIT;
+        static mut SL: SharedArray<f32, { 2 * DEC_RB }> = SharedArray::UNINIT;
+        let t = thread::threadIdx_x() as usize;
+        let c = thread::blockIdx_x() as usize;
+        let h = thread::blockIdx_y() as usize;
+        let r0 = thread::blockIdx_z() as usize * DEC_RB;
+        let block = ROW_BLOCK as usize;
+        let col = h * FLASH_D;
+        let j0 = c * DEC_KC;
+        let nkc = if nk - j0 < DEC_KC { nk - j0 } else { DEC_KC };
+
+        // The K and V tiles: consecutive threads read consecutive values of one key row.
+        let mut i = t;
+        while i < DEC_KC * FLASH_D {
+            let (jj, dd) = (i / FLASH_D, i % FLASH_D);
+            if jj < nkc {
+                // SAFETY: j0 + jj < nk rows, col + dd < ld, and jj * DEC_LD + dd is inside
+                // the tiles.
+                unsafe {
+                    SK[jj * DEC_LD + dd] = *k.add((j0 + jj) * ld + col + dd);
+                    SV[jj * DEC_LD + dd] = *v.add((j0 + jj) * ld + col + dd);
+                }
+            }
+            i += block;
+        }
+        // The query rows of this block. A row past nq keeps 0.0.
+        let mut i = t;
+        while i < DEC_RB * FLASH_D {
+            let (rr, dd) = (i / FLASH_D, i % FLASH_D);
+            // SAFETY: the guard keeps the read inside q. i < DEC_RB * 64.
+            unsafe { SQ[i] = if r0 + rr < nq { *q.add((r0 + rr) * ld + col + dd) as f32 } else { 0.0 } };
+            i += block;
+        }
+        thread::sync_threads();
+
+        let rr = t / FLASH_D;
+        let key = t % FLASH_D;
+        let r = r0 + rr;
+        let j = j0 + key;
+        let limit = if causal != 0 { nk - nq + r + 1 } else { nk };
+        let mut s = f32::NEG_INFINITY;
+        if r < nq && key < nkc && j < limit {
+            let mut d0 = 0.0f32;
+            let mut d1 = 0.0f32;
+            let mut d2 = 0.0f32;
+            let mut d3 = 0.0f32;
+            let mut dd = 0;
+            while dd < FLASH_D {
+                // SAFETY: rr < DEC_RB, key < DEC_KC and dd + 3 < 64: inside SQ and SK.
+                unsafe {
+                    d0 += SQ[rr * FLASH_D + dd] * (SK[key * DEC_LD + dd] as f32);
+                    d1 += SQ[rr * FLASH_D + dd + 1] * (SK[key * DEC_LD + dd + 1] as f32);
+                    d2 += SQ[rr * FLASH_D + dd + 2] * (SK[key * DEC_LD + dd + 2] as f32);
+                    d3 += SQ[rr * FLASH_D + dd + 3] * (SK[key * DEC_LD + dd + 3] as f32);
+                }
+                dd += 4;
+            }
+            s = (d0 + d1 + d2 + d3) * scale;
+        }
+        if probs_mask & (1u32 << h) != 0 && r < nq && key < nkc {
+            let slot = probs_slot0 as usize + (probs_mask & ((1u32 << h) - 1)).count_ones() as usize;
+            // SAFETY: the slot is one of probs_mask, r < nq and j < nk.
+            unsafe { *probs.add((slot * nq + r) * nk + j) = s };
+        }
+
+        // The 64 threads of one row are two warps: a warp maximum, then the two together.
+        let w = t / 32;
+        let wm = warp::reduce_max_f32(s);
+        if warp::lane_id() == 0 {
+            // SAFETY: w < 2 * DEC_RB, and only lane 0 of warp w writes slot w.
+            unsafe { SM[w] = wm };
+        }
+        thread::sync_threads();
+        // SAFETY: the barrier separates the writes of SM from these reads.
+        let m = unsafe { SM[2 * rr].max(SM[2 * rr + 1]) };
+        // A masked key (s = -inf) gives 0, also when the whole chunk is masked (m = -inf).
+        let e = if s == f32::NEG_INFINITY { 0.0 } else { libm::expf(s - m) };
+        // SAFETY: rr < DEC_RB and key < DEC_KC, and only this thread writes the slot.
+        unsafe { SP[rr * DEC_KC + key] = e };
+        let ws = warp::reduce_sum_f32(e);
+        if warp::lane_id() == 0 {
+            // SAFETY: as for SM.
+            unsafe { SL[w] = ws };
+        }
+        thread::sync_threads();
+        // SAFETY: the barrier separates the writes of SL and SP from the reads below.
+        let l = unsafe { SL[2 * rr] + SL[2 * rr + 1] };
+
+        if r < nq {
+            let dim = key;
+            let mut acc = 0.0f32;
+            let mut kk = 0;
+            while kk < nkc {
+                // SAFETY: kk < nkc <= DEC_KC and dim < 64: inside SP and SV.
+                unsafe { acc += SP[rr * DEC_KC + kk] * (SV[kk * DEC_LD + dim] as f32) };
+                kk += 1;
+            }
+            let base = ((h * nq + r) * n_chunks + c) * DEC_PART;
+            // SAFETY: h < heads, r < nq and c < n_chunks, so base + DEC_PART is inside part.
+            unsafe {
+                *part.add(base + dim) = acc;
+                if dim == 0 {
+                    *part.add(base + FLASH_D) = m;
+                    *part.add(base + FLASH_D + 1) = l;
+                }
+            }
+        }
+    }
+
+    /// Flash decoding, part 2: one block of `ROW_BLOCK` threads per (query row, head)
+    /// combines the `n_chunks` partial results of `attn_decode_split_f16`:
+    /// `M = max m_c`, `L = sum l_c exp(m_c - M)`, `out = sum acc_c exp(m_c - M) / L`. For a
+    /// head of `probs_mask` it turns the raw scores in `probs` into `exp(s - M) / L`.
+    ///
+    /// # Safety
+    /// Grid `(nq, heads)`, block `ROW_BLOCK`. `part` is the output of
+    /// `attn_decode_split_f16` with the same sizes. `out` is valid for `nq` rows of `ld` with
+    /// `64 * heads <= ld`. `probs` is as in part 1. No output overlaps an input.
+    #[kernel]
+    pub unsafe fn attn_decode_merge_f16(
+        part: *const f32,
+        out: *mut f16,
+        probs: *mut f32,
+        nq: usize,
+        nk: usize,
+        ld: usize,
+        n_chunks: usize,
+        probs_mask: u32,
+        probs_slot0: u32,
+    ) {
+        let t = thread::threadIdx_x() as usize;
+        let r = thread::blockIdx_x() as usize;
+        let h = thread::blockIdx_y() as usize;
+        let base = (h * nq + r) * n_chunks * DEC_PART;
+        // Every thread reads the few chunk values (the same addresses: a broadcast).
+        let mut mx = f32::NEG_INFINITY;
+        let mut c = 0;
+        while c < n_chunks {
+            // SAFETY: c < n_chunks, inside the partials of this row and head.
+            mx = mx.max(unsafe { *part.add(base + c * DEC_PART + FLASH_D) });
+            c += 1;
+        }
+        // Chunk 0 always holds key 0, which every row sees, so mx is finite.
+        let mut l = 0.0f32;
+        let mut c = 0;
+        while c < n_chunks {
+            // SAFETY: as above. A chunk with m = -inf has l = 0 and scale 0.
+            unsafe {
+                let p = part.add(base + c * DEC_PART);
+                l += *p.add(FLASH_D + 1) * libm::expf(*p.add(FLASH_D) - mx);
+            }
+            c += 1;
+        }
+        let inv = 1.0 / l;
+        if t < FLASH_D {
+            let mut acc = 0.0f32;
+            let mut c = 0;
+            while c < n_chunks {
+                // SAFETY: t < 64, inside the partial of chunk c.
+                unsafe {
+                    let p = part.add(base + c * DEC_PART);
+                    acc += *p.add(t) * libm::expf(*p.add(FLASH_D) - mx);
+                }
+                c += 1;
+            }
+            // SAFETY: r < nq and h * 64 + t < ld.
+            unsafe { *out.add(r * ld + h * FLASH_D + t) = (acc * inv) as f16 };
+        }
+        if probs_mask & (1u32 << h) != 0 {
+            let slot = probs_slot0 as usize + (probs_mask & ((1u32 << h) - 1)).count_ones() as usize;
+            let row = (slot * nq + r) * nk;
+            let mut j = t;
+            while j < nk {
+                // SAFETY: the slot is one of probs_mask, r < nq and j < nk.
+                unsafe {
+                    let p = probs.add(row + j);
+                    let s = *p;
+                    *p = if s == f32::NEG_INFINITY { 0.0 } else { libm::expf(s - mx) * inv };
+                }
+                j += ROW_BLOCK as usize;
+            }
+        }
+    }
+
     // ---- LayerNorm (lesson 2: docs/cuda-lessons/02-layernorm.md) ----
     // y = (x - mean) / sqrt(var + eps) * gamma + beta, one block of ROW_BLOCK threads per row.
     // Two-pass: first the mean, then the variance of (x - mean). The one-pass form
@@ -521,7 +1020,8 @@ pub mod device {
     /// # Safety
     /// As `layernorm_regs_f32`.
     #[kernel]
-    pub unsafe fn layernorm_regs_f16(x: *const f16, gamma: *const f16, beta: *const f16, y: *mut f16, d: usize, eps: f32) {        let base = thread::blockIdx_x() as usize * d;
+    pub unsafe fn layernorm_regs_f16(x: *const f16, gamma: *const f16, beta: *const f16, y: *mut f16, d: usize, eps: f32) {
+        let base = thread::blockIdx_x() as usize * d;
         let tid = thread::threadIdx_x() as usize;
         let step = ROW_BLOCK as usize;
         let mut v = [0.0f32; MAX_COLS_PER_THREAD];
@@ -627,6 +1127,59 @@ pub mod device {
                     let o0 = (v[2 * j] - mean) * inv * g[0] as f32 + b[0] as f32;
                     let o1 = (v[2 * j + 1] - mean) * inv * g[1] as f32 + b[1] as f32;
                     *y.add(base + c) = [o0 as f16, o1 as f16];
+                }
+            }
+            j += 1;
+        }
+    }
+
+    /// As `layernorm_regs_f32`, with an f16 output: the LayerNorm of the f32 residual stream
+    /// feeds an f16 GEMM. Gamma and beta stay f32, as the model stores them.
+    ///
+    /// # Safety
+    /// `x` is valid for `rows * d` f32, `gamma` and `beta` for `d` f32, `y` for `rows * d`
+    /// f16, `y` overlaps none of them, and `d <= ROW_BLOCK * MAX_COLS_PER_THREAD`. The grid
+    /// has one block per row and `ROW_BLOCK` threads.
+    #[kernel]
+    pub unsafe fn layernorm_f32in_f16out(x: *const f32, gamma: *const f32, beta: *const f32, y: *mut f16, d: usize, eps: f32) {
+        let base = thread::blockIdx_x() as usize * d;
+        let tid = thread::threadIdx_x() as usize;
+        let step = ROW_BLOCK as usize;
+        let mut v = [0.0f32; MAX_COLS_PER_THREAD];
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            let c = tid + j * step;
+            if c < d {
+                // SAFETY: c < d, one block per row.
+                v[j] = unsafe { *x.add(base + c) };
+            }
+            j += 1;
+        }
+        let mut s = 0.0f32;
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            s += v[j];
+            j += 1;
+        }
+        let mean = block_sum(s) / d as f32;
+        let mut s = 0.0f32;
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            if tid + j * step < d {
+                let t = v[j] - mean;
+                s += t * t;
+            }
+            j += 1;
+        }
+        let inv = 1.0 / (block_sum(s) / d as f32 + eps).sqrt();
+        let mut j = 0;
+        while j < MAX_COLS_PER_THREAD {
+            let c = tid + j * step;
+            if c < d {
+                // SAFETY: each (row, c) belongs to exactly one thread.
+                unsafe {
+                    let o = (v[j] - mean) * inv * *gamma.add(c) + *beta.add(c);
+                    *y.add(base + c) = o as f16;
                 }
             }
             j += 1;
@@ -1799,7 +2352,7 @@ pub mod device {
     }
 
     /// One window of the normalized mel: `out[b][t] = (max(mel_t[start + t][b], m - 8) + 4) / 4`
-    /// with `m = max[0]`, as f16. A frame past `n_len` gets the floor value `(m - 8 + 4) / 4`.
+    /// with `m = max[0]`, as f16. A frame past `n_len` gets 0.0, as in whisper.cpp.
     /// `mel_t` has frames as rows. `out` has bands as rows (the Whisper layout).
     ///
     /// # Safety
@@ -1811,11 +2364,17 @@ pub mod device {
             return;
         }
         let (b, t) = (i / w, i % w);
-        // SAFETY: `max` has one value. In the branch that reads `mel_t`, start + t < n_len
-        // and b < n_mel.
+        // A frame past the end of the mel gets 0.0, the normalized value that whisper.cpp
+        // writes there (it clears the encoder input and copies only the frames below n_len).
+        // SAFETY: `out` has n_mel * w values and i < n_mel * w. `max` has one value. In the
+        // branch that reads `mel_t`, start + t < n_len and b < n_mel.
         unsafe {
+            if start + t >= n_len {
+                *out.add(i) = 0.0 as f16;
+                return;
+            }
             let floor = *max - 8.0;
-            let v = if start + t < n_len { *mel_t.add((start + t) * n_mel + b) } else { floor };
+            let v = *mel_t.add((start + t) * n_mel + b);
             let v = if v > floor { v } else { floor };
             *out.add(i) = ((v + 4.0) / 4.0) as f16;
         }

@@ -14,7 +14,7 @@ use crate::tensor::{DevSlice, Element, Tensor};
 use crate::{DType, Gpu, GpuError};
 
 /// Every tensor starts on a 256-byte boundary, so vector loads and cuBLAS get aligned data.
-const ALIGN: usize = 256;
+pub(crate) const ALIGN: usize = 256;
 
 /// The layout of an arena, made on the CPU before any allocation.
 #[derive(Debug, Default)]

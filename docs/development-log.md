@@ -361,3 +361,186 @@ The product keeps cuBLAS for GEMM.
 ### The score tensor only for Naive attention
 
 `ops::attention` takes the `[heads, seq, seq]` scratch tensor as `Option<&Tensor>`. Only `AttnKind::Naive` needs it. `Encoder::load` (FlashTc) does not plan it, and `Encoder::load_with_attention(.., AttnKind::Naive)` does. Measured on 2026-11-25: the encoder activations went from **165 MB to 79 MB**, with the same speed (175.0 ms per 30 s window).
+
+## Status (Rust CUDA, Phase 1b)
+
+Plan: `docs/superpowers/plans/2026-11-25-rust-cuda-phase1b-decoder.md`. Branch: `rust-cuda-phase1b`.
+
+### The whisper.cpp baseline (Task 0, 2026-11-25)
+
+The example `dump_whisper_rs` runs `WhisperRs` with the app's parameters and writes `target/reference/whisper/<clip>.rs.json`. Two runs give byte-equal files, so whisper-rs is deterministic on these clips.
+
+| Clip | Length | Windows | Segments | Tokens | Warm time (median of runs 2 to 4) | VRAM above idle (peak) |
+|---|---|---|---|---|---|---|
+| my_voice.ogg | 27.0 s | 1 | 3 | 138 | 1.127 s | 2162 MiB |
+| my_voice2.mp4 | 33.6 s | 2 | 6 | 189 | 1.874 s | 2160 MiB |
+| ses_001_0007.wav | 8.4 s | 1 | 3 | 52 | 0.741 s | 2134 MiB |
+| **69 s set** | | 4 | 12 | 379 | **3.74 s** | **2162 MiB** |
+
+- The time does not include the model load. Run 1 is slower (CUDA start-up), so the table uses the median of runs 2 to 4. The spec target of criterion 3 stays at 4.3 s. Report both numbers.
+- The VRAM is the whole card (`nvidia-smi --query-gpu=memory.used` every 100 ms) minus the idle value before the run. Per-process numbers show `[N/A]` on this Windows driver (WDDM).
+- The fallback count is not in the whisper-rs API (`n_fail_p` is on the state, and `print_timings` prints the context's own state). The mean token logprob of each segment is between −0.19 and −0.006, far above `logprob_thold = −1.0`. So the 4 windows most likely decode at temperature 0.
+
+### The no-speech prob in whisper.cpp
+
+whisper.cpp computes the no-speech prob from row 0 of `state->logits` (line 7154). The prompt decode fills only its last row. So row 0 holds the raw logits of the last 1-token decode, or zeros in a new state. Measured: the first window of each clip gives 1.93e-5 (a zero row: 1/51866 with f32 sum error). The second window of my_voice2 gives 1.5e-10 (the last step of window 1). The port copies this behavior, because criterion 1 compares with whisper.cpp.
+
+### The token embedding (Task 7, 2026-11-25)
+
+`ops::embed` (many rows, the ids uploaded after a host check) and `ops::embed_one` (one row, the id as a launch argument). `Tensor::rows(start, n)` gives a view of rows. It panics when the row does not start on the 256-byte arena alignment, so the alignment rules of the other kernels still hold. Medians of 3 runs of `gpu-bench embed` and `ids_upload` (table 51866 x 1280):
+
+| Row | 1 row | 224 rows |
+|---|---|---|
+| `embed_x1` (with the ids upload) | 19.7 µs | 25.1 µs |
+| `embed_x2` (with the ids upload) | 17.6 µs | 26.2 µs |
+| `embed_one` (id as an argument) | 9.0 µs | — |
+| `ids_upload` alone (448 `i32`) | 10.0 µs | — |
+
+The upload and its wait cost more than the kernel. A decoder step uses `embed_one`. Lesson 8, part A, has the details.
+
+### The decoder attention (Task 8, 2026-11-25)
+
+`ops::attention_decode` covers the self-attention with the KV cache (causal or one step), the cross-attention on the 1500 encoder positions, and the softmax of chosen heads for DTW (`ProbsOut`). It reads the `[rows, 1280]` layout of the GEMM outputs, so the decoder needs no head split. Medians of 3 runs of `gpu-bench attn_dec` (20 heads):
+
+| Case | Naive | Split (flash decoding) | Gain |
+|---|---|---|---|
+| 1 x 448 (self step) | 56.2 µs | 22.9 µs (52% of the limit) | 2.5x |
+| 1 x 1500 (cross step) | 175.5 µs | 59.1 µs (68% of the limit) | 3.0x |
+| 224 x 224 causal (prompt) | 1024 µs | 482 µs | 2.1x |
+| 224 x 1500 with probs (DTW) | 12.6 ms | 3.47 ms | 3.6x |
+
+The product uses `Split`. It needs a scratch tensor of `decode_split_scratch(heads, nq, nk)` f32. The multi-row cases are limited by the scalar math on shared memory. A tensor-core version is lesson 8 exercise 4.
+
+### The logits GEMM (Task 9, 2026-11-25)
+
+`Blas::gemm_f16_f32out`: f16 A and B, f32 C and f32 math, for the decoder logits `x · W_tokᵀ` (`W_tok` is `[51866, 1280]`). Measured (3 runs, all the same):
+
+| Size | Time | Rate | % of the 192 GB/s limit |
+|---|---|---|---|
+| 1 x 51866 x 1280 | 718 µs | 185 GB/s | 96% |
+| 7 x 51866 x 1280 | 736 µs | 182 GB/s | 95% |
+
+One decoder step reads the whole 133 MB table, so this is the largest single cost of a step. cuBLAS is at the limit, so there is no kernel work to do here.
+
+### The GPU decoder and GpuWhisper (Task 10, 2026-11-25)
+
+`cuda::decoder::Decoder` (4 blocks, the self-attention KV cache, the cross K/V per window, f32 logits of the last row) and `cuda::model::GpuWhisper` (mel, encoder and decoder as the `WhisperModel` of the window loop). The test feeds the PyTorch encoder output into the decoder, so it checks the decoder alone (`tools/reference/whisper_decoder_reference.py`).
+
+| Check | Ours | PyTorch fp16 |
+|---|---|---|
+| step logits, ses_001_0007: arg max agree, max, mean diff vs fp32 | 1.0, 0.032, 0.0033 | 1.0, 0.030, 0.0034 |
+| step logits, my_voice | 1.0, 0.056, 0.0045 | 1.0, 0.123, 0.0043 |
+| alignment softmax, max diff vs fp32 (ses, my_voice) | 0.0016, 0.0032 | 0.0031, 0.0030 |
+| one batch against the steps (KV cache), max diff | 0.008 | — |
+
+- Memory: decoder weights 328 MB, decoder activations and caches 53 MB. Encoder and decoder together: 1676 MB. The load and one run use 1714 MB (without the CUDA context).
+- Speed (release, median): one decoder step 2.49 ms (p90 2.6 ms), the cross K/V 3.1 ms per window.
+- The whole model with the window loop on ses_001_0007: all 52 tokens equal whisper-rs (same position and id).
+
+### CudaWhisper (Task 11, 2026-11-25)
+
+`cuda::transcriber::CudaWhisper` is `Send + Sync`: one worker thread owns the GPU objects (`Blas` is not `Send`), and the caller gets the progress and the result over a channel. Every load failure gives `WhisperError::ModelLoad`, also with no GPU (`CUDA_VISIBLE_DEVICES=-1`).
+
+Against the whisper-rs fixtures (release, `--test-threads 1`):
+
+| Clip | Windows (fallbacks) | Tokens same / all | t0, t1 equal | t_dtw difference: median, max | Words ours / whisper-rs |
+|---|---|---|---|---|---|
+| my_voice | 1 (0) | 138 / 138 | all | 0 cs, 2 cs | 43 / 43 |
+| my_voice2 | 2 (0) | 187 / 189 | all of the same | 0 cs, 2 cs | 69 / 70 |
+| ses_001_0007 | 1 (0) | 52 / 52 | all | 0 cs, 2 cs | 20 / 20 |
+
+The 2 different tokens of my_voice2 are one near tie: whisper-rs takes "u" (p 0.517), we take "uy" (p 0.511), and the next token joins the two again ("uyla" against "u ile"). fp16 rounding decides such a tie.
+
+### The Phase 1 criteria, first measurement (Task 12, 2026-11-25)
+
+`scripts\compare-whisper.ps1` runs `examples/compare_whisper.rs` once for each backend, in its own process, and samples the VRAM of the whole card every 100 ms (peak minus idle). Times are the median of runs 2 to 4 of each clip. The WER aligns the words with Levenshtein after the Turkish lower case and with no punctuation (`jeuvoice_whisper::compare`).
+
+| Clip | Audio | Words rs / cuda | WER | Median start diff | Time rs | Time cuda | Fallbacks cuda |
+|---|---|---|---|---|---|---|---|
+| my_voice.ogg | 27.0 s | 43 / 43 | 0.00% | 0 ms | 1.181 s | 0.969 s | 0 |
+| my_voice2.mp4 | 33.6 s | 70 / 69 | 2.86% (S 1, D 1) | 0 ms | 1.912 s | 1.369 s | 0 |
+| ses_001_0007.wav | 8.4 s | 20 / 20 | 0.00% | 0 ms | 0.767 s | 0.483 s | 0 |
+
+| Criterion | Limit | whisper.cpp | CudaWhisper | Pass |
+|---|---|---|---|---|
+| 1. WER on each file | 2% | — | worst 2.86% | **no** |
+| 2. Median word-start difference | 50 ms | — | 0 ms | yes |
+| 3. Time of the 69 s set | 4.3 s | 3.861 s | 2.820 s | yes |
+| 4. Peak VRAM | whisper.cpp | 2147 MiB | 1787 MiB | yes |
+
+Criteria 5 (the tests) and 6 (CPU fallback) need Task 13. The WER errors of my_voice2 are one near tie of the decoder (whisper-rs "u" with p 0.517, CudaWhisper "uy" with p 0.511), which gives "uyla" against "u ile": 2 word errors of 70.
+
+### The f32 residual stream and the near tie (Task 14, 2026-11-25)
+
+Both halves of the model keep the residual stream in f32 now: `x` is `[rows, d]` f32, the LayerNorm reads f32 and writes f16 (`ops::layernorm_to_f16`), the residual add is f32 (`ops::add_into_f32`, `ops::add_into_f32_f32`), the encoder widens the f16 convolution output (`ops::f16_to_f32`), and the token embedding writes f32 (`ops::embed_f32`, `ops::embed_one_f32`). The norm weights and the encoder positional embedding stay f32, as the model file and whisper.cpp store them. whisper.cpp keeps its activations f32 as well.
+
+Agreement with the PyTorch f32 reference, before and after:
+
+| Measurement | Before | After |
+|---|---|---|
+| Decoder step logits, my_voice: max, mean | 0.056, 0.0045 | 0.041, 0.0033 |
+| Decoder step logits, ses_001_0007: max, mean | 0.032, 0.0033 | 0.028, 0.0026 |
+| Encoder block_15, my_voice: max, mean | 0.0046, 0.00034 | 0.0016, 0.00011 |
+| Encoder block_31, my_voice: mean | 0.00225 | 0.00102 |
+| Encoder ln_post, my_voice: max, mean | 3.45, 0.00409 | 1.28, 0.00171 |
+
+Cost: about 12 MiB of VRAM (1799 MiB against 1787 MiB). Criterion 3 reads 3.877 s against the whisper.cpp 4.007 s of the same run, inside the run-to-run spread of this laptop card.
+
+The near tie of my_voice2 window 1 (token 80) does not move: "uy" with p 0.509 after the encoder change (0.511 before). The cause is not our precision:
+
+- whisper.cpp converts its f32 activations to f16 and calls `cublasGemmEx` with half alpha and a half output, so its matmuls accumulate in **f16** (`ggml/src/ggml-cuda/ggml-cuda.cu`, `use_fp16` path). Ours accumulate in f32, so we are closer to the mathematical result.
+- PyTorch f32 (transformers, teacher forced, window 1 of my_voice2) prefers "uy" (id 7493, p 0.5448) over "u" (id 84, p 0.4528). Our token matches the f32 model. whisper.cpp is the outlier at this step.
+
+So criterion 1 (WER against whisper.cpp) counts one substitution and one deletion for a token where we agree with the f32 model. The reference for that check was `target/reference/whisper/my_voice2.win1.rs.json`: the first five segments of the whisper-rs fixture (they end before 3000), because the reference tool refuses a clip longer than one window. That file is not committed.
+
+### The six criteria after Task 13 and Task 14 (2026-11-25)
+
+| Criterion | Limit | whisper.cpp | CudaWhisper | Pass |
+|---|---|---|---|---|
+| 1. WER on each file | 2% | — | worst 2.86% | **no** (see the tie below) |
+| 2. Median word-start difference | 50 ms | — | 0 ms | yes |
+| 3. Time of the 69 s set | 4.3 s | 4.007 s | 3.877 s | yes |
+| 4. Peak VRAM of the card | not more than whisper.cpp | 2148 MiB | 1799 MiB | yes |
+| 5. The tests and the real-model tests with CudaWhisper | all pass | — | 69 + 4 real-model | yes |
+| 6. The app transcribes on the CPU without CUDA | works | — | `load_with` falls back on `ModelLoad`; the no-GPU load is a test | yes (two tests, no manual UI run) |
+
+Criterion 1 is the one near tie of my_voice2 window 1. PyTorch f32 prefers "uy" at p 0.5448 against "u" at 0.4528, and the raw CudaWhisper logits give 0.5469 against 0.4506: our distribution is 0.002 from the f32 model. whisper.cpp accumulates its matmuls in f16 (`CUBLAS_COMPUTE_16F`) and takes "u". Only the user can change a criterion. **The full record, with every number and command: `docs/phase1-criterion-1-tie.md`.**
+
+### The app path and the package (Task 13, 2026-11-25)
+
+`LazyWhisper` holds `Arc<dyn Transcriber>` and the device flag. The app tries `CudaWhisper` only when `JEUVOICE_CUDA_WHISPER=1` and the build has the new `cuda-kernels` feature, and any load error (`WhisperError::ModelLoad`) falls back to whisper.cpp. Five tests hold the choice and the fallback, with the loaders as parameters so no model is needed.
+
+`packaging\windows\collect.ps1` builds the release exe with `scripts\cargo.cmd oxide build -- -p jeuvoice-app --release --features cuda-kernels`. The PTX is inside the exe (the kernel entry names are in the binary) and no `.ptx` file sits next to it. The exe starts and stays up with and without the variable on the development machine. The build takes about 9 minutes.
+
+### Lesson 9: the DTW median filter (Task 15, 2026-11-25)
+
+One window of DTW (6 alignment heads, 130 tokens, 1500 audio positions), measured in release by `dtw_cpu_cost_of_one_window`:
+
+| Stage | Before | After |
+|---|---|---|
+| normalize over the tokens | 3.25 ms | 2.32 ms |
+| median filter, width 7 | 67.3 ms | **3.71 ms** |
+| cost matrix, all stages | 75.2 ms | 8.02 ms |
+| DTW path and backtrace | 2.03 ms | 1.86 ms |
+| together | 77.2 ms | **9.9 ms** |
+
+The filter sorted a fresh `Vec` of seven values for 1.17 million positions. A 19-comparator sorting network (Knuth 5.3.4) needs no allocation and no comparison function, and the reflect padding moved to the two row ends. The output is identical to a plain sort (a random-row test from 8 to 1500 positions), and the real-model `t_dtw` still matches whisper.cpp (median 0 cs, max 4 cs).
+
+DTW stays on the CPU: about 1% of a transcription, and the end-to-end difference sits under the run-to-run spread of the GPU clock (1.305 to 1.927 s over four runs of one clip). Lesson 9 gives the reasoning and the exercises.
+
+### The branch review (Task 15, 2026-11-25)
+
+A fresh reviewer read the whole branch against `main`. No Critical finding. Two Important findings, both fixed with a test that failed first:
+
+1. **A model that is not large-v3-turbo was accepted.** Whisper large-v3 has the same vocabulary, encoder shape and width, so nothing caught it, and the DTW pass would have used the large-v3-turbo alignment heads on the wrong model: every word time wrong, in silence. `GgmlModel::check_large_v3_turbo` now checks the layer counts, width and vocabulary, and both `GpuWhisper::load` and `Decoder::load` call it. Tests: `ggml::a_model_that_is_not_large_v3_turbo_is_rejected`, and the real model in `reads_large_v3_turbo`.
+2. **The app GPU setting did not reach the CUDA path.** With `JEUVOICE_CUDA_WHISPER=1` and "use the GPU" off, the app still ran on the GPU. `load_with` needs both now. Test: `app::the_gpu_setting_off_skips_the_cuda_path`.
+
+Deferred minors:
+
+- `decode/window.rs`: with `language = "auto"` and audio under 100 ms the port detects a language first, where whisper.cpp returns before the detection. The same place skips DTW for `n_audio <= 7`, so windows of 80 to 140 ms keep `t0` where whisper.cpp has `t_dtw`.
+- `decode/vocab.rs`: `token_bytes` and `token_text_lossy` index the table raw, so a hand-made id at or above `n_vocab` panics. The Task 7 ruling says a bad id is a program bug, not user input.
+- `cuda/transcriber.rs`: an `.expect` on the reply sender (unreachable while `&self` lives), and a panicked job leaves `GpuWhisper` partly written for the next job. It gives a `Transcribe` error, not a hang.
+- Two measurement tests cannot fail by design: `dtw_cost_in_a_transcription` and `decoder_timing`. They print numbers.
+- The fallback `eprintln!` in the app is invisible in a windowed release build.
+
+Checked and already correct: `collect.ps1` asserts and copies `cublas64_13.dll` and `cublasLt64_13.dll`.

@@ -12,9 +12,14 @@ This takes about 10 to 15 minutes.
 3. Run `powershell -ExecutionPolicy Bypass -File packaging\windows\collect.ps1`.
 4. Wait for the message `Bundle ready`.
 
-The script builds `target\release\jeuvoice-app.exe` with CUDA archs 75, 86 and
-89. Use `-SkipBuild` to keep an exe that is already built. Use `-CudaPath` when
-the toolkit is not in the default folder.
+The script builds `target\release\jeuvoice-app.exe` with the cuda-oxide backend (the Rust
+GPU kernels) and the `cuda-kernels` feature. The PTX of the kernels is inside the exe, so no
+file goes next to it. CUDA archs 75, 86 and 89. Use `-SkipBuild` to keep an exe that is
+already built. Use `-CudaPath` when the toolkit is not in the default folder.
+
+The exe transcribes with whisper.cpp by default. Set `JEUVOICE_CUDA_WHISPER=1` to use the
+Rust kernels on the GPU. When the GPU model does not load, the app runs whisper.cpp and the
+transcription still works.
 
 ## What the bundle contains
 

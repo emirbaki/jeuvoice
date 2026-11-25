@@ -2,6 +2,9 @@
 //! (through `whisper-rs`) that returns words with times.
 #[cfg(feature = "cuda-kernels")]
 pub mod cuda;
+#[doc(hidden)]
+pub mod compare;
+pub mod decode;
 pub mod ggml;
 pub mod mel_cpu;
 mod model;
@@ -122,13 +125,91 @@ fn context_params(use_gpu: bool) -> WhisperContextParameters<'static> {
     p
 }
 
-impl Transcriber for WhisperRs {
-    fn transcribe(
+/// One whisper.cpp token with all its data. For the developer tools that compare the GPU
+/// path with whisper.cpp.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct RawToken {
+    pub id: i32,
+    pub tid: i32,
+    pub p: f32,
+    pub plog: f32,
+    pub pt: f32,
+    pub ptsum: f32,
+    /// Centiseconds.
+    pub t0: i64,
+    pub t1: i64,
+    /// Centiseconds, -1 when DTW did not set it.
+    pub t_dtw: i64,
+    pub text: String,
+}
+
+/// One whisper.cpp segment. For the developer tools.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct RawSegment {
+    /// Centiseconds.
+    pub t0: i64,
+    pub t1: i64,
+    pub no_speech_prob: f32,
+    pub tokens: Vec<RawToken>,
+}
+
+impl WhisperRs {
+    /// Runs whisper.cpp with the app's parameters and returns the detected or given language
+    /// and the raw segments. For the developer tools.
+    #[doc(hidden)]
+    pub fn raw_segments(
+        &self,
+        samples_16k: &[f32],
+        opts: &TranscribeOptions,
+    ) -> Result<(String, Vec<RawSegment>), WhisperError> {
+        let state = self.run_full(samples_16k, opts, &mut |_| {})?;
+        let mut segments = Vec::new();
+        for seg in state.as_iter() {
+            let mut tokens = Vec::new();
+            for i in 0..seg.n_tokens() {
+                let Some(tok) = seg.get_token(i) else { continue };
+                let d = tok.token_data();
+                let text = tok.to_str_lossy().map(|t| t.into_owned()).unwrap_or_default();
+                tokens.push(RawToken {
+                    id: d.id,
+                    tid: d.tid,
+                    p: d.p,
+                    plog: d.plog,
+                    pt: d.pt,
+                    ptsum: d.ptsum,
+                    t0: d.t0,
+                    t1: d.t1,
+                    t_dtw: d.t_dtw,
+                    text,
+                });
+            }
+            segments.push(RawSegment {
+                t0: seg.start_timestamp(),
+                t1: seg.end_timestamp(),
+                no_speech_prob: seg.no_speech_probability(),
+                tokens,
+            });
+        }
+        Ok((self.language_of(&state, opts), segments))
+    }
+
+    fn language_of(&self, state: &whisper_rs::WhisperState, opts: &TranscribeOptions) -> String {
+        if opts.language == "auto" {
+            whisper_rs::get_lang_str(state.full_lang_id_from_state()).unwrap_or("auto").to_string()
+        } else {
+            opts.language.clone()
+        }
+    }
+
+    /// Runs `whisper_full` with the app's parameters.
+    fn run_full(
         &self,
         samples_16k: &[f32],
         opts: &TranscribeOptions,
         progress: &mut dyn FnMut(f32),
-    ) -> Result<Transcript, WhisperError> {
+    ) -> Result<whisper_rs::WhisperState, WhisperError> {
         let err = |e: whisper_rs::WhisperError| WhisperError::Transcribe(e.to_string());
         let mut state = self.ctx.create_state().map_err(err)?;
 
@@ -165,7 +246,18 @@ impl Transcriber for WhisperRs {
         if panicked.get() {
             return Err(WhisperError::Transcribe("the progress callback panicked".to_string()));
         }
+        Ok(state)
+    }
+}
 
+impl Transcriber for WhisperRs {
+    fn transcribe(
+        &self,
+        samples_16k: &[f32],
+        opts: &TranscribeOptions,
+        progress: &mut dyn FnMut(f32),
+    ) -> Result<Transcript, WhisperError> {
+        let state = self.run_full(samples_16k, opts, progress)?;
         let eot = self.ctx.token_eot();
         let mut tokens = Vec::new();
         for seg in state.as_iter() {
@@ -192,13 +284,7 @@ impl Transcriber for WhisperRs {
             }
         }
 
-        let language = if opts.language == "auto" {
-            whisper_rs::get_lang_str(state.full_lang_id_from_state())
-                .unwrap_or("auto")
-                .to_string()
-        } else {
-            opts.language.clone()
-        };
+        let language = self.language_of(&state, opts);
         Ok(Transcript { language, words: tokens_to_words(&tokens) })
     }
 }

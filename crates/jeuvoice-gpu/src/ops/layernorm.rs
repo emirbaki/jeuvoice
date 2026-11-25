@@ -102,3 +102,34 @@ pub fn layernorm_with(
     }
     Ok(())
 }
+
+/// `y = (x - mean) / sqrt(var + eps) * gamma + beta` per row, with `x`, `gamma` and `beta`
+/// `F32` and `y` `F16`. The product uses this for the f32 residual stream of the decoder,
+/// where the LayerNorm output feeds an f16 GEMM.
+pub fn layernorm_to_f16(gpu: &Gpu, arena: &Arena, x: &Tensor, gamma: &Tensor, beta: &Tensor, y: &Tensor, eps: f32) -> Result<(), GpuError> {
+    assert_eq!(x.shape().len(), 2, "layernorm_to_f16: x must be [rows, d]");
+    let (rows, d) = (x.shape()[0], x.shape()[1]);
+    assert!(x.dtype() == DType::F32 && gamma.dtype() == DType::F32 && beta.dtype() == DType::F32, "layernorm_to_f16: x, gamma and beta must be F32");
+    assert_eq!(gamma.shape(), &[d], "layernorm_to_f16: gamma must be [d]");
+    assert_eq!(beta.shape(), &[d], "layernorm_to_f16: beta must be [d]");
+    assert_eq!(y.shape(), x.shape(), "layernorm_to_f16: y must have the shape of x");
+    assert_eq!(y.dtype(), DType::F16, "layernorm_to_f16: y must be F16");
+    assert_ne!(x.offset(), y.offset(), "layernorm_to_f16: y must not be x");
+    if rows == 0 || d == 0 {
+        return Ok(());
+    }
+    assert!(
+        d <= ROW_BLOCK as usize * MAX_COLS_PER_THREAD,
+        "layernorm_to_f16: the width {d} passes the register kernel limit ({})",
+        ROW_BLOCK as usize * MAX_COLS_PER_THREAD
+    );
+    let cfg = LaunchConfig { grid_dim: (grid_elems(rows), 1, 1), block_dim: (ROW_BLOCK, 1, 1), shared_mem_bytes: 0 };
+    let (xs, g, b, ys) = (arena.slice::<f32>(x), arena.slice::<f32>(gamma), arena.slice::<f32>(beta), arena.slice::<f16>(y));
+    // SAFETY: one block per row, ROW_BLOCK threads, the shapes are checked above and d is
+    // inside the register limit.
+    unsafe {
+        gpu.kernels()?
+            .layernorm_f32in_f16out(gpu.stream(), cfg, xs.as_ptr(), g.as_ptr(), b.as_ptr(), ys.as_mut_ptr().cast(), d, eps)
+    }?;
+    Ok(())
+}
