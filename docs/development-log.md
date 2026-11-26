@@ -1180,3 +1180,13 @@ The quality gate compares the Rust `guide_peak` output against these values. It 
 The top-k position sets match the f32 engine on all three scripts. This catches a score or order change before the masked loop can amplify it into a different token trajectory. The full quality gate now passes in 31.5 s and includes taps, logits, guidance, deterministic repeatability and product frame counts for s1-s3.
 
 The next quality step is a product-mode top-k fixture for `class_temperature > 0`. It must compare the 103-token filter and the Gumbel stream before their changes reach the trajectory.
+
+### Product top-k and fixed Gumbel noise (2026-11-26)
+
+`omnivoice_reference.py` now stores `topk00`, the 103 token ids with the highest guided log-probability at step 0. The quality gate computes the same set from its two logit planes and compares it. The exact Gumbel stream cannot be compared with the engine, because the engine draws from torch's global Philox generator.
+
+The first run failed on the missing key. The second showed our set agreement at 75.9%, 77.3% and 75.2%. The engine fp16 run keeps only 24.6%, 23.9% and 24.7% of the f32 top-k sets. The gate now compares our share with the engine fp16 floor plus 5 pp. The cutoff is a near tie, so exact set equality is not a useful quality measure. Our set is three times closer to the f32 model.
+
+`sample_row` now has a `sample_row_with_noise` form. A pure test supplies a fixed noise vector and checks both the chosen token and the confidence. The confidence normalizer includes the mask id, as in the engine before it sets that logit to -inf. The top-k list is sorted by score with an index tie-break, so the fixed noise maps to a fixed token.
+
+After the change, plain tests pass: 457 tests with the added product sampler case. The real product test still keeps 214 frames and stays repeatable for one seed. The quality gate passes in 30.4 s with taps, logits, guidance, top-k sets, deterministic repeatability and product frame counts for s1-s3.

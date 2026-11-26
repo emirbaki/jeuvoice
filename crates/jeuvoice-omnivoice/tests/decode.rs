@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use jeuvoice_omnivoice::decode::{Params, schedule};
+use jeuvoice_omnivoice::decode::{Params, sample_row_with_noise, schedule};
 
 fn vectors() -> serde_json::Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/text_vectors.json");
@@ -39,6 +39,24 @@ fn the_shift_gives_the_early_steps_fewer_pairs() {
     let counts = schedule(214, 8, &params);
     assert!(counts[0] < counts[16], "the shifted curve unmask more later: {counts:?}");
     assert_eq!(counts.len(), 32);
+}
+
+/// The product sampler with a fixed noise vector checks the top-k filter and Gumbel formula
+/// without the engine's unreproducible Philox stream.
+#[test]
+fn product_sampling_matches_a_fixed_noise_vector() {
+    let c: Vec<f32> = (0..20).map(|v| v as f32).collect();
+    let u = vec![0.0f32; 20];
+    let mask_id = 19usize;
+    let mut y = vec![0.0f32; 20];
+    let (confidence, token) = sample_row_with_noise(&c, &u, 0.0, mask_id, 1.0, &mut y, &[0.5, 0.0]);
+    // The kept ids are 18 and 17. Their noisy values are 18.5 and 17.0.
+    assert_eq!(token, 18, "the fixed-noise sample must pick token 18");
+    // The normalizer includes the mask id, as in the engine's log_softmax before masking.
+    let top = 19.0f32;
+    let sum: f32 = c.iter().map(|v| (v - top).exp()).sum();
+    let want = 18.0 - (top + sum.ln());
+    assert!((confidence - want).abs() < 1e-4, "confidence {confidence} differs from {want}");
 }
 
 /// A one-frame target needs eight pairs in 32 steps, so most steps have nothing to unmask.

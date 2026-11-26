@@ -150,9 +150,15 @@ impl Rng {
     }
 }
 
-/// One row of the product mode: the token from the top-k filtered distribution with Gumbel
-/// noise, and the confidence of the unfiltered distribution for the position score.
-fn sample_row(c: &[f32], u: &[f32], guidance: f32, mask_id: usize, temperature: f32, y: &mut [f32], rng: &mut Rng) -> (f32, i32) {
+fn sample_row_inner<F: FnMut(usize) -> f32>(
+    c: &[f32],
+    u: &[f32],
+    guidance: f32,
+    mask_id: usize,
+    temperature: f32,
+    y: &mut [f32],
+    mut noise: F,
+) -> (f32, i32) {
     let mut top = f32::NEG_INFINITY;
     for (v, slot) in y.iter_mut().enumerate() {
         *slot = (1.0 + guidance) * c[v] - guidance * u[v];
@@ -180,16 +186,31 @@ fn sample_row(c: &[f32], u: &[f32], guidance: f32, mask_id: usize, temperature: 
     let k = ((y.len() as f64 * 0.1).ceil() as usize).max(1);
     let mut order: Vec<usize> = (0..y.len()).filter(|&v| v != mask_id).collect();
     order.select_nth_unstable_by(k - 1, |&a, &b| y[b].total_cmp(&y[a]));
+    let keep = k.min(order.len());
+    order[..keep].sort_unstable_by(|&a, &b| y[b].total_cmp(&y[a]).then(a.cmp(&b)));
     let mut best = f32::NEG_INFINITY;
     let mut at = 0i32;
-    for &v in &order[..k.min(order.len())] {
-        let value = y[v] / temperature + rng.gumbel();
+    for (i, &v) in order[..keep].iter().enumerate() {
+        let value = y[v] / temperature + noise(i);
         if value > best {
             best = value;
             at = v as i32;
         }
     }
     (confidence, at)
+}
+
+/// One row of the product mode: the token from the top-k filtered distribution with Gumbel
+/// noise, and the confidence of the unfiltered distribution for the position score.
+fn sample_row(c: &[f32], u: &[f32], guidance: f32, mask_id: usize, temperature: f32, y: &mut [f32], rng: &mut Rng) -> (f32, i32) {
+    sample_row_inner(c, u, guidance, mask_id, temperature, y, |_| rng.gumbel())
+}
+
+/// `sample_row` with a fixed noise vector. Tests use it to check the Gumbel formula without the
+/// engine's unreproducible stream. Noise has one value per kept token.
+#[doc(hidden)]
+pub fn sample_row_with_noise(c: &[f32], u: &[f32], guidance: f32, mask_id: usize, temperature: f32, y: &mut [f32], noise: &[f32]) -> (f32, i32) {
+    sample_row_inner(c, u, guidance, mask_id, temperature, y, |i| noise[i])
 }
 #[cfg(feature = "cuda-kernels")]
 pub use gpu::decode;

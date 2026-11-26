@@ -203,6 +203,48 @@ fn check_forward(gpu: &Gpu, blas: &Blas, w: &OmniVoiceWeights, cfg: &OmniVoiceCo
     ours_order.sort_unstable();
     engine_order.sort_unstable();
     assert_eq!(ours_order, engine_order, "{id}: top-k position order");
+
+    // Product mode keeps the top 10% of the 1025 logits before Gumbel noise. Compare the set
+    // with the engine. The exact noise stream uses torch Philox and cannot be reproduced.
+    let k = ((vocab as f64 * 0.1).ceil() as usize).max(1);
+    let want_topk = &taps32["topk00"];
+    assert_eq!(want_topk.len(), CODEBOOKS * target * k, "{id}: topk00 shape");
+    let mut set_agree = 0usize;
+    let mut total_sets = 0usize;
+    for c in 0..CODEBOOKS {
+        for p in 0..target {
+            let want: Vec<i32> = want_topk[(c * target + p) * k..(c * target + p + 1) * k].iter().map(|&v| v as i32).collect();
+            let at = (t - target + p) * width + c * vocab;
+            let ut = p * width + c * vocab;
+            let mut guided: Vec<(f32, usize)> = (0..vocab).filter(|&v| v != cfg.audio_mask_id as usize).map(|v| ((1.0 + 2.5) * cond_logits[at + v] - 2.5 * uncond_logits[ut + v], v)).collect();
+            guided.select_nth_unstable_by(k - 1, |a, b| b.0.total_cmp(&a.0));
+            let mut ours: Vec<i32> = guided[..k].iter().map(|&(_, id)| id as i32).collect();
+            ours.sort_unstable();
+            let mut expected = want.clone();
+            expected.sort_unstable();
+            if ours == expected {
+                set_agree += 1;
+            }
+            total_sets += 1;
+        }
+    }
+    let want16 = &taps["topk00"];
+    let mut engine_set_agree = 0usize;
+    for c in 0..CODEBOOKS {
+        for p in 0..target {
+            let mut a: Vec<i32> = want16[(c * target + p) * k..(c * target + p + 1) * k].iter().map(|&v| v as i32).collect();
+            let mut b: Vec<i32> = want_topk[(c * target + p) * k..(c * target + p + 1) * k].iter().map(|&v| v as i32).collect();
+            a.sort_unstable();
+            b.sort_unstable();
+            if a == b {
+                engine_set_agree += 1;
+            }
+        }
+    }
+    let engine_set_share = engine_set_agree as f64 / total_sets as f64;
+    let our_set_share = set_agree as f64 / total_sets as f64;
+    eprintln!("{id}/product top-k sets: ours {:.1}%, engine fp16 {:.1}%", our_set_share * 100.0, engine_set_share * 100.0);
+    assert!(our_set_share + 0.05 >= engine_set_share, "{id}: product top-k sets below the engine fp16 floor");
 }
 
 #[test]

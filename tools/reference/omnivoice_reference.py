@@ -36,6 +36,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 def parse_args() -> argparse.Namespace:
@@ -198,6 +199,19 @@ def capture_taps(model, prompt, script: dict, language: str, speed: float, cfg, 
             position_score = scores - penalty
             count = first_step_count(scores.shape[2], gen_config.num_step)
             taps["order00"] = torch.topk(position_score.flatten(), count).indices.to("cpu").numpy().astype(np.int32)
+
+            # The top 10% of the guided distribution, before Gumbel noise. This is
+            # deterministic and lets the Rust gate compare product filtering.
+            if gen_config.guidance_scale != 0.0:
+                c_lp = F.log_softmax(c_logits, dim=-1)
+                u_lp = F.log_softmax(u_logits, dim=-1)
+                guided = F.log_softmax(c_lp + gen_config.guidance_scale * (c_lp - u_lp), dim=-1)
+            else:
+                guided = F.log_softmax(c_logits, dim=-1)
+            guided = guided.clone()
+            guided[..., model.config.audio_mask_id] = -float("inf")
+            top_count = math.ceil(0.1 * guided.shape[-1])
+            taps["topk00"] = guided.topk(top_count, dim=-1).indices[0].to("cpu").numpy().astype(np.int32)
         return pred, scores
 
     model._predict_tokens_with_scoring = wrapped
