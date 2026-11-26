@@ -74,7 +74,7 @@ It reads `tools\reference\omnivoice_scripts.json` (3 Turkish scripts, the 8 s vo
 |---|---|
 | `<id>.det.npz` | the deterministic tokens `[8, T]`, the prompt frames `[8, T_ref]`, the text, the language, the target length |
 | `<id>.product.npz` | the same from the product mode (`position_temperature` 5.0) |
-| `<id>.taps.safetensors` | `embed` and `hidden_00` … `hidden_27` `[T, 1024]` f32 of the first pass, and `cond_logits_00` / `uncond_logits_00` `[8, T_target, 1025]` |
+| `<id>.taps.safetensors` | `embed` and `hidden_00` … `hidden_27` `[T, 1024]` f32 of the first pass, `cond_logits_00` / `uncond_logits_00` `[8, T_target, 1025]`, and `conf00` / `pick00` `[8, T_target]` plus `order00` with the first step's top-k positions |
 
 The tool captures taps for the first script unless `--taps-script` selects others. The quality gate needs s1, s2 and s3. Generate the missing ones in fp16 and f32:
 

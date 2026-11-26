@@ -1164,3 +1164,19 @@ Expanded open areas:
 3. The `scores` tensor is now dead in production, about 67 MB. The padded tap test is the only grouped caller. Removing it needs that test to allocate its own scratch. VRAM is 1460 MB, so this is a cleanup, not a blocker.
 4. CUDA graphs could remove launch overhead from the hundreds of small kernels per step. Capture with cuBLAS and the changing ids buffer is a compatibility risk. This needs a prototype.
 5. Quality work now has s1-s3 taps. The next fixture is the guided score and top-k order at step 0, so an arithmetic change can be caught before it reaches the token trajectory.
+
+### Guidance and top-k fixture (2026-11-26)
+
+`omnivoice_reference.py` now saves `conf00`, `pick00` and `order00` in each taps file. They are the guidance confidence and argmax token before the layer penalty, and the engine's first-step top-k positions after the penalty. The fixture uses the deterministic config, so no Gumbel noise enters the order.
+
+The quality gate compares the Rust `guide_peak` output against these values. It failed first on the missing keys, then passed after generation. The engine fp16 confidence is much further from the f32 model than ours:
+
+| Script | Our conf max / mean | Engine fp16 conf max / mean | Our pick | Engine fp16 pick |
+|---|---|---|---|---|
+| s1 | 0.0234 / 0.00414 | 0.1869 / 0.03739 | 99.6% | 93.6% |
+| s2 | 0.0285 / 0.00449 | 0.2722 / 0.03242 | 99.5% | 94.9% |
+| s3 | 0.0885 / 0.00404 | 0.2109 / 0.03425 | 99.4% | 94.6% |
+
+The top-k position sets match the f32 engine on all three scripts. This catches a score or order change before the masked loop can amplify it into a different token trajectory. The full quality gate now passes in 31.5 s and includes taps, logits, guidance, deterministic repeatability and product frame counts for s1-s3.
+
+The next quality step is a product-mode top-k fixture for `class_temperature > 0`. It must compare the 103-token filter and the Gumbel stream before their changes reach the trajectory.

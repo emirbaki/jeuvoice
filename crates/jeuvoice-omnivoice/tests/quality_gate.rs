@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 
 use jeuvoice_gpu::blas::Blas;
 use jeuvoice_gpu::check::compare;
-use jeuvoice_gpu::{DType, Gpu};
+use jeuvoice_gpu::ops::guide_peak;
+use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu};
 use jeuvoice_omnivoice::config::{OmniVoiceConfig, default_cache_root, model_dir};
 use jeuvoice_omnivoice::decode::{Mode, Params, decode};
 use jeuvoice_omnivoice::forward::forward;
@@ -51,6 +52,15 @@ fn ints_2d(value: &serde_json::Value) -> Vec<i32> {
 
 fn share(a: &[i32], b: &[i32]) -> f64 {
     a.iter().zip(b).filter(|(x, y)| x == y).count() as f64 / b.len() as f64
+}
+
+/// Engine fixtures store `[codebook, position]`. The GPU op stores `[position, codebook]`.
+fn pair_values(codebook_major: &[f32], target: usize) -> Vec<f32> {
+    (0..target).flat_map(|p| (0..CODEBOOKS).map(move |c| codebook_major[c * target + p])).collect()
+}
+
+fn pair_ids(codebook_major: &[i32], target: usize) -> Vec<i32> {
+    (0..target).flat_map(|p| (0..CODEBOOKS).map(move |c| codebook_major[c * target + p])).collect()
 }
 
 fn check_forward(gpu: &Gpu, blas: &Blas, w: &OmniVoiceWeights, cfg: &OmniVoiceConfig, base: &Path, id: &str) {
@@ -146,6 +156,53 @@ fn check_forward(gpu: &Gpu, blas: &Blas, w: &OmniVoiceWeights, cfg: &OmniVoiceCo
         assert!(agree as f64 / total_pairs as f64 + 0.02 >= engine_share, "{id}/{name}: argmax below the engine fp16 floor");
         assert!(max < 0.1, "{id}/{name}: logit max {max}");
     }
+
+    // The guidance fixture catches a score or order change before it reaches the decode
+    // trajectory. Both logit planes must live in one arena for `guide_peak`.
+    let pairs = CODEBOOKS * target;
+    let mut plan = ArenaPlan::new();
+    let tc = plan.add(DType::F32, &[target, width]);
+    let tu = plan.add(DType::F32, &[target, width]);
+    let tconf = plan.add(DType::F32, &[pairs]);
+    let tpick = plan.add(DType::I32, &[pairs]);
+    let scratch = Arena::new(gpu, &plan).unwrap();
+    scratch.upload(gpu, &tc, &cond_logits[(t - target) * width..]).unwrap();
+    scratch.upload(gpu, &tu, &uncond_logits).unwrap();
+    guide_peak(gpu, &scratch, &tc, &tu, &tconf, &tpick, pairs, width, vocab, CODEBOOKS, cfg.audio_mask_id as usize, 2.5).unwrap();
+    let conf = scratch.download::<f32>(gpu, &tconf).unwrap();
+    let pick = scratch.download::<i32>(gpu, &tpick).unwrap();
+
+    let conf16 = pair_values(&taps["conf00"], target);
+    let conf32 = pair_values(&taps32["conf00"], target);
+    let ours = compare(&conf, &conf32);
+    let floor = compare(&conf16, &conf32);
+    eprintln!("{id}/guidance conf: ours max {:.4} mean {:.6} | fp16 engine max {:.4} mean {:.6}", ours.max_abs, ours.mean_abs, floor.max_abs, floor.mean_abs);
+    assert!(ours.max_abs <= 2.0 * floor.max_abs + 2e-2, "{id}: guidance confidence max");
+    assert!(ours.mean_abs <= 2.0 * floor.mean_abs + 1e-5, "{id}: guidance confidence mean");
+
+    let pick16 = pair_ids(&taps["pick00"].iter().map(|&v| v as i32).collect::<Vec<_>>(), target);
+    let pick32 = pair_ids(&taps32["pick00"].iter().map(|&v| v as i32).collect::<Vec<_>>(), target);
+    let engine_pick = share(&pick16, &pick32);
+    eprintln!("{id}/guidance pick: ours {:.1}% | engine fp16 {:.1}%", share(&pick, &pick32) * 100.0, engine_pick * 100.0);
+    assert!(share(&pick, &pick32) + 0.02 >= engine_pick, "{id}: guidance token below the fp16 floor");
+
+    let order32: Vec<usize> = taps32["order00"].iter().map(|&v| {
+        let flat = v as usize;
+        let c = flat / target;
+        let p = flat % target;
+        p * CODEBOOKS + c
+    }).collect();
+    let mut ours_order: Vec<usize> = (0..pairs).collect();
+    ours_order.select_nth_unstable_by(order32.len() - 1, |&a, &b| {
+        let sa = conf[a] - (a % CODEBOOKS) as f32 * 5.0;
+        let sb = conf[b] - (b % CODEBOOKS) as f32 * 5.0;
+        sb.total_cmp(&sa).then(a.cmp(&b))
+    });
+    ours_order.truncate(order32.len());
+    let mut engine_order = order32.clone();
+    ours_order.sort_unstable();
+    engine_order.sort_unstable();
+    assert_eq!(ours_order, engine_order, "{id}: top-k position order");
 }
 
 #[test]

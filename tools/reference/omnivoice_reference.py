@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import time
 from pathlib import Path
@@ -118,6 +119,14 @@ def save_npz(path: Path, script: dict, language: str, speed: float, tokens: np.n
     print(f"  {path.name}: tokens {tokens.shape}, target {target_len} frames, prompt {prompt_tokens.shape[1]} frames")
 
 
+def first_step_count(target_len: int, num_step: int) -> int:
+    """The engine's first `ceil(total * delta_t)` count, without the torch tensor."""
+    def shifted(t: float) -> float:
+        return 0.1 * t / (1.0 + (0.1 - 1.0) * t)
+
+    return math.ceil(target_len * 8 * (shifted(1.0 / num_step) - shifted(0.0)))
+
+
 def capture_taps(model, prompt, script: dict, language: str, speed: float, cfg, out_path: Path) -> None:
     """One pass of the deterministic decode, with the layer outputs of the first step saved.
 
@@ -172,15 +181,24 @@ def capture_taps(model, prompt, script: dict, language: str, speed: float, cfg, 
     original = model._predict_tokens_with_scoring
 
     def wrapped(c_logits, u_logits, gen_config):
-        if marked["first"]:
+        first = marked["first"]
+        if first:
             # `.contiguous()` before numpy: `c_logits` is a strided slice of the batch logits,
             # and `save_file` writes the storage of a strided array, not its values.
             taps["cond_logits_00"] = c_logits[0].detach().float().to("cpu").contiguous().numpy()
             taps["uncond_logits_00"] = u_logits[0].detach().float().to("cpu").contiguous().numpy()
             marked["first"] = False
-        else:
-            marked["first"] = False
-        return original(c_logits, u_logits, gen_config)
+        pred, scores = original(c_logits, u_logits, gen_config)
+        if first:
+            # The guided confidence and token before the layer penalty and the Gumbel noise.
+            # They let the Rust test compare guidance before the decode trajectory diverges.
+            taps["conf00"] = scores[0].detach().float().to("cpu").contiguous().numpy()
+            taps["pick00"] = pred[0].detach().to("cpu").numpy().astype(np.int32)
+            penalty = torch.arange(scores.shape[1], device=scores.device).view(1, -1, 1).float() * gen_config.layer_penalty_factor
+            position_score = scores - penalty
+            count = first_step_count(scores.shape[2], gen_config.num_step)
+            taps["order00"] = torch.topk(position_score.flatten(), count).indices.to("cpu").numpy().astype(np.int32)
+        return pred, scores
 
     model._predict_tokens_with_scoring = wrapped
     marked["first"] = True  # the next forward pass is step 0
