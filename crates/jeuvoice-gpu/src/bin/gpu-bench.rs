@@ -7,7 +7,7 @@ use jeuvoice_gpu::bench::{Timing, pct_of_memory_limit, pct_of_tensor_limit, time
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
     AttnKind, ConvKind, DecodeAttnKind, ProbsOut, attention_decode_with, decode_split_scratch, GemmKind, LayerNormKind, SoftmaxKind, Width, attention, bias_gelu_with, conv1d, embed_one, embed_with, gemm_lesson, layernorm_with, rmsnorm, rmsnorm_naive,
-    BidirScratch, RopeKind, SwigluKind, attention_bidir_grouped, attention_flash128, embed_audio_sum, rmsnorm_rows, rmsnorm_rows_naive, rmsnorm_rows_warp, rope_with, softmax_rows_with, swiglu_strided, swiglu_with,
+    BidirScratch, RopeKind, SwigluKind, attention_bidir_grouped, attention_flash128, embed_audio_sum, product_topk, rmsnorm_rows, rmsnorm_rows_naive, rmsnorm_rows_warp, rope_with, softmax_rows_with, swiglu_strided, swiglu_with,
 };
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError};
 
@@ -190,7 +190,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The guided peak of one decode step: 428 positions of 8 codebooks of 1025 tokens.
     if "guide_peak_f32".contains(&filter) {
         rows.push(bench_guide_peak(&gpu, "guide_peak_f32", 428 * 8, 8200, 1025, 8)?);
-    }    // The 8-codebook audio embedding of one pass: [8, 486] ids into [8200, 1024].
+    }
+    // Product top-k for one decode step: 1712 pairs, the top 103 tokens of 1025.
+    if "product_topk_f32".contains(&filter) {
+        rows.push(bench_product_topk(&gpu, "product_topk_f32", 214, 8, 1025)?);
+    }
+    // The 8-codebook audio embedding of one pass: [8, 486] ids into [8200, 1024].
     if "embed_audio_sum_f16".contains(&filter) {
         rows.push(bench_embed_audio(&gpu, "embed_audio_sum_f16", 486, 1024)?);
     }
@@ -760,6 +765,34 @@ fn bench_guide_peak(gpu: &Gpu, name: &str, pairs: usize, width: usize, vocab: us
     Ok(Row {
         name: name.into(),
         size: format!("{pairs} pairs of {vocab}"),
+        t,
+        rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
+        pct: bytes as f64 / (t.us * 1e-6) / (gpu.info().mem_bandwidth_gbs * 1e9) * 100.0,
+    })
+}
+
+/// Product sampling: the CPU keeps the Gumbel stream and reads only the top-k ids and values.
+fn bench_product_topk(gpu: &Gpu, name: &str, target: usize, codebooks: usize, vocab: usize) -> Result<Row, GpuError> {
+    let (pairs, width, k) = (target * codebooks, codebooks * vocab, (vocab as f64 * 0.1).ceil() as usize);
+    let mut plan = ArenaPlan::new();
+    let c = plan.add(DType::F32, &[target, width]);
+    let u = plan.add(DType::F32, &[target, width]);
+    let arena = Arena::new(gpu, &plan)?;
+    arena.upload(gpu, &c, &vec![0.01f32; target * width])?;
+    arena.upload(gpu, &u, &vec![0.02f32; target * width])?;
+
+    let mut out_plan = ArenaPlan::new();
+    let conf = out_plan.add(DType::F32, &[pairs]);
+    let ids = out_plan.add(DType::I32, &[pairs, k]);
+    let vals = out_plan.add(DType::F32, &[pairs, k]);
+    let out = Arena::new(gpu, &out_plan)?;
+    let t = time_on_stream(gpu, 3, 20, || {
+        product_topk(gpu, &arena, &c, &u, &out, &conf, &ids, &vals, pairs, width, vocab, codebooks, 1024, 2.5, k)
+    })?;
+    let bytes = (2 * pairs * vocab + pairs * k * 2 + pairs) * 4;
+    Ok(Row {
+        name: name.into(),
+        size: format!("{pairs} pairs, top {k} of {vocab}"),
         t,
         rate: (bytes as f64 / (t.us * 1e-6) / 1e9, "GB/s"),
         pct: bytes as f64 / (t.us * 1e-6) / (gpu.info().mem_bandwidth_gbs * 1e9) * 100.0,

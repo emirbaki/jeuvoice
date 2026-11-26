@@ -3,6 +3,7 @@
 //! host instead of 13.4 MiB.
 
 use cuda_core::LaunchConfig;
+use crate::kernels::ROW_BLOCK;
 use crate::{Arena, DType, Gpu, GpuError, Tensor};
 
 /// `c` and `u` are the conditioned and the unconditioned logits, `[positions, audio_head_rows]`
@@ -66,6 +67,71 @@ pub fn guide_peak(
             codebooks,
             mask_id,
             guidance,
+        )
+    }?;
+    Ok(())
+}
+
+/// The product-mode top-k filter on the GPU. It writes the guided confidence and the `k`
+/// highest token ids and values per pair. The host applies Gumbel noise to those values.
+///
+/// # Panics
+/// On a wrong dtype or a size that does not fit the logits or the outputs.
+#[allow(clippy::too_many_arguments)]
+pub fn product_topk(
+    gpu: &Gpu,
+    logits: &Arena,
+    c: &Tensor,
+    u: &Tensor,
+    out: &Arena,
+    conf: &Tensor,
+    ids: &Tensor,
+    vals: &Tensor,
+    pairs: usize,
+    width: usize,
+    vocab: usize,
+    codebooks: usize,
+    mask_id: usize,
+    guidance: f32,
+    k: usize,
+) -> Result<(), GpuError> {
+    assert_eq!(c.dtype(), DType::F32, "product_topk: c must be F32");
+    assert_eq!(u.dtype(), DType::F32, "product_topk: u must be F32");
+    assert_eq!(conf.dtype(), DType::F32, "product_topk: conf must be F32");
+    assert_eq!(ids.dtype(), DType::I32, "product_topk: ids must be I32");
+    assert_eq!(vals.dtype(), DType::F32, "product_topk: vals must be F32");
+    assert_eq!(conf.numel(), pairs, "product_topk: conf needs one value per pair");
+    assert_eq!(ids.numel(), pairs * k, "product_topk: ids needs k values per pair");
+    assert_eq!(vals.numel(), pairs * k, "product_topk: vals needs k values per pair");
+    assert!(codebooks > 0 && pairs % codebooks == 0, "product_topk: pairs are not whole codebooks");
+    assert!(mask_id < vocab, "product_topk: the mask id is not a token");
+    if pairs == 0 {
+        return Ok(());
+    }
+    let cs = logits.slice_unaligned::<f32>(c);
+    let us = logits.slice_unaligned::<f32>(u);
+    let cf = out.slice::<f32>(conf);
+    let is = out.slice::<i32>(ids);
+    let vs = out.slice::<f32>(vals);
+    let cfg = LaunchConfig { grid_dim: (pairs as u32, 1, 1), block_dim: (ROW_BLOCK, 1, 1), shared_mem_bytes: 0 };
+    // SAFETY: the sizes and dtypes are checked above. The input planes are row blocks of f32
+    // logits, and the output tensors have one confidence and k ids and values per pair.
+    unsafe {
+        gpu.kernels()?.product_topk_f32(
+            gpu.stream(),
+            cfg,
+            cs.as_ptr(),
+            us.as_ptr(),
+            cf.as_mut_ptr(),
+            is.as_mut_ptr(),
+            vs.as_mut_ptr(),
+            pairs,
+            width,
+            vocab,
+            codebooks,
+            mask_id,
+            guidance,
+            k,
         )
     }?;
     Ok(())

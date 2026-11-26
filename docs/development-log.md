@@ -1190,3 +1190,11 @@ The first run failed on the missing key. The second showed our set agreement at 
 `sample_row` now has a `sample_row_with_noise` form. A pure test supplies a fixed noise vector and checks both the chosen token and the confidence. The confidence normalizer includes the mask id, as in the engine before it sets that logit to -inf. The top-k list is sorted by score with an index tie-break, so the fixed noise maps to a fixed token.
 
 After the change, plain tests pass: 457 tests with the added product sampler case. The real product test still keeps 214 frames and stays repeatable for one seed. The quality gate passes in 30.4 s with taps, logits, guidance, top-k sets, deterministic repeatability and product frame counts for s1-s3.
+
+### Product top-k on the GPU (2026-11-26)
+
+The `class_temperature > 0` branch no longer downloads both full logit planes. `product_topk_f32` builds the guided values, excludes the mask id, and writes the confidence plus the top-103 ids and values. The host applies its seeded Gumbel noise to those values and keeps the same RNG order as before. The download falls from about 13.4 MiB to about 1.4 MiB per step.
+
+The test failed first on the missing op, then on a test tensor that was twice the planned size. It now compares confidence, ids and values against a CPU f64 reference at a small shape. The real product test keeps 214 frames and stays repeatable. The isolated bench is 2140 us for 1712 pairs, 7.2 GB/s, 4% of the memory limit. The kernel is limited by the serial 103-step selection and its barriers, not by bandwidth.
+
+Lesson 12 records the kernel, the bench and the remaining option of a threshold-based selector. Test counts after this change: 457 plain, 128 GPU, 70 whisper GPU. The real decode and quality gate pass. The product stage itself has no separate wall-clock number yet; the transfer saving is arithmetic from the buffer sizes.

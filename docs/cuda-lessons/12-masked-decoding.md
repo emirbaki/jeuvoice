@@ -60,6 +60,12 @@ Bir render: 32 × 77,4 ms ≈ 2,5 s ileri geçiş (iki geçiş: 486 + 214) + ~0,
 
 Açılmış konum için guided peak yok (%16.27 daha az çağrı), `k = 0` adımda geçiş yok, koşullu ve koşulsuz logit satırları bitişik olduğu için tek indirme.
 
+### 4.5 Ürün modunda top-k'ı GPU'ya taşı
+
+`class_temperature > 0` için CPU, 1712 çiftin 1025 logit'ini indiriyordu: adım başına 13,4 MiB. Yeni `product_topk_f32` kernel'i her çift için guided logit dizisini kurar. Maskeyi dışlar ve ilk 103 token'ı skor ile indeks sırasına göre yazar. Host yalnızca 103 kimlik ve 103 değer okur. İndirme adım başına yaklaşık 1,4 MiB'ye düşer. Gumbel gürültüsü host'ta kalır. Engine'in Philox akışı tekrarlanamaz. Bizim seed'imiz yine aynı sonucu verir.
+
+İzole bench: 1712 çift için **2140 µs**, 7,2 GB/s (%4). Kernel hesap yoğun değil, 103 seçim adımında blok redüksiyonu yapıyor. Sınır burada bellek değil, seçim döngüsünün seri doğası. PTX'te `bar.sync` sayısı yüksektir. Olası hızlandırma: 103 yerine eşik tabanlı seçim veya blok başına birden fazla çift.
+
 ## 5. Kartın sınırı
 
 RTX 3050 Ti Laptop, 192 GB/s, 15.2 TFLOP/s fp16.
@@ -79,7 +85,7 @@ Bench'ler her kerneli soğuk cache ile çağırır; toplamları ölçülen geçi
 - `guide_peak_f32`: iki kez `ld.global.f32`, `fma.rn.f32`, `ex2.approx.f32` (libm'in `expf`'i), `bar.sync` × ~10 (ağaç redüksiyonu). `vocab = 1025` olduğu için her thread 4-5 değer işler; blok başına 8 KB okuma.
 - **Compute (SM) Throughput** guidance'ta düşük, **Memory** düşük: kernel küçük (1712 blok, 8 KB okuma). Asıl maliyet adım sayısıdır, tek çağrı değil.
 - Çözme döngüsünde **en uzun kernel** audio head GEMM'i ve attention'dır; `ncu --set full -k regex:gemm` yerine Nsight Systems ile adımın zaman çizgisine bak: iki GEMM bloğu ve arada mask/softmax.
-- Top-k ve `argmax` CPU'da 1712 değerle uğraşır: profilde görünmez, ama adım başına bir senkronizasyon (`download`) vardır.
+- Ürün modunun ilk sürümünde top-k ve `argmax` CPU'da 1712 değerle uğraşırdı: profilde görünmez, ama adım başına 13,4 MiB indirme vardı. `product_topk_f32` bu işi GPU'ya taşıdı; Nsight Systems'da indirme artık yaklaşık 1,4 MiB.
 
 ## 7. Alıştırmalar
 

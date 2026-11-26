@@ -28,7 +28,7 @@ pub use fastdiv::{FastDiv, fast_div, fast_div_test};
 pub use gemm_lesson::{GemmKind, gemm_lesson, mma_probe};
 pub use mel::{log10_max, log10_max_partials, mel_frames, mel_window, power_spectrum};
 pub use layernorm::{LayerNormKind, layernorm, layernorm_to_f16, layernorm_with};
-pub use guide::guide_peak;
+pub use guide::{guide_peak, product_topk};
 pub use heads::{from_heads, to_heads, to_heads_at};
 pub use llm::{embed_mixed, repeat_heads, rmsnorm_to_f16};
 pub use rmsnorm::{rmsnorm, rmsnorm_naive};

@@ -211,6 +211,29 @@ pub mod device {
     /// Step 1: a warp adds its 32 values with 5 register shuffles (16, 8, 4, 2, 1 lanes apart).
     /// Step 2: lane 0 of each warp writes its sum to shared memory, and a barrier waits.
     /// Step 3: every thread adds the 8 warp sums (all threads read one address: a broadcast).
+    /// The smallest of `v` over all `ROW_BLOCK` threads of the block. As `block_max`, but with
+    /// `warp::reduce_min_f32`. The block must have exactly `ROW_BLOCK` threads.
+    #[device]
+    pub fn block_min(v: f32) -> f32 {
+        static mut WARP_MIN: SharedArray<f32, ROW_WARPS> = SharedArray::UNINIT;
+        let tid = thread::threadIdx_x() as usize;
+        let warp_min = warp::reduce_min_f32(v);
+        if warp::lane_id() == 0 {
+            // SAFETY: only lane 0 of warp k writes slot k, and tid / 32 < ROW_WARPS.
+            unsafe { WARP_MIN[tid / 32] = warp_min };
+        }
+        thread::sync_threads();
+        let mut smallest = f32::INFINITY;
+        let mut i = 0;
+        while i < ROW_WARPS {
+            // SAFETY: the barrier above separates these reads from the writes.
+            smallest = smallest.min(unsafe { WARP_MIN[i] });
+            i += 1;
+        }
+        thread::sync_threads();
+        smallest
+    }
+
     /// Step 4: a second barrier, so a later `block_sum` call cannot overwrite the slots while a
     /// slow warp still reads them.
     ///
@@ -1947,6 +1970,101 @@ pub mod device {
             }
         }
     }
+    /// Product sampling: guided log-probability, the top-k token ids and their values for one
+    /// pair. The host keeps the Gumbel stream and chooses the final token from these values.
+    /// One block owns one pair, with 256 threads and up to five tokens per thread.
+    ///
+    /// # Safety
+    /// `c` and `u` hold `pairs` rows of `width` f32 values, the two halves are at most `vocab`
+    /// wide, and the outputs hold `pairs` confidences and `pairs * k` ids and values. The mask
+    /// id is excluded from the top-k set.
+    #[kernel]
+    pub unsafe fn product_topk_f32(
+        c: *const f32,
+        u: *const f32,
+        conf: *mut f32,
+        ids: *mut i32,
+        vals: *mut f32,
+        pairs: usize,
+        width: usize,
+        vocab: usize,
+        codebooks: usize,
+        mask_id: usize,
+        guidance: f32,
+        k: usize,
+    ) {
+        let pair = thread::blockIdx_x() as usize;
+        if pair >= pairs || codebooks == 0 {
+            return;
+        }
+        let position = pair / codebooks;
+        let codebook = pair % codebooks;
+        let base = position * width + codebook * vocab;
+        let tid = thread::threadIdx_x() as usize;
+        let mut vv = [f32::NEG_INFINITY; 5];
+        let mut ix = [u32::MAX; 5];
+        let mut top_all = f32::NEG_INFINITY;
+        let mut best_real = f32::NEG_INFINITY;
+        unroll!(J in [0, 1, 2, 3, 4] {
+            let v = tid + J * 256;
+            if v < vocab {
+                // SAFETY: v < vocab and the block owns this pair's row.
+                let value = unsafe { (1.0 + guidance) * *c.add(base + v) - guidance * *u.add(base + v) };
+                vv[J] = value;
+                ix[J] = v as u32;
+                top_all = top_all.max(value);
+                if v != mask_id {
+                    best_real = best_real.max(value);
+                }
+            }
+        });
+        let top = block_max(top_all);
+        let best = block_max(best_real);
+        let mut local_sum = 0.0f32;
+        unroll!(J in [0, 1, 2, 3, 4] {
+            if vv[J] != f32::NEG_INFINITY {
+                local_sum += libm::expf(vv[J] - top);
+            }
+        });
+        let total = block_sum(local_sum);
+        if tid == 0 {
+            // SAFETY: pair < pairs and conf has one value per pair.
+            unsafe { *conf.add(pair) = best - (libm::logf(total) + top) };
+        }
+        unroll!(J in [0, 1, 2, 3, 4] {
+            if ix[J] == mask_id as u32 {
+                vv[J] = f32::NEG_INFINITY;
+            }
+        });
+        let mut slot = 0;
+        while slot < k {
+            let mut local = f32::NEG_INFINITY;
+            let mut local_ix = u32::MAX;
+            unroll!(J in [0, 1, 2, 3, 4] {
+                if vv[J] > local {
+                    local = vv[J];
+                    local_ix = ix[J];
+                }
+            });
+            let value = block_max(local);
+            let candidate = if local == value { local_ix as f32 } else { f32::INFINITY };
+            let chosen = block_min(candidate) as u32;
+            if tid == 0 {
+                // SAFETY: slot < k and both output planes have pairs * k values.
+                unsafe {
+                    *ids.add(pair * k + slot) = chosen as i32;
+                    *vals.add(pair * k + slot) = value;
+                }
+            }
+            unroll!(J in [0, 1, 2, 3, 4] {
+                if ix[J] == chosen {
+                    vv[J] = f32::NEG_INFINITY;
+                }
+            });
+            slot += 1;
+        }
+    }
+
     // ---- SwiGLU (lesson 11: docs/cuda-lessons/11-swiglu.md) ----
 
     /// `silu(x) = x / (1 + exp(-x))` in f32. For a very negative `x`, `exp(-x)` is `inf` and

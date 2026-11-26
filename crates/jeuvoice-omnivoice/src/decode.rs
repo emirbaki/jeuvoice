@@ -220,7 +220,8 @@ mod gpu {
     use super::*;
     use crate::{Result, TtsError};
     use jeuvoice_gpu::blas::Blas;
-    use jeuvoice_gpu::Gpu;
+    use jeuvoice_gpu::ops::product_topk;
+    use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu};
 
     use crate::config::OmniVoiceConfig;
     use crate::forward::forward;
@@ -271,11 +272,24 @@ mod gpu {
 
         let counts = schedule(target_len, codebooks, params);
         let width = w.act.logits.shape()[1];
-        let mut y = vec![0.0f32; vocab];
         let mut rng = Rng(params.seed | 1);
         let mut scores = vec![f32::NEG_INFINITY; codebooks * target_len];
         let mut picks = vec![0i32; codebooks * target_len];
         let target = prefix + prompt_len;
+
+        // The top-k filter writes these once per decode and reuses them at every step. The
+        // Gumbel stream stays on the host, so one seed remains repeatable.
+        let top_k = ((vocab as f64 * 0.1).ceil() as usize).max(1);
+        let topk = if params.mode == Mode::Product && params.class_temperature > 0.0 {
+            let pairs = codebooks * target_len;
+            let mut plan = ArenaPlan::new();
+            let conf = plan.add(DType::F32, &[pairs]);
+            let ids = plan.add(DType::I32, &[pairs, top_k]);
+            let vals = plan.add(DType::F32, &[pairs, top_k]);
+            Some((Arena::new(gpu, &plan)?, conf, ids, vals))
+        } else {
+            None
+        };
 
         for step in 0..params.num_step {
             // A step with nothing to unmask needs no pass: the schedule is monotone, so the
@@ -302,30 +316,51 @@ mod gpu {
             mask[..target_len].fill(1);
             forward(w, cfg, gpu, blas, &ids[..codebooks * target_len], &mask[..target_len], 1, target_len, None, None, &mut |_, _, _| {})?;
 
-            if params.mode == Mode::Product && params.class_temperature > 0.0 {
-                // The top-k token sampling needs the full distribution, so this branch (which
-                // the app never takes at variety 0) reads the planes and samples on the host.
-                let cond_rows = download_rows(w, gpu, target, target_len)?;
-                let uncond_rows = download_rows(w, gpu, 0, target_len)?;
-                let (cond, uncond) = (&cond_rows[..], &uncond_rows[..]);
+            if let Some((top_arena, tconf, tids, tvals)) = &topk {
+                // Only the top-k ids and values cross the bus. The engine's Philox stream cannot
+                // be reproduced, so the host applies our seeded Gumbel noise to these values.
+                let pairs = codebooks * target_len;
+                let c_plane = w.act.logits.rows_unaligned(target, target_len);
+                let u_plane = w.act.logits.rows_unaligned(0, target_len);
+                product_topk(
+                    gpu,
+                    &w.arena,
+                    &c_plane,
+                    &u_plane,
+                    top_arena,
+                    tconf,
+                    tids,
+                    tvals,
+                    pairs,
+                    width,
+                    vocab,
+                    codebooks,
+                    mask_id,
+                    params.guidance,
+                    top_k,
+                )?;
+                let conf_values = top_arena.download::<f32>(gpu, tconf)?;
+                let token_ids = top_arena.download::<i32>(gpu, tids)?;
+                let token_vals = top_arena.download::<f32>(gpu, tvals)?;
                 for c in 0..codebooks {
                     for p in 0..target_len {
                         let index = c * target_len + p;
                         if tokens[index] != mask_id as i32 {
                             continue;
                         }
-                        let at = p * width + c * vocab;
-                        let (confidence, token) = sample_row(
-                            &cond[at..at + vocab],
-                            &uncond[at..at + vocab],
-                            params.guidance,
-                            mask_id,
-                            params.class_temperature,
-                            &mut y,
-                            &mut rng,
-                        );
-                        scores[index] = confidence - c as f32 * params.layer_penalty;
-                        picks[index] = token;
+                        let pair = p * codebooks + c;
+                        let at = pair * top_k;
+                        let mut best = f32::NEG_INFINITY;
+                        let mut chosen = token_ids[at];
+                        for j in 0..top_k {
+                            let value = token_vals[at + j] / params.class_temperature + rng.gumbel();
+                            if value > best {
+                                best = value;
+                                chosen = token_ids[at + j];
+                            }
+                        }
+                        scores[index] = conf_values[pair] - c as f32 * params.layer_penalty;
+                        picks[index] = chosen;
                     }
                 }
             }
@@ -393,12 +428,6 @@ mod gpu {
             return Err(TtsError::Render("the decode left masked frames: the schedule did not fill them".into()));
         }
         Ok(Tokens { codebooks, len: target_len, ids: tokens })
-    }
-
-    /// The logits of `rows` positions, `[rows, audio_head_rows]` f32, from `start`.
-    fn download_rows(w: &OmniVoiceWeights, gpu: &Gpu, start: usize, rows: usize) -> Result<Vec<f32>> {
-        let view = w.act.logits.rows_unaligned(start, rows);
-        Ok(w.arena.download_unaligned::<f32>(gpu, &view)?)
     }
 }
 #[cfg(test)]
