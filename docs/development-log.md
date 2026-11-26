@@ -1224,7 +1224,25 @@ Two other options were measured and rejected. Eight keys per tile gave 304 us an
 
 A step now spends 270 + 89 = 359 us in attention over 28 layers, about 10.1 ms, down from 11.7 ms. The warm product decode is still 2.10 s for s1, so the gain stays inside end-to-end clock noise. The quality gate passes: cond argmax 98.7%, 97.7% and 99.0% against engine fp16 floors of 95.4%, 92.7% and 95.5%. Lesson 13 records the numbers and the rejected options.
 
-Remaining option, in brief:
+### CUDA graph prototype (2026-11-26)
 
-1. CUDA graphs could remove launch overhead from the hundreds of small kernels per step. The risks are cuBLAS capture support and the ids buffer that changes each step. A prototype must show a gain before this replaces the current path.
-2. Streaming V from global memory would halve the shared memory again, but registers already cap the block count at three. This needs a prototype before it becomes a work item.
+`Gpu` now owns a private stream from `Context::new_stream()` instead of the legacy default stream. Capture on the default stream returns driver error 900 with the text "operation not permitted when stream is capturing". A fresh stream accepts the same call. All launches already use the single `Gpu` stream, so the change keeps the same order and needs no op changes.
+
+`Graph::capture` records the work of a closure and instantiates an executable. An RAII guard ends an abandoned capture on error or panic. The graph owns its two driver handles and destroys them before the arena can go away.
+
+Two GPU tests failed before they passed. The kernel test used `add_into_f32`, which needs an F16 addend. The capture tests failed with error 900 until `Gpu` moved off the default stream.
+
+The prototype proves three things. A graph replays kernels with new data at the same device addresses. A captured cuBLAS GEMM reads the new operands. A captured real `forward` at `t = 486` gives bit-exact logits, with max absolute difference 0.000000.
+
+Measured GPU time with events:
+
+| Work | Direct | Graph replay | Change |
+|---|---|---|---|
+| 40 kernels + 10 cuBLAS calls, 20 iterations | 342.3 us | **65.9 us** | -81% |
+| one real forward, `t = 486` | 43232.4 us | **42383.4 us** | -2.0% |
+
+The micro bench removes about 5.5 us of host launch cost per call. The forward spends most of its 43 ms in large GEMMs, so the same saving is small. A second run gave 42885.8 us and 42083.2 us, so the run-to-run spread is about 350 us. A decode step runs two forwards and would gain about 1.6 ms, roughly 2.4% of a 2.09 s warm render.
+
+`forward_compute` now exposes the pass without input uploads, so a caller can upload the ids and mask into the fixed arena addresses before each replay. The padded path allocates a scratch arena during enqueue, so capture rejects it; the prototype asserts `valid = None` as production decode uses.
+
+Decision pending. The remaining option is streaming V from global memory, which halves shared memory again but does not lift the three-block register limit.

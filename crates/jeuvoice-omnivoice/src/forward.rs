@@ -36,6 +36,49 @@ pub fn forward(
     head: Option<(usize, usize)>,
     taps: &mut dyn FnMut(&str, &Arena, &Tensor),
 ) -> Result<()> {
+    forward_inner(w, cfg, gpu, blas, ids, audio_mask, rows, t, valid, head, taps, false)
+}
+
+/// The same pass without the input uploads. Use this inside a CUDA graph capture. The caller
+/// uploads the ids and the mask into the arena before every replay. The captured nodes then
+/// read the fixed device addresses of the arena. `valid` must be `None`, because the padded
+/// path allocates a scratch arena while it enqueues.
+///
+/// This function does not check the ids and the mask. The caller must check them with
+/// `inputs::check` before the first enqueue, as `forward` does.
+///
+/// # Panics
+/// On a padded pass, which cannot be captured.
+#[allow(clippy::too_many_arguments)]
+pub fn forward_compute(
+    w: &crate::weights::OmniVoiceWeights,
+    cfg: &OmniVoiceConfig,
+    gpu: &Gpu,
+    blas: &Blas,
+    rows: usize,
+    t: usize,
+    head: Option<(usize, usize)>,
+    taps: &mut dyn FnMut(&str, &Arena, &Tensor),
+) -> Result<()> {
+    let empty = [];
+    forward_inner(w, cfg, gpu, blas, &empty, &empty, rows, t, None, head, taps, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forward_inner(
+    w: &crate::weights::OmniVoiceWeights,
+    cfg: &OmniVoiceConfig,
+    gpu: &Gpu,
+    blas: &Blas,
+    ids: &[i32],
+    audio_mask: &[i32],
+    rows: usize,
+    t: usize,
+    valid: Option<&[i32]>,
+    head: Option<(usize, usize)>,
+    taps: &mut dyn FnMut(&str, &Arena, &Tensor),
+    skip_uploads: bool,
+) -> Result<()> {
     let ar = &w.arena;
     let a = &w.act;
     if rows == 0 || t == 0 {
@@ -62,7 +105,9 @@ pub fn forward(
         vocab: cfg.vocab_size,
         audio_vocab: cfg.audio_vocab_size,
     };
-    crate::inputs::check(ids, audio_mask, rows, t, limits, valid)?;
+    if !skip_uploads {
+        crate::inputs::check(ids, audio_mask, rows, t, limits, valid)?;
+    }
     // The tensors are planned for the longest pass, so the slices are prefixes of them.
     let ids_all = a.ids.prefix_as(&[rows * codebooks, t]);
     let q_all = a.q.prefix_as(&[rows, hq, t, hd]);
@@ -70,8 +115,10 @@ pub fn forward(
     let v_all = a.v.prefix_as(&[rows, hkv, t, hd]);
     let att_all = a.att.prefix_as(&[rows, hq, t, hd]);
     let mask_all = a.mask.prefix_as(&[rows, t]);
-    ar.upload(gpu, &ids_all, ids)?;
-    ar.upload(gpu, &mask_all, audio_mask)?;
+    if !skip_uploads {
+        ar.upload(gpu, &ids_all, ids)?;
+        ar.upload(gpu, &mask_all, audio_mask)?;
+    }
     let padded = valid.is_some();
     // Only the padded reference path needs the score plane. Production uses flash attention and
     // keeps this 67 MB tensor out of the model arena. The test path allocates it once per pass.

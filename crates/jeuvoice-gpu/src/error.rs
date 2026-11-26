@@ -16,6 +16,8 @@ pub enum GpuError {
     Driver(String),
     /// cuBLAS could not be loaded, or a cuBLAS call failed.
     Blas(String),
+    /// CUDA graph capture, instantiation or replay failed.
+    Graph(String),
 }
 
 const MB: u64 = 1024 * 1024;
@@ -39,6 +41,10 @@ impl fmt::Display for GpuError {
             ),
             Self::Driver(e) => write!(f, "The graphics card reported an error: {e}"),
             Self::Blas(e) => write!(f, "The cuBLAS library failed: {e}"),
+            Self::Graph(e) => write!(
+                f,
+                "The graphics card could not record or replay GPU work ({e}). Check that the work does not wait for the card, allocate memory or use changing host pointers."
+            ),
         }
     }
 }
