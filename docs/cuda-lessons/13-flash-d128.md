@@ -49,9 +49,9 @@ Ders 5'teki `flash_attn_tc_f16` (d=64) temel alındı. Aynı iskelet: blok baş�
 2. **Her `ldmatrix_x4` 32 boyut kapsıyor**, 128 boyut için dört grup: sütun 0, 32, 64, 96. Skor için `s += qa[ks]·b0[ks] + qa[ks+4]·b1[ks] + qa[ks+8]·b2[ks] + qa[ks+12]·b3[ks]`.
 3. **16 O akümülatörü** (d64'te 8): `o[dt]` her biri 4 f32, `dt = 0..15`. `V` için `ldmatrix_x4_trans` yine dört grupta okunur.
 
-Kayıt bütçesi: `qa` 32, `o` 64, `s` 16, `m/l` 4, adresler ve indeksler ~30 → **yaklaşık 150 kayıt/thread**. PTX'te `ld.local` ve `st.local` **sıfır** (bu şart: ders 5'te local memory'ye taşma 7,5 kat yavaşlatmıştı; tüm fragment ve akümülatör dizileri `unroll!` ile sabit indekslenir).
+`ptxas -v -arch=sm_75` ölçümü: **202 kayıt/thread**, 17,4 KB shared memory, sıfır spill. PTX'te `ld.local` ve `st.local` **sıfır** (bu şart: ders 5'te local memory'ye taşma 7,5 kat yavaşlatmıştı; tüm fragment ve akümülatör dizileri `unroll!` ile sabit indekslenir). Dizilerin boyutundan yapılan ~150 kayıt tahmini dört `ldmatrix` fragmentini kaçırmış; ölçüm esas alınmalı.
 
-Shared memory: `K` ve `V` dilimleri `32 × (128 + 8)` f16 = 8,7 KB, ikisi 17,4 KB. 150 kayıt ve 17,4 KB ile SM başına **3 blok** (12 warp) sığar: %19 doluluk.
+Shared memory: `K` ve `V` dilimleri `32 × (128 + 8)` f16 = 8,7 KB, ikisi 17,4 KB. 202 × 128 = 25.856 kayıt ile SM başına **2 blok** (8 warp) sığar: %12,5 doluluk.
 
 Ölçüm:
 
@@ -64,29 +64,48 @@ Shared memory: `K` ve `V` dilimleri `32 × (128 + 8)` f16 = 8,7 KB, ikisi 17,4 K
 
 İlk deneme 32 anahtar/dilim. "Daha büyük dilim, daha az bariyer" hipoteziyle 64 denendi: shared memory 34,8 KB olur, SM başına **1 blok** kalır (12 warp → 4 warp).
 
-Ölçüm: 486'da 331 µs (fark yok), 214'te 103 µs (32'lik dilimle aynı, ilk ölçümlerdeki 95 µs'e göre kötü). Karar: **32 kalır**. Bu derste d64'ün 64 anahtarı iyiydi; d128'de aynı sayı shared memory'yi ikiye katlıyor ve doluluğu öldürüyor. Sayılar boyuta bağlı, kural değil.
+Ölçüm: 486'da 331 µs (fark yok), 214'te 103 µs (32'lik dilimle aynı, ilk ölçümlerdeki 95 µs'e göre kötü). O zamanki karar: **32 kalır**. Bu derste d64'ün 64 anahtarı iyiydi; d128'de aynı sayı shared memory'yi ikiye katlıyor ve doluluğu öldürüyor. Sayılar boyuta bağlı, kural değil. 4d bu kararı geri çevirdi.
 
 ### 4c. Tuzak: ölçek
 
 İlk sürüm `ATTN_SCALE` (yani `1/√64 = 0.125`) kullanıyordu. 128 genişliğinde doğrusu `1/√128 = 0.0884`. Test bunu yakaladı: `mean_abs 0.011`, `max_abs 0.083`, yani sonuç "neredeyse doğru" görünüyordu. Skorlar %41 büyük olunca softmax sivrileşiyor ve düşük ağırlıklı değerler kayıyor. Denklem: `softmax(a·s)` ile `softmax(s)` aynı değildir; hata mesajı vermez, sadece kaliteyi düşürür.
 
+### 4d. Anahtar dilimi 16: 323 → 270 µs
+
+32 anahtar/dilimde `ptxas` 202 kayıt ve 17,4 KB shared veriyor. Bu, SM başına 2 blok (8 warp) demek. Dilimi 16'ya indirince `s` dizisi dört yerine iki `[f32;4]` bloğu tutuyor. `unroll!(NT)` listeleri de `[0,1,2,3]` yerine `[0,1]` oluyor; kaynak koddaki yorum bu bağımlılığı belgeliyor. Listelerden biri bile eski kalırsa derleme "index out of bounds" hatası veriyor.
+
+`ptxas -v` ile yeni değerler: **164 kayıt**, 8,7 KB shared, sıfır spill. 164 × 128 × 3 ≈ 63 bin kayıt ile SM başına 3 blok (12 warp) sığar. Doluluk %12,5'ten %18,75'e çıkar.
+
+| Konum | 32 anahtar | 16 anahtar | Kazanç |
+|---|---|---|---|
+| 486 | 323 µs (6,0 TF/s) | **270 µs** (7,2 TF/s) | −%16 |
+| 214 | 94 µs (4,0 TF/s) | **89 µs** (4,2 TF/s) | −%6 |
+
+İki deneme daha yapıldı:
+
+- **8 anahtar/dilim**: 486'da 304 µs, 214'te 92 µs. Kayıt daha da azaldı ama dış döngü iki katına çıktı; ek bariyerler kazancı yedi.
+- **128 satır, 256 thread**: 486'da 372 µs, 214'te 102 µs. Blok başına warp 8'e çıktı ama SM başına 1 blok kaldı.
+
+Kural: d128'de 16 anahtar, kayıt ile bariyer arasındaki denge noktası. 214 şeklindeki 5 µs'lik fark saat gürültüsü sınırında; karar 486 şeklindeki %16'lık farkla verildi.
+
 ## 5. Kartın sınırı ve ne kadar yaklaştık
 
-Zirve 15,2 TF/s; flash 5,8 TF/s ile %38'inde. Kalan boşluğun üç sebebi:
+Zirve 15,2 TF/s; flash 7,2 TF/s ile %47'sinde. Kalan boşluğun üç sebebi:
 
-1. **Doluluk**: SM başına 12 warp (64'ün %19'u). 3 blok sınırını kayıtlar belirliyor (150 × 128 × 3 ≈ 57,6 bin kayıt).
+1. **Doluluk**: SM başına 12 warp (64'ün %19'u). 3 blok sınırını kayıtlar belirliyor (164 × 128 × 3 ≈ 63 bin kayıt).
 2. **Bariyer**: her dilimde `sync_threads`, ardından çevrimiçi softmax'ın sıralı zinciri (`max → shuffle → exp → shuffle → ölçekle`) iki mma grubunu birbirinden ayırıyor. Bu zincir sırasında tensor çekirdekleri boş.
 3. **K/V yeniden okuma**: her satır bloğu kendi kafasının bütün K/V'sini okur: 8 satır bloğu × 249 KB × 16 kafa = 32 MB (dilim başına). 4 MB L2 bunun çoğunu tutar (aynı kafanın 8 bloğu arka arkaya çalışır), ama yine de bellek yolunu kullanır.
 
-Bir adımın payı: 323 + 94 = 417 µs × 28 katman = **11,7 ms**; eskiden 468 + 164 = 632 µs × 28 = 17,7 ms. Yani adım başına ~6 ms, 32 adımda **~0,19 s** kazanç. Son 10 µs ve 323 µs, paket 1'in `rcp.approx.f32` değişikliğinden geliyor (`div.rn` yerine tek komut).
+Bir adımın payı: 270 + 89 = 359 µs × 28 katman = **10,1 ms**; eskiden 468 + 164 = 632 µs × 28 = 17,7 ms. Yani adım başına ~7,6 ms, 32 adımda **~0,24 s** kazanç. 323 µs'den 270 µs'ye düşüş 4d'deki anahtar dilimi değişikliğinden, 333 µs'den 323 µs'ye düşüş ise paket 1'in `rcp.approx.f32` değişikliğinden geliyor (`div.rn` yerine tek komut).
 
 ## 6. PTX ve Nsight'ta neye bakmalı
 
 PTX (`target\oxide-ptx\jeuvoice_gpu.ptx`):
 
 - `flash_attn_tc128_f16` içinde **`ld.local` ve `st.local` sayısı 0 olmalı**. Bir tane bile varsa `o[16]` veya `qa[16]` local memory'ye düşmüş demektir; `unroll!` listelerini ve döngüleri kontrol et.
-- `mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32` sayısı: dilim başına 128 (skor 64, P·V 64). 16 k adımı olması d64'ün 4 katı.
-- `ldmatrix.sync.aligned.m8n8.x4.shared.b16` (K için) ve `.trans` (V için) dörder kez.
+- `mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32` sayısı: dilim başına 32 (skor 16, P·V 16). 16 k adımı d64'ün 4 katı, ama 2 NT fragmenti sayesinde toplam d64'ün 2 katı.
+- `ldmatrix.sync.aligned.m8n8.x4.shared.b16` (K için) ve `.trans` (V için) ikişer kez.
+- `ptxas -v -arch=sm_75 target\oxide-ptx\jeuvoice_gpu.ptx`: 164 kayıt, 8,7 KB smem, sıfır spill. 202 kayıt görürsen 32 anahtarlı eski sürüm derlenmiş demektir.
 
 Nsight Compute:
 
@@ -94,16 +113,16 @@ Nsight Compute:
 ncu --set full -k regex:flash_attn_tc128 -c 2 target\release\gpu-bench.exe attn_p5
 ```
 
-- **Tensor (SM) Throughput**: ~%38. Zirvenin yarısına bile gelmiyoruz; sebep 1 ve 2.
-- **Occupancy**: 12 warp / 64 → "%18,75". `launch__registers_per_thread` ~150 çıkar.
-- **Warp State → Barrier**: `sync_threads` beklemesi. Anahtar dilimini büyütmek bunu azaltır ama doluluğu düşürür (4b).
+- **Tensor (SM) Throughput**: ~%47. Zirvenin yarısına yaklaştık; kalan boşluğun sebebi 1 ve 2.
+- **Occupancy**: 12 warp / 64 → "%18,75". `launch__registers_per_thread` 164 çıkar.
+- **Warp State → Barrier**: `sync_threads` beklemesi. Anahtar dilimini büyütmek bunu azaltır ama kayıtları artırıp doluluğu düşürür (4b ve 4d).
 - **Memory Workload Analysis → L2 Hit Rate**: K/V için yüksek olmalı; düşükse blok sıralaması bozulmuş demektir.
 
 ## 7. Alıştırmalar
 
 1. **Satır başına 32 sorgu.** `FT8_ROWS = 128` ve warp başına 2 satır bloğu (32 satır). Kayıt ~210'a çıkar, SM başına 1 blok kalır. K/V okuması yarıya iner; süre ne olur? Ölç.
-2. **8 warp, 128 satır.** `FT8_THREADS = 256`, `FT8_ROWS = 128`. Kayıt/thread aynı kalır, SM başına 1 blok (8 warp) olur. Doluluk 12 warp'tan 8'e iner; bariyer maliyeti yarıya iner. Hangisi kazanır?
-3. **Dilim 16.** `FT8_KEYS = 16`: shared 8,7 KB, daha çok bariyer, daha iyi doluluk. 214 konumda (7 dilim yerine 14) nasıl?
+2. **8 warp, 128 satır.** `FT8_THREADS = 256`, `FT8_ROWS = 128`. Ölçüldü: 486'da 372 µs, 214'te 102 µs. Kayıt/thread aynı kaldı ama blok başına iş iki katına çıktı ve SM başına 1 blok kaldı. 64 satır düzeni kazanır.
+3. **Dilim 16.** `FT8_KEYS = 16` ölçüldü: 486'da 270 µs, 214'te 89 µs (4d). Shared 8,7 KB, kayıt 164, SM başına 3 blok. Daha çok bariyer, daha iyi doluluk kazandı.
 4. **Ölçeği unut.** `scale` parametresini 1,0 yap ve testin hangi eşikte patladığını gör. Bu, 4c'deki hatanın neden sessiz olduğunu gösterir.
 5. **Maske ekle.** İki yönlü attention'da `valid` (kısa satır) maskesi ekle: satır `valid`'den sonra yalnız kendini görmeli (ders 12). Bunu flash'ta yapmak, grup yolu korumaktan daha mı kolay?
-6. **K'yı shared'da tut, V'yi akıt.** V dilimini shared'a koymadan doğrudan global'den oku (her P·V adımında 32 anahtar). Shared yarıya iner, SM başına 6 blok sığar. Bant genişliği mi, doluluk mu kazanır?
+6. **K'yı shared'da tut, V'yi akıt.** V dilimini shared'a koymadan doğrudan global'den oku (her P·V adımında 16 anahtar). Shared 4,3 KB'a iner ama 164 kayıt yine 3 blok sınırı koyar. Bant genişliği mi, doluluk mu kazanır?

@@ -35,10 +35,10 @@ pub const FTC_THREADS: u32 = 128;
 /// The shared row stride of the K and V tiles: 64 + 8 halfs (144 bytes, a multiple of 16).
 const FTC_LD: usize = FLASH_D + 8;
 /// The head width of the OmniVoice attention (Qwen3) and the shape of its tensor-core flash
-/// kernel: 128 values per head, 64 query rows per block (4 warps of 16), 32 keys per tile.
+/// kernel: 128 values per head, 64 query rows per block (4 warps of 16), 16 keys per tile.
 pub const FT8_D: usize = 128;
 pub const FT8_ROWS: usize = 64;
-pub const FT8_KEYS: usize = 32;
+pub const FT8_KEYS: usize = 16;
 pub const FT8_THREADS: u32 = 128;
 /// 128 + 8 halfs is 272 bytes, a multiple of 16 (ldmatrix) and 68 words, so each row of the
 /// tiles moves 4 memory banks and the eight rows of an `ldmatrix` hit eight different banks.
@@ -3181,9 +3181,9 @@ pub mod device {
 
             // 3. S = Q·Kᵀ: FT8_KEYS / 8 key tiles of 8, each over the 16 head-dim steps.
             let mut s = [[0.0f32; 4]; FT8_KEYS / 8];
-            unroll!(NT in [0, 1, 2, 3] {
+            unroll!(NT in [0, 1] {
                 let kr = NT * 8 + (lane % 8);
-                // SAFETY: kr < 32 and the columns stay inside the 128 head dims of the row.
+                // SAFETY: kr < FT8_KEYS and the columns stay inside the 128 head dims of the row.
                 // Every lane reaches these calls.
                 let (b0, b1, b2, b3) = unsafe {
                     (
@@ -3207,7 +3207,7 @@ pub mod device {
             // 4. The online softmax, per row half H (row g + 8H).
             unroll!(H in [0, 1] {
                 let mut mx = f32::NEG_INFINITY;
-                unroll!(NT in [0, 1, 2, 3] {
+                unroll!(NT in [0, 1] {
                     unroll!(JJ in [0, 1] {
                         let key = key0 + NT * 8 + 2 * tt + JJ;
                         let val = if key < seq { s[NT][2 * H + JJ] * scale } else { f32::NEG_INFINITY };
@@ -3221,7 +3221,7 @@ pub mod device {
                 // exp(-inf) = 0: the first tile drops the empty start values.
                 let alpha = libm::expf(m[H] - m_new);
                 let mut sum = 0.0f32;
-                unroll!(NT in [0, 1, 2, 3] {
+                unroll!(NT in [0, 1] {
                     unroll!(JJ in [0, 1] {
                         let p = libm::expf(s[NT][2 * H + JJ] - m_new);
                         s[NT][2 * H + JJ] = p;
@@ -3239,10 +3239,10 @@ pub mod device {
             });
 
             // 5. O += P·V. Key tile NT is one k step: P from the S registers is its A fragment.
-            unroll!(NT in [0, 1, 2, 3] {
+            unroll!(NT in [0, 1] {
                 let pa = [pack_h2(s[NT][0] as f16, s[NT][1] as f16), pack_h2(s[NT][2] as f16, s[NT][3] as f16)];
                 let vr = NT * 8 + (lane % 8);
-                // SAFETY: vr < 32 and the columns stay inside the row. Every lane reaches these.
+                // SAFETY: vr < FT8_KEYS and the columns stay inside the row. Every lane reaches these.
                 let (vb0, vb1, vb2, vb3) = unsafe {
                     (
                         cuda_device::wmma::ldmatrix_x4_trans(sv.add(vr * FT8_LD + (lane / 8) * 8) as *const u32),

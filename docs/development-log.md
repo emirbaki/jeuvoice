@@ -1207,7 +1207,24 @@ Flash attention does not write the score plane. The grouped path needs it only f
 
 The real weight test now reports weights 1225 MB, activations **168 MB** and arena **1393 MB**, down from 235 MB and 1460 MB. A new assertion keeps activations below 200 MB so the score plane cannot return unnoticed. The padded reference test still matches both logit rows.
 
-Remaining options, in brief:
+### Flash d128 occupancy (2026-11-26)
 
-1. Flash d128 keeps 12 of 64 warps and about 150 registers per thread. A 128-row block with 8 warps, 32 rows per warp at about 210 registers, 16 keys per tile, or V streamed from global memory are the candidates. Each needs a before and after at `t = 486` and on the whole step.
-2. CUDA graphs could remove launch overhead from the hundreds of small kernels per step. The risks are cuBLAS capture support and the ids buffer that changes each step. A prototype must show a gain before this replaces the current path.
+The key tile fell from 32 to 16. `FT8_KEYS` drives four `unroll!(NT in ...)` lists in the kernel. The first build failed with a compile-time `index out of bounds`: two softmax loops still used four tiles while the score array had two. All four lists now follow the constant.
+
+`ptxas -v -arch=sm_75` gives the reason for the gain. The 32-key build uses **202 registers** and 17408 bytes of shared memory, so two blocks fit per SM and eight warps run. The 16-key build uses **164 registers** and 8704 bytes, so three blocks and twelve warps run. The earlier estimate of 150 registers was wrong; it missed the four `ldmatrix` fragments. There are no spills and no `ld.local` in either build.
+
+Isolated bench at the two production shapes:
+
+| Kernel | Before | After |
+|---|---|---|
+| `attn_p5_flash128`, 486 | 323 us | **270 us** (7.2 TF/s, 47%) |
+| `attn_p5_flash128`, 214 | 94 us | **89 us** (4.2 TF/s, 28%) |
+
+Two other options were measured and rejected. Eight keys per tile gave 304 us and 92 us: the outer loop doubled and the extra barriers ate the register gain. A 128-row block with 256 threads gave 372 us and 102 us: one block per SM remained. The 64-row, 128-thread layout stays.
+
+A step now spends 270 + 89 = 359 us in attention over 28 layers, about 10.1 ms, down from 11.7 ms. The warm product decode is still 2.10 s for s1, so the gain stays inside end-to-end clock noise. The quality gate passes: cond argmax 98.7%, 97.7% and 99.0% against engine fp16 floors of 95.4%, 92.7% and 95.5%. Lesson 13 records the numbers and the rejected options.
+
+Remaining option, in brief:
+
+1. CUDA graphs could remove launch overhead from the hundreds of small kernels per step. The risks are cuBLAS capture support and the ids buffer that changes each step. A prototype must show a gain before this replaces the current path.
+2. Streaming V from global memory would halve the shared memory again, but registers already cap the block count at three. This needs a prototype before it becomes a work item.
