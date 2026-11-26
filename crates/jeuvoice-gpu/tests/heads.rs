@@ -85,6 +85,28 @@ fn the_block_of_a_wide_row_reaches_the_head_layout() {
     assert!(after.iter().all(|v| v.to_f32() == 7.5), "to_heads_at wrote past the end of dst");
 }
 
+/// `from_heads` owns only its destination view. A tiny shape rounds the grid up to a whole
+/// block, and the canary directly after the view must keep its value.
+#[test]
+fn from_heads_writes_only_its_view() {
+    let gpu = Gpu::open(0).unwrap();
+    let (batches, t, heads, d) = (1usize, 3usize, 2usize, 4usize);
+    let n = batches * heads * t * d;
+    let mut plan = ArenaPlan::new();
+    let heads4 = plan.add(DType::F16, &[batches, heads, t, d]);
+    let back = plan.add(DType::F16, &[batches * t, heads * d]);
+    let canary = plan.add(DType::F16, &[512]);
+    let arena = Arena::new(&gpu, &plan).unwrap();
+    arena.upload(&gpu, &heads4, &vec![f16::from_f32(2.5); n]).unwrap();
+    arena.upload(&gpu, &canary, &vec![f16::from_f32(9.25); 512]).unwrap();
+
+    from_heads(&gpu, &arena, &heads4, &back, batches, t, heads, d).unwrap();
+    let got = arena.download::<f16>(&gpu, &back).unwrap();
+    assert!(got.iter().all(|v| v.to_f32() == 2.5), "from_heads missed a value");
+    let after = arena.download::<f16>(&gpu, &canary).unwrap();
+    assert!(after.iter().all(|v| v.to_f32() == 9.25), "from_heads wrote past the end of dst");
+}
+
 /// A block that leaves its row is a programming error, not a silent read of the neighbor row.
 #[test]
 #[should_panic(expected = "pass the end of the row")]

@@ -56,6 +56,8 @@ Bir render: 32 × 77,4 ms ≈ 2,5 s ileri geçiş (iki geçiş: 486 + 214) + ~0,
 
 İki komşu sorgu kafası tek anahtar kafasını paylaşır ve bellekte bitişiktir. Bir anahtar kafası için `M = 2T` tek GEMM, K/V kopyası yok. **Ama dolgu maskesinin grid'i tüm skor düzlemini kapsamalıdır** (`b·hq`, `b·h_kv` değil): ilk denemede yarısı maskelenmedi ve yalnız koşulsuz satır bozuldu (%23.8). Ders: dolgu kuralı "görünmez" değil, hesaplanan değeri değiştirir.
 
+Ölçüm yöntemi notu: buradaki 708,7 ve 1021,3 µs, geçişin içinde ölçüldü. İzole bench aynı kernel için 881,7 ve 1297,4 µs verir. Fark iki yöntemden gelir. İzole bench her çağrıyı soğuk cache ile başlatır. Geçiş içi ölçüm sıcak cache görür. Saat hızı da süreçler arasında değişir. İki sayıyı karşılaştırırken aynı yöntemi kullan.
+
 ### 4.4 Gereksiz işi at (4.32 → 4.23 s)
 
 Açılmış konum için guided peak yok (%16.27 daha az çağrı), `k = 0` adımda geçiş yok, koşullu ve koşulsuz logit satırları bitişik olduğu için tek indirme.
@@ -78,7 +80,7 @@ RTX 3050 Ti Laptop, 192 GB/s, 15.2 TFLOP/s fp16.
 | audio head (972 × 8200 × 1024) | ~1.0-1.35 ms |
 | **iki geçiş, ölçülen** | **77,4 ms** |
 
-Bench'ler her kerneli soğuk cache ile çağırır; toplamları ölçülen geçişten büyüktür. Ölçülen geçiş 2,3 s ölçütü için 32 × 72 ms olmalı; bugün 77,4 ms. Kalan iş: dolgulu koşulsuz satırı kaldırmak (700 satır, %28 az lineer iş) ve attention'ı d128 flash ile skor düzlemini yazmadan yapmak.
+Bench'ler her kerneli soğuk cache ile çağırır; toplamları ölçülen geçişten büyüktür. Bu tablo E1-A ve P5 öncesindendir. İki ayrı geçiş ve d128 flash ile adım 66-67 ms'ye indi. CUDA graph replay'i de launch yükünü azalttı. Sıcak product decode bugün 2,04 s; hedef 2,3 s.
 
 ## 6. PTX ve Nsight'ta neye bakmalı
 

@@ -1,6 +1,6 @@
 # Phase 2: OmniVoice main model (Qwen3 backbone and masked iterative decoding) — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:executing-plans (or superpowers:subagent-driven-development) to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:executing-plans (or superpowers:subagent-driven-development) to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** the OmniVoice text-to-speech *main model* runs on the Rust kernels: text and an optional voice prompt in, **audio tokens** out (8 codebooks, 25 frames per second), with the same tokens as the Python engine and faster than it. The audio decoder (tokens to a waveform) is Phase 3, so Phase 2 produces tokens and a reference comparison, not a WAV file.
 
@@ -77,6 +77,8 @@ Decided with the user before Task 1. The numbers below are the starting proposal
 
 ## Tasks
 
+All twelve tasks are complete on branch `rust-cuda-phase2`. Two goals were changed with the user's approval during the work. Criterion 1 uses a relative quality gate against the engine's own fp16 error instead of exact token equality, because fp16 arithmetic changes reorder near ties. Task 10 uses the frame count and a relative token-share gate instead of a 99% share, for the same reason. The final numbers are in `docs/development-log.md`.
+
 ### Task 1: Baseline and reference fixtures
 
 **Files:** `tools/reference/omnivoice_reference.py` (new), `tools/reference/README.md`, `scripts/tts-baseline.ps1` (new).
@@ -87,9 +89,9 @@ Decided with the user before Task 1. The numbers below are the starting proposal
 - `scripts/tts-baseline.ps1` prints the engine's wall time per render and the peak VRAM of the card, in the shape of `scripts/compare-whisper.ps1`.
 
 **Steps:**
-- [ ] **Step 1:** Write the tool. It sets the model config to the deterministic schedule and records every step's chosen positions and logits.
-- [ ] **Step 2:** Make the fixtures for the prompt and the 3 texts, and the product-mode record. Write the numbers into `docs/development-log.md`.
-- [ ] **Step 3:** Commit `feat(tts): add the OmniVoice reference tool and the baseline`.
+- [x] **Step 1:** Write the tool. It sets the model config to the deterministic schedule and records every step's chosen positions and logits.
+- [x] **Step 2:** Make the fixtures for the prompt and the 3 texts, and the product-mode record. Write the numbers into `docs/development-log.md`.
+- [x] **Step 3:** Commit `feat(tts): add the OmniVoice reference tool and the baseline`.
 
 ### Task 2: The crate, the config and the weight index
 
@@ -101,9 +103,9 @@ Decided with the user before Task 1. The numbers below are the starting proposal
 - A check for the model variant, as `check_large_v3_turbo` does for Whisper: 28 layers, hidden 1024, 8 codebooks, vocab 151676, or a plain `ModelLoad` error.
 
 **Steps:**
-- [ ] **Step 1: Failing tests** `config_from_the_real_file`, `a_wrong_model_is_rejected`, `the_index_finds_every_tensor`.
-- [ ] **Step 2:** Implement, run the tests with `-- --ignored` (the files are on this machine only).
-- [ ] **Step 3:** Commit `feat(tts): read the OmniVoice config and tensor index`.
+- [x] **Step 1: Failing tests** `config_from_the_real_file`, `a_wrong_model_is_rejected`, `the_index_finds_every_tensor`.
+- [x] **Step 2:** Implement, run the tests with `-- --ignored` (the files are on this machine only).
+- [x] **Step 3:** Commit `feat(tts): read the OmniVoice config and tensor index`.
 
 ### Task 3: RoPE and per-head RMSNorm (lesson 10)
 
@@ -114,9 +116,9 @@ Decided with the user before Task 1. The numbers below are the starting proposal
 - `ops::rmsnorm_rows_f16(gpu, arena, x /*[rows, 128]*/, w /*[128] F32*/, eps)` in place, for q-norm and k-norm per head.
 
 **Steps:**
-- [ ] **Step 1: Failing tests** against a CPU f64 reference (positions 0, 1, 7, 200; a non-zero row offset).
-- [ ] **Step 2:** Implement; measure with `gpu-bench` rows `rope_f16 250x16x128` and `rmsnorm_rows_f16 4000x128`; write lesson 10.
-- [ ] **Step 3:** Commit `feat(gpu): add RoPE and per-head RMSNorm with lesson 10`.
+- [x] **Step 1: Failing tests** against a CPU f64 reference (positions 0, 1, 7, 200; a non-zero row offset).
+- [x] **Step 2:** Implement; measure with `gpu-bench` rows `rope_f16 250x16x128` and `rmsnorm_rows_f16 4000x128`; write lesson 10.
+- [x] **Step 3:** Commit `feat(gpu): add RoPE and per-head RMSNorm with lesson 10`.
 
 ### Task 4: SwiGLU (lesson 11)
 
@@ -125,9 +127,9 @@ Decided with the user before Task 1. The numbers below are the starting proposal
 **Interfaces:** `ops::swiglu_f16(gpu, arena, gate: &Tensor /*[rows, 3072]*/, up: &Tensor, out: &Tensor)` with `out = silu(gate) · up`, `silu(x) = x / (1 + exp(-x))`, f32 math. In place on `gate` when the caller allows it.
 
 **Steps:**
-- [ ] **Step 1: Failing test** against a CPU f64 reference, and the values `±20`, `0` (no overflow in `exp`).
-- [ ] **Step 2:** Implement, bench `swiglu_f16 250x3072` against the memory limit, write lesson 11.
-- [ ] **Step 3:** Commit `feat(gpu): add SwiGLU with lesson 11`.
+- [x] **Step 1: Failing test** against a CPU f64 reference, and the values `±20`, `0` (no overflow in `exp`).
+- [x] **Step 2:** Implement, bench `swiglu_f16 250x3072` against the memory limit, write lesson 11.
+- [x] **Step 3:** Commit `feat(gpu): add SwiGLU with lesson 11`.
 
 ### Task 5: The audio embedding gather
 
@@ -136,8 +138,8 @@ Decided with the user before Task 1. The numbers below are the starting proposal
 **Interfaces:** `ops::embed_audio_sum_f16(gpu, arena, ids: &Tensor /*I32 [8, T]*/, table: &Tensor /*[8200, 1024] F16*/, out: &Tensor /*[T, 1024] F16*/)`: `out[t] = Σ_c table[ids[c][t] + 1025·c]`.
 
 **Steps:**
-- [ ] **Step 1: Failing test** against a CPU f64 reference, including the mask id and the codebook offset.
-- [ ] **Step 2:** Implement, bench, commit `feat(gpu): add the 8-codebook audio embedding`.
+- [x] **Step 1: Failing test** against a CPU f64 reference, including the mask id and the codebook offset.
+- [x] **Step 2:** Implement, bench, commit `feat(gpu): add the 8-codebook audio embedding`.
 
 ### Task 6: Weights, the LoRA merge and the arenas
 
@@ -149,9 +151,9 @@ Decided with the user before Task 1. The numbers below are the starting proposal
 - One arena: weights, then activations for one pass (the plan sizes them from `T_max = 1024`).
 
 **Steps:**
-- [ ] **Step 1: Failing test** `merge_lora_on_a_small_matrix` (a hand-computed 2×2 case) and `a_missing_adapter_tensor_is_an_error`.
-- [ ] **Step 2:** Implement, measure the load time and the arena bytes; write both into the development log.
-- [ ] **Step 3:** Commit `feat(tts): load the OmniVoice weights and merge the LoRA adapter`.
+- [x] **Step 1: Failing test** `merge_lora_on_a_small_matrix` (a hand-computed 2×2 case) and `a_missing_adapter_tensor_is_an_error`.
+- [x] **Step 2:** Implement, measure the load time and the arena bytes; write both into the development log.
+- [x] **Step 3:** Commit `feat(tts): load the OmniVoice weights and merge the LoRA adapter`.
 
 ### Task 7: The forward pass, layer by layer
 
@@ -160,9 +162,9 @@ Decided with the user before Task 1. The numbers below are the starting proposal
 **Interfaces:** `Forward::run(&mut self, ids: &Tensor /*[8, T]*/, positions: &Tensor, out_hidden: &Tensor /*[T, 1024]*/) -> Result<(), Error>`, and `Forward::logits(&mut self, hidden: &Tensor /*[T, 1024]*/, out: &Tensor /*[T, 8200] F32*/)`.
 
 **Steps:**
-- [ ] **Step 1: Failing test** `hidden_matches_the_reference_layer_by_layer`: the taps of Task 1 against our hidden states after the embedding, after layer 0, 13 and 27, with `Tol { abs: 2e-2, rel: 2e-2 }` to start; print each difference.
-- [ ] **Step 2:** Implement layer by layer, run the test after each layer, fix the first layer that is out before going on.
-- [ ] **Step 3:** Commit `feat(tts): run the OmniVoice forward pass on the GPU`.
+- [x] **Step 1: Failing test** `hidden_matches_the_reference_layer_by_layer`: the taps of Task 1 against our hidden states after the embedding, after layer 0, 13 and 27, with `Tol { abs: 2e-2, rel: 2e-2 }` to start; print each difference.
+- [x] **Step 2:** Implement layer by layer, run the test after each layer, fix the first layer that is out before going on.
+- [x] **Step 3:** Commit `feat(tts): run the OmniVoice forward pass on the GPU`.
 
 ### Task 8: Bidirectional GQA attention at head width 128
 
@@ -171,9 +173,9 @@ Decided with the user before Task 1. The numbers below are the starting proposal
 **Interfaces:** `ops::attention_gqa(gpu, arena, blas, q /*[16, T, 128]*/, k /*[8, T, 128]*/, v, out, scratch, kind)`: q head `h` reads kv head `h / 2`, no causal mask, an optional padding mask that lets a pad row see only itself.
 
 **Steps:**
-- [ ] **Step 1: Failing test** against a CPU f64 reference at `T = 37` and `T = 300`; and the existing encoder attention as a cross-check for `heads_q = heads_kv`.
-- [ ] **Step 2:** Implement (naive cuBLAS path first, then the tensor-core path if the shapes fit `sm_75`); bench at `16 x 500 x 128`.
-- [ ] **Step 3:** Commit `feat(gpu): add the bidirectional grouped-query attention`.
+- [x] **Step 1: Failing test** against a CPU f64 reference at `T = 37` and `T = 300`; and the existing encoder attention as a cross-check for `heads_q = heads_kv`.
+- [x] **Step 2:** Implement (naive cuBLAS path first, then the tensor-core path if the shapes fit `sm_75`); bench at `16 x 500 x 128`.
+- [x] **Step 3:** Commit `feat(gpu): add the bidirectional grouped-query attention`.
 
 ### Task 9: The masked iterative decoding loop
 
@@ -182,9 +184,9 @@ Decided with the user before Task 1. The numbers below are the starting proposal
 **Interfaces:** `decode(model, prompt: &Prompt, params: DecodeParams) -> Result<Tokens /*[8, T]*/, Error>` with `mode: Deterministic | Product`, `guidance`, `num_step`, `t_shift`, `variety`, `seed`.
 
 **Steps:**
-- [ ] **Step 1: Failing test** `tokens_match_the_deterministic_reference` on 3 scripts (criterion 1), and unit tests for the schedule (`ceil` and the remainder) and the priority score.
-- [ ] **Step 2:** Implement, run the tests.
-- [ ] **Step 3:** Commit `feat(tts): decode with masked iterative sampling`.
+- [x] **Step 1: Failing test** `tokens_match_the_deterministic_reference` on 3 scripts (criterion 1), and unit tests for the schedule (`ceil` and the remainder) and the priority score.
+- [x] **Step 2:** Implement, run the tests.
+- [x] **Step 3:** Commit `feat(tts): decode with masked iterative sampling`.
 
 ### Task 10: The product path and the seeds
 
@@ -193,9 +195,9 @@ Decided with the user before Task 1. The numbers below are the starting proposal
 **Interfaces:** top-k 103 + Gumbel at `variety > 0`, Gumbel noise on the position score at `position_temperature`, the seed rule of the engine (`base_seed + part_index`), and `position_temperature = 0` as a test-only flag.
 
 **Steps:**
-- [ ] **Step 1: Failing test** `product_mode_matches_the_frame_count` and `at_least_99_percent_of_the_tokens` (criterion 2).
-- [ ] **Step 2:** Implement; record the measured share and the frame counts.
-- [ ] **Step 3:** Commit `feat(tts): sample like the engine in product mode`.
+- [x] **Step 1: Failing test** `product_mode_matches_the_frame_count` and `at_least_99_percent_of_the_tokens` (criterion 2).
+- [x] **Step 2:** Implement; record the measured share and the frame counts.
+- [x] **Step 3:** Commit `feat(tts): sample like the engine in product mode`.
 
 ### Task 11: Text layout and the frame estimate
 
@@ -204,20 +206,20 @@ Decided with the user before Task 1. The numbers below are the starting proposal
 **Interfaces:** the packed sequence of "The prompt layout", the 8-row repetition, `frames = estimate(text, speed)` as `RuleDurationEstimator` (`utils/duration.py:208-248`), the language code mapping, and the 30 s chunking rule (tokens only; the cross-fade waits for Phase 3).
 
 **Steps:**
-- [ ] **Step 1: Failing tests** `layout_of_a_prompt_with_a_reference`, `frame_estimate_matches_the_engine` (against the engine's `target_lens` for the 3 scripts), `an_unknown_language_is_an_error`.
-- [ ] **Step 2:** Implement, run the tests.
-- [ ] **Step 3:** Commit `feat(tts): build the OmniVoice prompt and estimate the frames`.
+- [x] **Step 1: Failing tests** `layout_of_a_prompt_with_a_reference`, `frame_estimate_matches_the_engine` (against the engine's `target_lens` for the 3 scripts), `an_unknown_language_is_an_error`.
+- [x] **Step 2:** Implement, run the tests.
+- [x] **Step 3:** Commit `feat(tts): build the OmniVoice prompt and estimate the frames`.
 
 ### Task 12: The render tool, the measurements, lesson 12 and the review
 
 **Files:** `crates/jeuvoice-omnivoice/examples/render_tokens.rs`, `docs/cuda-lessons/12-masked-decoding.md`, `docs/development-log.md`, the handoff, `scripts/tts-baseline.ps1`.
 
 **Steps:**
-- [ ] **Step 1:** The tool renders tokens for one script and writes `[8, T]` int32, with progress and the per-step time.
-- [ ] **Step 2:** Measure the 4 criteria (tokens, speed, VRAM, load) and write the table next to the engine's numbers.
-- [ ] **Step 3:** Lesson 12 (Turkish): the masked iterative loop. What it does, why the model unmasks by confidence, the schedule, the guidance formula, why the attention is bidirectional, why there is no KV cache, the measured cost per step, the exercises (a KV-cache variant with a fixed prefix, a cosine schedule, a different guidance).
-- [ ] **Step 4:** A fresh reviewer reads the branch; fix the Critical and Important findings with tests; list the minors as deferred.
-- [ ] **Step 5:** Commit `feat(tts): render audio tokens on the Rust kernels, lesson 12`.
+- [x] **Step 1:** The tool renders tokens for one script and writes `[8, T]` int32, with progress and the per-step time.
+- [x] **Step 2:** Measure the 4 criteria (tokens, speed, VRAM, load) and write the table next to the engine's numbers.
+- [x] **Step 3:** Lesson 12 (Turkish): the masked iterative loop. What it does, why the model unmasks by confidence, the schedule, the guidance formula, why the attention is bidirectional, why there is no KV cache, the measured cost per step, the exercises (a KV-cache variant with a fixed prefix, a cosine schedule, a different guidance).
+- [x] **Step 4:** A fresh reviewer reads the branch; fix the Critical and Important findings with tests; list the minors as deferred.
+- [x] **Step 5:** Commit `feat(tts): render audio tokens on the Rust kernels, lesson 12`.
 
 ## Watch list
 
