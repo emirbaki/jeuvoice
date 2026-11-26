@@ -221,12 +221,15 @@ mod gpu {
     use crate::{Result, TtsError};
     use jeuvoice_gpu::blas::Blas;
     use jeuvoice_gpu::ops::product_topk;
-    use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu};
+    use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError, Graph, Tensor};
 
     use crate::config::OmniVoiceConfig;
-    use crate::forward::forward;
+    use crate::forward::forward_compute;
     use crate::text::Layout;
     use crate::weights::OmniVoiceWeights;
+
+    /// The tap callback of a captured forward pass. The decode does not read taps.
+    fn no_taps(_: &str, _: &Arena, _: &Tensor) {}
 
     /// Runs the masked decode. `layout` is the step-0 sequence of the conditioned row: the
     /// style, the text and the prompt, with the target frames masked.
@@ -291,6 +294,37 @@ mod gpu {
             None
         };
 
+        // Both forward shapes stay fixed for the whole decode. Capture one graph per shape and
+        // replay them after each upload. The graphs keep the arena addresses, never host data.
+        let limits = crate::inputs::Limits {
+            codebooks,
+            vocab: cfg.vocab_size,
+            audio_vocab: cfg.audio_vocab_size,
+        };
+        let mut graphs = w
+            .graphs
+            .lock()
+            .map_err(|_| TtsError::Render("the graph cache is poisoned".into()))?;
+        for t in [seq, target_len] {
+            if graphs.contains_key(&t) {
+                continue;
+            }
+            // Warm up before capture. The first use of a kernel or a cuBLAS heuristic can
+            // allocate memory, which capture does not allow.
+            w.arena.upload(gpu, &w.act.ids.prefix_as(&[codebooks, t]), &ids[..codebooks * t])?;
+            w.arena.upload(gpu, &w.act.mask.prefix_as(&[1, t]), &mask[..t])?;
+            forward_compute(w, cfg, gpu, blas, 1, t, None, &mut no_taps)?;
+            gpu.stream().synchronize().map_err(|e| TtsError::Render(e.to_string()))?;
+            let graph = Graph::capture(gpu, || {
+                forward_compute(w, cfg, gpu, blas, 1, t, None, &mut no_taps)
+                    .map_err(|e| GpuError::Driver(e.to_string()))
+            })
+            .map_err(|e| TtsError::Render(format!("could not capture the forward pass: {e}")))?;
+            graphs.insert(t, graph);
+        }
+        let cond_graph = &graphs[&seq];
+        let uncond_graph = &graphs[&target_len];
+
         for step in 0..params.num_step {
             // A step with nothing to unmask needs no pass: the schedule is monotone, so the
             // only work left for it is the progress report.
@@ -305,7 +339,10 @@ mod gpu {
                     .copy_from_slice(&tokens[c * target_len..(c + 1) * target_len]);
             }
             mask[..seq].copy_from_slice(&layout.audio_mask);
-            forward(w, cfg, gpu, blas, &ids[..codebooks * seq], &mask[..seq], 1, seq, None, None, &mut |_, _, _| {})?;
+            crate::inputs::check(&ids[..codebooks * seq], &mask[..seq], 1, seq, limits, None)?;
+            w.arena.upload(gpu, &w.act.ids.prefix_as(&[codebooks, seq]), &ids[..codebooks * seq])?;
+            w.arena.upload(gpu, &w.act.mask.prefix_as(&[1, seq]), &mask[..seq])?;
+            cond_graph.launch(gpu).map_err(|e| TtsError::Render(e.to_string()))?;
 
             // 2. The unconditioned row: the target frames alone, no padding to `seq`. It writes
             //    rows 0..target_len, so the conditioned target rows at `target..` stay intact.
@@ -314,7 +351,10 @@ mod gpu {
                     .copy_from_slice(&tokens[c * target_len..(c + 1) * target_len]);
             }
             mask[..target_len].fill(1);
-            forward(w, cfg, gpu, blas, &ids[..codebooks * target_len], &mask[..target_len], 1, target_len, None, None, &mut |_, _, _| {})?;
+            crate::inputs::check(&ids[..codebooks * target_len], &mask[..target_len], 1, target_len, limits, None)?;
+            w.arena.upload(gpu, &w.act.ids.prefix_as(&[codebooks, target_len]), &ids[..codebooks * target_len])?;
+            w.arena.upload(gpu, &w.act.mask.prefix_as(&[1, target_len]), &mask[..target_len])?;
+            uncond_graph.launch(gpu).map_err(|e| TtsError::Render(e.to_string()))?;
 
             if let Some((top_arena, tconf, tids, tvals)) = &topk {
                 // Only the top-k ids and values cross the bus. The engine's Philox stream cannot

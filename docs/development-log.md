@@ -1245,4 +1245,8 @@ The micro bench removes about 5.5 us of host launch cost per call. The forward s
 
 `forward_compute` now exposes the pass without input uploads, so a caller can upload the ids and mask into the fixed arena addresses before each replay. The padded path allocates a scratch arena during enqueue, so capture rejects it; the prototype asserts `valid = None` as production decode uses.
 
-Decision pending. The remaining option is streaming V from global memory, which halves shared memory again but does not lift the three-block register limit.
+Decode now captures one graph per forward shape and replays them after each input upload. The graphs live in `OmniVoiceWeights.graphs`, keyed by the number of positions, so a second decode of the same shape skips capture. The first decode pays for two warm-up forwards and two captures. Without the cache a warm decode rose from 2.09 s to 2.18 s, so the cache is required.
+
+Sampling stays on the host. `inputs::check` still runs at every step before the upload. Capture needs `valid = None`, which is the production path. The real decode keeps 214 frames and the same token shares. The quality gate passes with cond argmax 98.7%, 97.7% and 99.0%. With the cache warm, s1 takes 2.04 s, down from 2.09 s.
+
+The other option was measured and rejected. Streaming V from global memory removed the V tile from shared memory and built each B fragment from two 2-byte global loads. Shared fell from 8704 to 4352 bytes, but registers rose from 164 to 176, so only two blocks fit per SM instead of three. The bench gave 380 us at `t = 486` and 112 us at `t = 214`, worse than 270 and 89. The scattered loads and the lost block cost more than the shared memory saving. Lesson 13 records the result. No flash work remains open.

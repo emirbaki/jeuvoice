@@ -8,9 +8,10 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Instant;
 
-use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, Tensor};
+use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, Graph, Tensor};
 
 use crate::config::OmniVoiceConfig;
 use crate::index::TensorIndex;
@@ -91,6 +92,9 @@ impl Activations {
 
 /// Every weight of the checkpoint by its file name, in the arena, plus the activations.
 pub struct OmniVoiceWeights {
+    /// Captured forward graphs, keyed by the number of positions. Declared before `arena` so
+    /// drop destroys the graphs before the buffers their nodes read.
+    pub graphs: Mutex<HashMap<usize, Graph>>,
     pub arena: Arena,
     pub act: Activations,
     pub weight_bytes: usize,
@@ -191,7 +195,15 @@ impl OmniVoiceWeights {
         let inv = jeuvoice_gpu::ops::rope_inv_freq(cfg.rope_theta, cfg.head_dim);
         arena.upload(gpu, &act.inv_freq, &inv)?;
 
-        Ok(OmniVoiceWeights { arena, act, weight_bytes, activation_bytes, load_seconds: started.elapsed().as_secs_f64(), tensors })
+        Ok(OmniVoiceWeights {
+            graphs: Mutex::new(HashMap::new()),
+            arena,
+            act,
+            weight_bytes,
+            activation_bytes,
+            load_seconds: started.elapsed().as_secs_f64(),
+            tensors,
+        })
     }
 
     /// The tensor of `name` (the file name, for example `llm.layers.0.mlp.up_proj.weight`).

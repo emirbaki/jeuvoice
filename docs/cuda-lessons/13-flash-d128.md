@@ -85,6 +85,7 @@ Shared memory: `K` ve `V` dilimleri `32 × (128 + 8)` f16 = 8,7 KB, ikisi 17,4 K
 
 - **8 anahtar/dilim**: 486'da 304 µs, 214'te 92 µs. Kayıt daha da azaldı ama dış döngü iki katına çıktı; ek bariyerler kazancı yedi.
 - **128 satır, 256 thread**: 486'da 372 µs, 214'te 102 µs. Blok başına warp 8'e çıktı ama SM başına 1 blok kaldı.
+- **V'yi global'den oku**: 486'da 380 µs, 214'te 112 µs. Shared 8,7 → 4,3 KB'a indi ama kayıt 164 → 176'a çıktı ve SM başına blok 3 → 2'ye düştü. İki baytlık dağınık okumalar da pahalı. V shared'da kalır.
 
 Kural: d128'de 16 anahtar, kayıt ile bariyer arasındaki denge noktası. 214 şeklindeki 5 µs'lik fark saat gürültüsü sınırında; karar 486 şeklindeki %16'lık farkla verildi.
 
@@ -125,4 +126,4 @@ ncu --set full -k regex:flash_attn_tc128 -c 2 target\release\gpu-bench.exe attn_
 3. **Dilim 16.** `FT8_KEYS = 16` ölçüldü: 486'da 270 µs, 214'te 89 µs (4d). Shared 8,7 KB, kayıt 164, SM başına 3 blok. Daha çok bariyer, daha iyi doluluk kazandı.
 4. **Ölçeği unut.** `scale` parametresini 1,0 yap ve testin hangi eşikte patladığını gör. Bu, 4c'deki hatanın neden sessiz olduğunu gösterir.
 5. **Maske ekle.** İki yönlü attention'da `valid` (kısa satır) maskesi ekle: satır `valid`'den sonra yalnız kendini görmeli (ders 12). Bunu flash'ta yapmak, grup yolu korumaktan daha mı kolay?
-6. **K'yı shared'da tut, V'yi akıt.** V dilimini shared'a koymadan doğrudan global'den oku (her P·V adımında 16 anahtar). Shared 4,3 KB'a iner ama 164 kayıt yine 3 blok sınırı koyar. Bant genişliği mi, doluluk mu kazanır?
+6. **K'yı shared'da tut, V'yi akıt.** Ölçüldü. V dilimi shared'dan kaldırıldı. Her thread ikişer 2 baytlık global okuma ile kendi B fragmentini kurdu. Shared 4,3 KB'a indi. Ama kayıt 176'a çıktı ve SM başına 2 blok kaldı. Süre 486'da 380 µs, 214'te 112 µs oldu. Sebep: dağınık okumalar ve blok kaybı. Bu yolu izleme.

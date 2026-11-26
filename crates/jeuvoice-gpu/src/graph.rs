@@ -23,6 +23,10 @@ pub struct Graph {
     ctx: Arc<CudaContext>,
 }
 
+// SAFETY: the two handles are owned by this struct and stay valid until drop. A launch binds
+// the context held here, so another thread can replay the same graph safely.
+unsafe impl Send for Graph {}
+
 impl Graph {
     /// Record the work in `f` on the GPU stream and make it replayable.
     ///
