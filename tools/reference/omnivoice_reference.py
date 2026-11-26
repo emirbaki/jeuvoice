@@ -29,12 +29,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--bench", type=int, default=0, help="render s1 this many times for the baseline")
     ap.add_argument("--skip-product", action="store_true")
     ap.add_argument("--skip-taps", action="store_true")
+    ap.add_argument("--taps-script", default=None, help="comma-separated script ids for taps; default: the first script")
     return ap.parse_args()
 
 
@@ -117,6 +120,14 @@ def save_npz(path: Path, script: dict, language: str, speed: float, tokens: np.n
     print(f"  {path.name}: tokens {tokens.shape}, target {target_len} frames, prompt {prompt_tokens.shape[1]} frames")
 
 
+def first_step_count(target_len: int, num_step: int) -> int:
+    """The engine's first `ceil(total * delta_t)` count, without the torch tensor."""
+    def shifted(t: float) -> float:
+        return 0.1 * t / (1.0 + (0.1 - 1.0) * t)
+
+    return math.ceil(target_len * 8 * (shifted(1.0 / num_step) - shifted(0.0)))
+
+
 def capture_taps(model, prompt, script: dict, language: str, speed: float, cfg, out_path: Path) -> None:
     """One pass of the deterministic decode, with the layer outputs of the first step saved.
 
@@ -171,15 +182,37 @@ def capture_taps(model, prompt, script: dict, language: str, speed: float, cfg, 
     original = model._predict_tokens_with_scoring
 
     def wrapped(c_logits, u_logits, gen_config):
-        if marked["first"]:
+        first = marked["first"]
+        if first:
             # `.contiguous()` before numpy: `c_logits` is a strided slice of the batch logits,
             # and `save_file` writes the storage of a strided array, not its values.
             taps["cond_logits_00"] = c_logits[0].detach().float().to("cpu").contiguous().numpy()
             taps["uncond_logits_00"] = u_logits[0].detach().float().to("cpu").contiguous().numpy()
             marked["first"] = False
-        else:
-            marked["first"] = False
-        return original(c_logits, u_logits, gen_config)
+        pred, scores = original(c_logits, u_logits, gen_config)
+        if first:
+            # The guided confidence and token before the layer penalty and the Gumbel noise.
+            # They let the Rust test compare guidance before the decode trajectory diverges.
+            taps["conf00"] = scores[0].detach().float().to("cpu").contiguous().numpy()
+            taps["pick00"] = pred[0].detach().to("cpu").numpy().astype(np.int32)
+            penalty = torch.arange(scores.shape[1], device=scores.device).view(1, -1, 1).float() * gen_config.layer_penalty_factor
+            position_score = scores - penalty
+            count = first_step_count(scores.shape[2], gen_config.num_step)
+            taps["order00"] = torch.topk(position_score.flatten(), count).indices.to("cpu").numpy().astype(np.int32)
+
+            # The top 10% of the guided distribution, before Gumbel noise. This is
+            # deterministic and lets the Rust gate compare product filtering.
+            if gen_config.guidance_scale != 0.0:
+                c_lp = F.log_softmax(c_logits, dim=-1)
+                u_lp = F.log_softmax(u_logits, dim=-1)
+                guided = F.log_softmax(c_lp + gen_config.guidance_scale * (c_lp - u_lp), dim=-1)
+            else:
+                guided = F.log_softmax(c_logits, dim=-1)
+            guided = guided.clone()
+            guided[..., model.config.audio_mask_id] = -float("inf")
+            top_count = math.ceil(0.1 * guided.shape[-1])
+            taps["topk00"] = guided.topk(top_count, dim=-1).indices[0].to("cpu").numpy().astype(np.int32)
+        return pred, scores
 
     model._predict_tokens_with_scoring = wrapped
     marked["first"] = True  # the next forward pass is step 0
@@ -327,9 +360,18 @@ def main() -> None:
             save_npz(out / f"{script['id']}.product.npz", script, language, speed, tokens, target_len, prompt_frames(prompt), ref_text)
 
     if not args.skip_taps:
-        taps_path = out / f"{specs['scripts'][0]['id']}.taps.safetensors"
-        capture_taps(model, prompt, specs["scripts"][0], language, speed, det, taps_path)
-        first_pass_inputs(model, prompt, specs["scripts"][0], language, speed, det, taps_path)
+        if args.taps_script:
+            wanted = [part.strip() for part in args.taps_script.split(",") if part.strip()]
+            tap_specs = [script for script in specs["scripts"] if script["id"] in wanted]
+            missing = [script_id for script_id in wanted if script_id not in {script["id"] for script in tap_specs}]
+            if missing:
+                raise SystemExit(f"no script with id {missing}")
+        else:
+            tap_specs = [specs["scripts"][0]]
+        for tap_spec in tap_specs:
+            taps_path = out / f"{tap_spec['id']}.taps.safetensors"
+            capture_taps(model, prompt, tap_spec, language, speed, det, taps_path)
+            first_pass_inputs(model, prompt, tap_spec, language, speed, det, taps_path)
 
     if args.bench:
         bench(model, prompt, specs["scripts"][0], language, speed, prod, args.bench, ref_audio, ref_text)

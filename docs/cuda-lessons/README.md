@@ -21,6 +21,7 @@ Kernel'ler Rust ile yazılır ve NVIDIA'nın **cuda-oxide** derleyicisi onları 
 | 10 | [RoPE ve kafa başına RMSNorm (Qwen3)](10-rope-qk-norm.md) | hazır |
 | 11 | [SwiGLU](11-swiglu.md) | hazır |
 | 12 | [Maskeli yinelemeli çözme (OmniVoice)](12-masked-decoding.md) | hazır |
+| 13 | [128 genişliğinde kafa için flash attention](13-flash-d128.md) | hazır |
 
 ## Çalıştırma
 

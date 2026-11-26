@@ -82,7 +82,9 @@ impl Gpu {
             mem_bandwidth_gbs,
             fp16_tensor_tflops,
         };
-        let stream = ctx.default_stream();
+        // A private stream can be captured into a CUDA graph. The legacy default stream
+        // cannot, and every JeuVoice launch already uses this one stream in order.
+        let stream = ctx.new_stream()?;
         Ok(Gpu { ctx, stream, info, kernels: OnceLock::new() })
     }
 

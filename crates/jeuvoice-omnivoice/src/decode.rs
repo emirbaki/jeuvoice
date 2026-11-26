@@ -150,9 +150,15 @@ impl Rng {
     }
 }
 
-/// One row of the product mode: the token from the top-k filtered distribution with Gumbel
-/// noise, and the confidence of the unfiltered distribution for the position score.
-fn sample_row(c: &[f32], u: &[f32], guidance: f32, mask_id: usize, temperature: f32, y: &mut [f32], rng: &mut Rng) -> (f32, i32) {
+fn sample_row_inner<F: FnMut(usize) -> f32>(
+    c: &[f32],
+    u: &[f32],
+    guidance: f32,
+    mask_id: usize,
+    temperature: f32,
+    y: &mut [f32],
+    mut noise: F,
+) -> (f32, i32) {
     let mut top = f32::NEG_INFINITY;
     for (v, slot) in y.iter_mut().enumerate() {
         *slot = (1.0 + guidance) * c[v] - guidance * u[v];
@@ -180,16 +186,31 @@ fn sample_row(c: &[f32], u: &[f32], guidance: f32, mask_id: usize, temperature: 
     let k = ((y.len() as f64 * 0.1).ceil() as usize).max(1);
     let mut order: Vec<usize> = (0..y.len()).filter(|&v| v != mask_id).collect();
     order.select_nth_unstable_by(k - 1, |&a, &b| y[b].total_cmp(&y[a]));
+    let keep = k.min(order.len());
+    order[..keep].sort_unstable_by(|&a, &b| y[b].total_cmp(&y[a]).then(a.cmp(&b)));
     let mut best = f32::NEG_INFINITY;
     let mut at = 0i32;
-    for &v in &order[..k.min(order.len())] {
-        let value = y[v] / temperature + rng.gumbel();
+    for (i, &v) in order[..keep].iter().enumerate() {
+        let value = y[v] / temperature + noise(i);
         if value > best {
             best = value;
             at = v as i32;
         }
     }
     (confidence, at)
+}
+
+/// One row of the product mode: the token from the top-k filtered distribution with Gumbel
+/// noise, and the confidence of the unfiltered distribution for the position score.
+fn sample_row(c: &[f32], u: &[f32], guidance: f32, mask_id: usize, temperature: f32, y: &mut [f32], rng: &mut Rng) -> (f32, i32) {
+    sample_row_inner(c, u, guidance, mask_id, temperature, y, |_| rng.gumbel())
+}
+
+/// `sample_row` with a fixed noise vector. Tests use it to check the Gumbel formula without the
+/// engine's unreproducible stream. Noise has one value per kept token.
+#[doc(hidden)]
+pub fn sample_row_with_noise(c: &[f32], u: &[f32], guidance: f32, mask_id: usize, temperature: f32, y: &mut [f32], noise: &[f32]) -> (f32, i32) {
+    sample_row_inner(c, u, guidance, mask_id, temperature, y, |i| noise[i])
 }
 #[cfg(feature = "cuda-kernels")]
 pub use gpu::decode;
@@ -199,12 +220,16 @@ mod gpu {
     use super::*;
     use crate::{Result, TtsError};
     use jeuvoice_gpu::blas::Blas;
-    use jeuvoice_gpu::Gpu;
+    use jeuvoice_gpu::ops::product_topk;
+    use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, GpuError, Graph, Tensor};
 
     use crate::config::OmniVoiceConfig;
-    use crate::forward::forward;
+    use crate::forward::forward_compute;
     use crate::text::Layout;
     use crate::weights::OmniVoiceWeights;
+
+    /// The tap callback of a captured forward pass. The decode does not read taps.
+    fn no_taps(_: &str, _: &Arena, _: &Tensor) {}
 
     /// Runs the masked decode. `layout` is the step-0 sequence of the conditioned row: the
     /// style, the text and the prompt, with the target frames masked.
@@ -250,11 +275,55 @@ mod gpu {
 
         let counts = schedule(target_len, codebooks, params);
         let width = w.act.logits.shape()[1];
-        let mut y = vec![0.0f32; vocab];
         let mut rng = Rng(params.seed | 1);
         let mut scores = vec![f32::NEG_INFINITY; codebooks * target_len];
         let mut picks = vec![0i32; codebooks * target_len];
         let target = prefix + prompt_len;
+
+        // The top-k filter writes these once per decode and reuses them at every step. The
+        // Gumbel stream stays on the host, so one seed remains repeatable.
+        let top_k = ((vocab as f64 * 0.1).ceil() as usize).max(1);
+        let topk = if params.mode == Mode::Product && params.class_temperature > 0.0 {
+            let pairs = codebooks * target_len;
+            let mut plan = ArenaPlan::new();
+            let conf = plan.add(DType::F32, &[pairs]);
+            let ids = plan.add(DType::I32, &[pairs, top_k]);
+            let vals = plan.add(DType::F32, &[pairs, top_k]);
+            Some((Arena::new(gpu, &plan)?, conf, ids, vals))
+        } else {
+            None
+        };
+
+        // Both forward shapes stay fixed for the whole decode. Capture one graph per shape and
+        // replay them after each upload. The graphs keep the arena addresses, never host data.
+        let limits = crate::inputs::Limits {
+            codebooks,
+            vocab: cfg.vocab_size,
+            audio_vocab: cfg.audio_vocab_size,
+        };
+        let mut graphs = w
+            .graphs
+            .lock()
+            .map_err(|_| TtsError::Render("the graph cache is poisoned".into()))?;
+        for t in [seq, target_len] {
+            if graphs.contains_key(&t) {
+                continue;
+            }
+            // Warm up before capture. The first use of a kernel or a cuBLAS heuristic can
+            // allocate memory, which capture does not allow.
+            w.arena.upload(gpu, &w.act.ids.prefix_as(&[codebooks, t]), &ids[..codebooks * t])?;
+            w.arena.upload(gpu, &w.act.mask.prefix_as(&[1, t]), &mask[..t])?;
+            forward_compute(w, cfg, gpu, blas, 1, t, None, &mut no_taps)?;
+            gpu.stream().synchronize().map_err(|e| TtsError::Render(e.to_string()))?;
+            let graph = Graph::capture(gpu, || {
+                forward_compute(w, cfg, gpu, blas, 1, t, None, &mut no_taps)
+                    .map_err(|e| GpuError::Driver(e.to_string()))
+            })
+            .map_err(|e| TtsError::Render(format!("could not capture the forward pass: {e}")))?;
+            graphs.insert(t, graph);
+        }
+        let cond_graph = &graphs[&seq];
+        let uncond_graph = &graphs[&target_len];
 
         for step in 0..params.num_step {
             // A step with nothing to unmask needs no pass: the schedule is monotone, so the
@@ -263,54 +332,86 @@ mod gpu {
                 progress(step, params.num_step);
                 continue;
             }
-            // 1. The ids of the step: the layout with the tokens written in, and the target
-            //    frames of the unconditioned row.
+            // 1. The conditioned row: the layout with the tokens written in. One row of `seq`.
             ids[..codebooks * seq].copy_from_slice(&layout.ids);
             for c in 0..codebooks {
                 ids[c * seq + target..c * seq + target + target_len]
                     .copy_from_slice(&tokens[c * target_len..(c + 1) * target_len]);
-                let uncond = (codebooks + c) * seq;
-                ids[uncond..uncond + target_len].copy_from_slice(&tokens[c * target_len..(c + 1) * target_len]);
             }
-            let valid = [seq as i32, target_len as i32];
-            forward(w, cfg, gpu, blas, &ids, &mask, 2, seq, Some(&valid), None, &mut |_, _, _| {})?;
+            mask[..seq].copy_from_slice(&layout.audio_mask);
+            crate::inputs::check(&ids[..codebooks * seq], &mask[..seq], 1, seq, limits, None)?;
+            w.arena.upload(gpu, &w.act.ids.prefix_as(&[codebooks, seq]), &ids[..codebooks * seq])?;
+            w.arena.upload(gpu, &w.act.mask.prefix_as(&[1, seq]), &mask[..seq])?;
+            cond_graph.launch(gpu).map_err(|e| TtsError::Render(e.to_string()))?;
 
-            if params.mode == Mode::Product {
-                // The full planes, for the top-k filter and the Gumbel noise of the token.
-                let rows = download_rows(w, gpu, target, 2 * target_len)?;
-                let (cond, uncond) = rows.split_at(target_len * width);
+            // 2. The unconditioned row: the target frames alone, no padding to `seq`. It writes
+            //    rows 0..target_len, so the conditioned target rows at `target..` stay intact.
+            for c in 0..codebooks {
+                ids[c * target_len..(c + 1) * target_len]
+                    .copy_from_slice(&tokens[c * target_len..(c + 1) * target_len]);
+            }
+            mask[..target_len].fill(1);
+            crate::inputs::check(&ids[..codebooks * target_len], &mask[..target_len], 1, target_len, limits, None)?;
+            w.arena.upload(gpu, &w.act.ids.prefix_as(&[codebooks, target_len]), &ids[..codebooks * target_len])?;
+            w.arena.upload(gpu, &w.act.mask.prefix_as(&[1, target_len]), &mask[..target_len])?;
+            uncond_graph.launch(gpu).map_err(|e| TtsError::Render(e.to_string()))?;
+
+            if let Some((top_arena, tconf, tids, tvals)) = &topk {
+                // Only the top-k ids and values cross the bus. The engine's Philox stream cannot
+                // be reproduced, so the host applies our seeded Gumbel noise to these values.
+                let pairs = codebooks * target_len;
+                let c_plane = w.act.logits.rows_unaligned(target, target_len);
+                let u_plane = w.act.logits.rows_unaligned(0, target_len);
+                product_topk(
+                    gpu,
+                    &w.arena,
+                    &c_plane,
+                    &u_plane,
+                    top_arena,
+                    tconf,
+                    tids,
+                    tvals,
+                    pairs,
+                    width,
+                    vocab,
+                    codebooks,
+                    mask_id,
+                    params.guidance,
+                    top_k,
+                )?;
+                let conf_values = top_arena.download::<f32>(gpu, tconf)?;
+                let token_ids = top_arena.download::<i32>(gpu, tids)?;
+                let token_vals = top_arena.download::<f32>(gpu, tvals)?;
                 for c in 0..codebooks {
                     for p in 0..target_len {
                         let index = c * target_len + p;
                         if tokens[index] != mask_id as i32 {
                             continue;
                         }
-                        let at = p * width + c * vocab;
-                        let (confidence, token) = sample_row(
-                            &cond[at..at + vocab],
-                            &uncond[at..at + vocab],
-                            params.guidance,
-                            mask_id,
-                            params.class_temperature,
-                            &mut y,
-                            &mut rng,
-                        );
-                        let mut score = confidence - c as f32 * params.layer_penalty;
-                        if params.position_temperature > 0.0 {
-                            score = score / params.position_temperature + rng.gumbel();
+                        let pair = p * codebooks + c;
+                        let at = pair * top_k;
+                        let mut best = f32::NEG_INFINITY;
+                        let mut chosen = token_ids[at];
+                        for j in 0..top_k {
+                            let value = token_vals[at + j] / params.class_temperature + rng.gumbel();
+                            if value > best {
+                                best = value;
+                                chosen = token_ids[at + j];
+                            }
                         }
-                        scores[index] = score;
-                        picks[index] = token;
+                        scores[index] = conf_values[pair] - c as f32 * params.layer_penalty;
+                        picks[index] = chosen;
                     }
                 }
             }
-            // The deterministic mode reads the guided peak that the kernel computes.
-            if params.mode == Mode::Deterministic {
+            // The guided peak of the kernel serves the deterministic mode and the variety-0
+            // product mode: the argmax token and the unfiltered peak are the same.
+            if params.mode == Mode::Deterministic || params.class_temperature <= 0.0 {
             // 2. The guided peak on the GPU: one block per (position, codebook) pair. The two
             //    logit planes stay on the device, so a step moves 13.4 KiB to the host.
             let pairs = codebooks * target_len;
             let c_plane = w.act.logits.rows_unaligned(target, target_len);
-            let u_plane = w.act.logits.rows_unaligned(seq, target_len);
+            let u_plane = w.act.logits.rows_unaligned(0, target_len);
             let conf = w.act.conf.prefix_as(&[pairs]);
             let pick = w.act.pick.prefix_as(&[pairs]);
             jeuvoice_gpu::ops::guide_peak(
@@ -339,6 +440,16 @@ mod gpu {
             }
 
             }
+            // The position noise of the product mode, drawn once per masked pair in
+            // codebook-major order, so one seed is repeatable. With temperature 0 the score is
+            // untouched, and the product mode gives exactly the deterministic tokens.
+            if params.mode == Mode::Product && params.position_temperature > 0.0 {
+                for index in 0..codebooks * target_len {
+                    if tokens[index] == mask_id as i32 {
+                        scores[index] = scores[index] / params.position_temperature + rng.gumbel();
+                    }
+                }
+            }
             // 4. The `k` most confident positions among the still masked ones.
             let mut candidates: Vec<usize> = (0..codebooks * target_len).filter(|&i| tokens[i] == mask_id as i32).collect();
             let k = counts[step].min(candidates.len());
@@ -357,12 +468,6 @@ mod gpu {
             return Err(TtsError::Render("the decode left masked frames: the schedule did not fill them".into()));
         }
         Ok(Tokens { codebooks, len: target_len, ids: tokens })
-    }
-
-    /// The logits of `rows` positions, `[rows, audio_head_rows]` f32, from `start`.
-    fn download_rows(w: &OmniVoiceWeights, gpu: &Gpu, start: usize, rows: usize) -> Result<Vec<f32>> {
-        let view = w.act.logits.rows_unaligned(start, rows);
-        Ok(w.arena.download_unaligned::<f32>(gpu, &view)?)
     }
 }
 #[cfg(test)]
@@ -437,5 +542,14 @@ mod tests {
         let outside = (0..20).any(|i| seen[i] > 0 && i != 3 && i != 11);
         assert!(!outside, "a token outside the top two was drawn: {seen:?}");
         assert!(seen[3] > 0 && seen[11] > 0, "both of the top two must appear: {seen:?}");
+    }
+    #[test]
+    fn the_gumbel_stream_is_repeatable() {
+        let mut a = Rng(42);
+        let mut b = Rng(42);
+        for draw in 0..8 {
+            assert_eq!(a.gumbel(), b.gumbel(), "draw {draw}");
+        }
+        assert!(Rng(1).gumbel().is_finite());
     }
 }

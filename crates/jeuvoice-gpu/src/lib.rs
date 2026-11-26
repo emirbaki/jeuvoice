@@ -11,6 +11,7 @@ pub mod blas;
 pub mod check;
 mod device;
 mod error;
+pub mod graph;
 pub mod kernels;
 pub mod ops;
 pub mod reference;
@@ -19,6 +20,7 @@ mod tensor;
 pub use device::{DeviceInfo, Gpu};
 pub use arena::{Arena, ArenaPlan};
 pub use error::GpuError;
+pub use graph::Graph;
 pub use tensor::{DType, DevSlice, Element, Tensor};
 
 use cuda_core::{DeviceBuffer, LaunchConfig};

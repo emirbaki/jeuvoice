@@ -5,7 +5,7 @@
 
 use half::f16;
 use jeuvoice_gpu::check::{Tol, assert_close};
-use jeuvoice_gpu::ops::{SwigluKind, swiglu, swiglu_with};
+use jeuvoice_gpu::ops::{SwigluKind, swiglu, swiglu_strided, swiglu_with};
 use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu};
 
 fn rnd(n: usize, seed: u32, scale: f32) -> Vec<f32> {
@@ -112,4 +112,42 @@ fn swiglu_rejects_a_shape_mismatch() {
     let arena = Arena::new(&gpu, &plan).unwrap();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| swiglu(&gpu, &arena, &gate, &up, &out)));
     assert!(r.is_err(), "a shape mismatch must panic with a message");
+}
+
+/// The fused gate/up projection writes `[rows, 2 · d]`, gate first and up second (P3). The
+/// strided read must find the same pairs as two separate contiguous tensors, and the rows of
+/// the wide tensor must not leak into each other.
+#[test]
+fn the_two_halves_of_a_wide_row_feed_swiglu() {
+    let gpu = Gpu::open(0).unwrap();
+    // [7, 1001] is odd and [486, 3072] is the production row, so both a tail and a real width
+    // are covered.
+    for (rows, d) in [(7usize, 1001usize), (486, 3072), (3, 64)] {
+        let wide = 2 * d;
+        let gate = rnd(rows * d, 95, 3.0);
+        let up = rnd(rows * d, 96, 3.0);
+        // The fused buffer: gate | up per row, plus a canary column after it is not needed
+        // because the row is exactly 2 · d.
+        let mut fused = vec![0.0f32; rows * wide];
+        for r in 0..rows {
+            fused[r * wide..r * wide + d].copy_from_slice(&gate[r * d..][..d]);
+            fused[r * wide + d..r * wide + wide].copy_from_slice(&up[r * d..][..d]);
+        }
+        let g16: Vec<f32> = gate.iter().map(|&v| f16::from_f32(v).to_f32()).collect();
+        let u16: Vec<f32> = up.iter().map(|&v| f16::from_f32(v).to_f32()).collect();
+        let want = cpu_swiglu(&g16, &u16);
+
+        let mut plan = ArenaPlan::new();
+        let tf = plan.add(DType::F16, &[rows, wide]);
+        let out = plan.add(DType::F16, &[rows, d]);
+        let canary = plan.add(DType::F16, &[512]);
+        let arena = Arena::new(&gpu, &plan).unwrap();
+        arena.upload(&gpu, &tf, &fused.iter().map(|&v| f16::from_f32(v)).collect::<Vec<_>>()).unwrap();
+        arena.upload(&gpu, &canary, &vec![f16::from_f32(7.5); 512]).unwrap();
+        swiglu_strided(&gpu, &arena, &tf, 0, d, &out).unwrap();
+        let got: Vec<f32> = arena.download::<f16>(&gpu, &out).unwrap().iter().map(|v| v.to_f32()).collect();
+        assert_close(&format!("swiglu_strided {rows}x{d}"), &got, &want, Tol { abs: 2e-3, rel: 1e-2 });
+        let after = arena.download::<f16>(&gpu, &canary).unwrap();
+        assert!(after.iter().all(|v| v.to_f32() == 7.5), "swiglu_strided wrote past the end of out");
+    }
 }

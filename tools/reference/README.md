@@ -65,7 +65,7 @@ The decoder test feeds the PyTorch encoder output into the Rust decoder, so it c
 The model files are already on this machine: the `k2-fsa/OmniVoice` snapshot in the Hugging Face cache and the LoRA adapter in the app data folder. Nothing is downloaded.
 
 ```powershell
-engine\.venv\Scripts\python.exe -I tools\reference\omnivoice_reference.py
+engine\.venv\Scripts\python.exe -I tools\reference\omnivoice_reference.py --adapter "$env:APPDATA\Jeu\JeuVoice\data\models\emirbakid__jeuvoice-omnivoice-tr2"
 ```
 
 It reads `tools\reference\omnivoice_scripts.json` (3 Turkish scripts, the 8 s voice prompt `target\reference\omnivoice\prompt8.wav` and its transcript) and writes into `target\reference\omnivoice\`, which is not committed:
@@ -74,7 +74,14 @@ It reads `tools\reference\omnivoice_scripts.json` (3 Turkish scripts, the 8 s vo
 |---|---|
 | `<id>.det.npz` | the deterministic tokens `[8, T]`, the prompt frames `[8, T_ref]`, the text, the language, the target length |
 | `<id>.product.npz` | the same from the product mode (`position_temperature` 5.0) |
-| `s1.taps.safetensors` | `embed` and `hidden_00` … `hidden_27` `[T, 1024]` f32 of the first pass, and `cond_logits_00` / `uncond_logits_00` `[8, T_target, 1025]` |
+| `<id>.taps.safetensors` | `embed` and `hidden_00` … `hidden_27` `[T, 1024]` f32 of the first pass, `cond_logits_00` / `uncond_logits_00` `[8, T_target, 1025]`, `conf00` / `pick00` `[8, T_target]`, `order00` with the first step's top-k target positions and `topk00` `[8, T_target, 103]` with the first step's top token ids |
+
+The tool captures taps for the first script unless `--taps-script` selects others. The quality gate needs s1, s2 and s3. Generate the missing ones in fp16 and f32:
+
+```powershell
+engine\.venv\Scripts\python.exe -I tools\reference\omnivoice_reference.py --adapter "$env:APPDATA\Jeu\JeuVoice\data\models\emirbakid__jeuvoice-omnivoice-tr2" --skip-product --taps-script s2,s3
+engine\.venv\Scripts\python.exe -I tools\reference\omnivoice_reference.py --adapter "$env:APPDATA\Jeu\JeuVoice\data\models\emirbakid__jeuvoice-omnivoice-tr2" --out target\reference\omnivoice\f32 --dtype fp32 --skip-product --taps-script s2,s3
+```
 
 The deterministic mode (`position_temperature` 0, `class_temperature` 0) repeats exactly. The product mode does not: the Gumbel noise on the position score changes which positions are unmasked first, and the tokens differ on almost every position. Compare the product mode by frame count only.
 

@@ -6,7 +6,7 @@
 use cuda_core::LaunchConfig;
 use half::f16;
 
-use super::grid_elems;
+use super::{fast_div, grid_elems};
 use crate::kernels::ROW_BLOCK;
 use crate::{Arena, DType, Gpu, GpuError, Tensor};
 
@@ -84,8 +84,53 @@ pub fn rope_with(gpu: &Gpu, arena: &Arena, x: &Tensor, positions: &Tensor, inv_f
     Ok(())
 }
 
-/// In place RMSNorm over the rows of `x` (`[rows, d]`, `F16`): `x = x / sqrt(mean(x²) + eps) * w`
-/// with `w` `F32 [d]`. This is `q_norm` and `k_norm` of Qwen3, applied per head. The product
+/// `rope` with the position of every row taken from its place in a run of `t` positions:
+/// `pos = row % t`. `x` is the flat `[rows, d]` head-row layout of the OmniVoice pass, where
+/// row `r · t + j` is position `j` of sequence `r` (every head of a position is a row), and
+/// `inv_freq` is `F32 [d/2]`. The pass uploads no position table (P4).
+///
+/// # Panics
+/// On a wrong dtype or shape, an odd `d`, or a row count that is not a whole number of `t`.
+pub fn rope_rows(gpu: &Gpu, arena: &Arena, x: &Tensor, inv_freq: &Tensor, t: usize) -> Result<(), GpuError> {
+    assert_eq!(x.dtype(), DType::F16, "rope_rows: x must be F16");
+    assert_eq!(inv_freq.dtype(), DType::F32, "rope_rows: inv_freq must be F32");
+    assert_eq!(x.shape().len(), 2, "rope_rows: x must be the flat [rows, d] layout");
+    let (rows, d) = (x.shape()[0], x.shape()[1]);
+    assert!(d % 2 == 0, "rope_rows: the head width {d} must be even");
+    assert_eq!(inv_freq.numel(), d / 2, "rope_rows: inv_freq must hold d/2 values");
+    assert!(t > 0, "rope_rows: t must be positive");
+    assert!(rows % t == 0, "rope_rows: {rows} rows are not a whole number of runs of {t} positions");
+    if rows == 0 {
+        return Ok(());
+    }
+    let (xs, fs) = (arena.slice::<f16>(x), arena.slice::<f32>(inv_freq));
+    let pairs = d / 2;
+    let n = rows * pairs;
+    let fp = fast_div(pairs, n);
+    let ft = fast_div(t, rows);
+    let cfg = LaunchConfig::for_num_elems(grid_elems(n));
+    // SAFETY: one thread per pair of the flat rows, the guards above keep `n` inside x, and
+    // the kernel reads only inv_freq. The two magic pairs are checked by `fast_div`.
+    unsafe {
+        gpu.kernels()?.rope_half_f16_rows(
+            gpu.stream(),
+            cfg,
+            xs.as_mut_ptr().cast(),
+            fs.as_ptr(),
+            d,
+            n,
+            fp.d,
+            fp.magic,
+            fp.shift,
+            ft.d,
+            ft.magic,
+            ft.shift,
+        )
+    }?;
+    Ok(())
+}
+
+/// In place RMSNorm over the rows of `x` (`[rows, d]`, `F16`): `x = x / sqrt(mean(x²) + eps) * w`/// with `w` `F32 [d]`. This is `q_norm` and `k_norm` of Qwen3, applied per head. The product
 /// version: one block of 128 threads per row, the value in a register, one read and one write.
 ///
 /// # Panics
@@ -100,6 +145,25 @@ pub fn rmsnorm_rows(gpu: &Gpu, arena: &Arena, x: &Tensor, w: &Tensor, eps: f32) 
     let (xs, ws) = (arena.slice::<f16>(x), arena.slice::<f32>(w));
     // SAFETY: one block of 128 threads per row, d <= 128, and x is written in place.
     unsafe { gpu.kernels()?.rmsnorm_rows_f16_small(gpu.stream(), cfg, xs.as_mut_ptr().cast(), ws.as_ptr(), d, eps) }?;
+    Ok(())
+}
+
+/// `rmsnorm_rows` with one warp per row and four rows per block (lesson 10, exercise 1). The
+/// reduction uses warp shuffles, so the kernel needs no shared memory and no barriers.
+///
+/// # Panics
+/// On a wrong dtype or shape, or a row wider than 128.
+pub fn rmsnorm_rows_warp(gpu: &Gpu, arena: &Arena, x: &Tensor, w: &Tensor, eps: f32) -> Result<(), GpuError> {
+    let (rows, d) = rmsnorm_rows_shape(x, w)?;
+    assert!(d <= 128, "rmsnorm_rows_warp: the row is wider than 128: {d}. Use rmsnorm_rows_naive.");
+    if rows == 0 || d == 0 {
+        return Ok(());
+    }
+    let cfg = LaunchConfig { grid_dim: (grid_elems(rows.div_ceil(4)), 1, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+    let (xs, ws) = (arena.slice::<f16>(x), arena.slice::<f32>(w));
+    // SAFETY: one warp per row, four rows per block, d <= 128, and x is written in place. The
+    // kernel returns for a row at or past `rows`.
+    unsafe { gpu.kernels()?.rmsnorm_rows_f16_warp(gpu.stream(), cfg, xs.as_mut_ptr().cast(), ws.as_ptr(), d, rows, eps) }?;
     Ok(())
 }
 

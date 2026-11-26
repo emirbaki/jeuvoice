@@ -148,6 +148,11 @@ fn the_product_mode_keeps_the_frame_count() {
     let product = Params { mode: Mode::Product, position_temperature: 5.0, class_temperature: 0.5, seed: 42, ..base };
     let a = decode(&w, &cfg, &gpu, &blas, &layout, prompt_len, target_len, &product, &mut |_, _| {}).unwrap();
     let b = decode(&w, &cfg, &gpu, &blas, &layout, prompt_len, target_len, &product, &mut |_, _| {}).unwrap();
+    // Variety 0 with no position noise must give exactly the deterministic tokens: the product
+    // mode routes to the same GPU guided peak.
+    let plain = Params { position_temperature: 0.0, class_temperature: 0.0, ..product };
+    let plain_tokens = decode(&w, &cfg, &gpu, &blas, &layout, prompt_len, target_len, &plain, &mut |_, _| {}).unwrap();
+    assert_eq!(plain_tokens.ids, det.ids, "variety 0 without position noise must equal the deterministic run");
     let frames = estimate_frames(script["text"].as_str().unwrap(), Some(ref_text), Some(prompt_len), v["speed"].as_f64().unwrap() as f32);
     assert_eq!(frames, target_len, "the estimate must match the engine's product frame count");
     assert_eq!(a.len, frames, "the product run must keep the estimated frame count");

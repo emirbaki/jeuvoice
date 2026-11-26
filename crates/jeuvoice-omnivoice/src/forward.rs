@@ -7,9 +7,9 @@
 
 use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
-    BidirScratch, RopeKind, attention_bidir, embed_mixed, f16_to_f32, from_heads, rmsnorm_rows, rmsnorm_to_f16, rope_with, swiglu, to_heads,
+    BidirScratch, attention_bidir, embed_mixed, f16_to_f32, from_heads, rmsnorm_rows_warp, rmsnorm_to_f16, rope_rows, swiglu_strided, to_heads_at,
 };
-use jeuvoice_gpu::{Arena, Gpu, Tensor};
+use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, Tensor};
 
 use crate::config::OmniVoiceConfig;
 use crate::{Result, TtsError};
@@ -35,6 +35,49 @@ pub fn forward(
     // it for the target frames of both rows; the tap path passes `None`.
     head: Option<(usize, usize)>,
     taps: &mut dyn FnMut(&str, &Arena, &Tensor),
+) -> Result<()> {
+    forward_inner(w, cfg, gpu, blas, ids, audio_mask, rows, t, valid, head, taps, false)
+}
+
+/// The same pass without the input uploads. Use this inside a CUDA graph capture. The caller
+/// uploads the ids and the mask into the arena before every replay. The captured nodes then
+/// read the fixed device addresses of the arena. `valid` must be `None`, because the padded
+/// path allocates a scratch arena while it enqueues.
+///
+/// This function does not check the ids and the mask. The caller must check them with
+/// `inputs::check` before the first enqueue, as `forward` does.
+///
+/// # Panics
+/// On a padded pass, which cannot be captured.
+#[allow(clippy::too_many_arguments)]
+pub fn forward_compute(
+    w: &crate::weights::OmniVoiceWeights,
+    cfg: &OmniVoiceConfig,
+    gpu: &Gpu,
+    blas: &Blas,
+    rows: usize,
+    t: usize,
+    head: Option<(usize, usize)>,
+    taps: &mut dyn FnMut(&str, &Arena, &Tensor),
+) -> Result<()> {
+    let empty = [];
+    forward_inner(w, cfg, gpu, blas, &empty, &empty, rows, t, None, head, taps, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forward_inner(
+    w: &crate::weights::OmniVoiceWeights,
+    cfg: &OmniVoiceConfig,
+    gpu: &Gpu,
+    blas: &Blas,
+    ids: &[i32],
+    audio_mask: &[i32],
+    rows: usize,
+    t: usize,
+    valid: Option<&[i32]>,
+    head: Option<(usize, usize)>,
+    taps: &mut dyn FnMut(&str, &Arena, &Tensor),
+    skip_uploads: bool,
 ) -> Result<()> {
     let ar = &w.arena;
     let a = &w.act;
@@ -62,24 +105,30 @@ pub fn forward(
         vocab: cfg.vocab_size,
         audio_vocab: cfg.audio_vocab_size,
     };
-    crate::inputs::check(ids, audio_mask, rows, t, limits, valid)?;
+    if !skip_uploads {
+        crate::inputs::check(ids, audio_mask, rows, t, limits, valid)?;
+    }
     // The tensors are planned for the longest pass, so the slices are prefixes of them.
     let ids_all = a.ids.prefix_as(&[rows * codebooks, t]);
     let q_all = a.q.prefix_as(&[rows, hq, t, hd]);
     let k_all = a.k.prefix_as(&[rows, hkv, t, hd]);
     let v_all = a.v.prefix_as(&[rows, hkv, t, hd]);
     let att_all = a.att.prefix_as(&[rows, hq, t, hd]);
-    let scratch_all = BidirScratch {
-        kx: &a.kx.prefix_as(&[rows, hq, t, hd]),
-        vx: &a.vx.prefix_as(&[rows, hq, t, hd]),
-        scores: &a.scores.prefix_as(&[rows * hq, t, t]),
-    };
     let mask_all = a.mask.prefix_as(&[rows, t]);
-    let pos_all = a.positions.prefix_as(&[rows * hq * t]);
-    let pos_kv_all = a.positions_kv.prefix_as(&[rows * hkv * t]);
-    ar.upload(gpu, &ids_all, ids)?;
-    ar.upload(gpu, &mask_all, audio_mask)?;
+    if !skip_uploads {
+        ar.upload(gpu, &ids_all, ids)?;
+        ar.upload(gpu, &mask_all, audio_mask)?;
+    }
     let padded = valid.is_some();
+    // Only the padded reference path needs the score plane. Production uses flash attention and
+    // keeps this 67 MB tensor out of the model arena. The test path allocates it once per pass.
+    let padded_scratch = if padded {
+        let mut plan = ArenaPlan::new();
+        let scores = plan.add(DType::F16, &[rows * hq, t, t]);
+        Some((Arena::new(gpu, &plan)?, scores))
+    } else {
+        None
+    };
     if let Some(v) = valid {
         // The tensor holds one value per planned row, so a short pass pads with `t`.
         let mut lengths = vec![t as i32; crate::weights::BATCH];
@@ -87,20 +136,8 @@ pub fn forward(
         ar.upload(gpu, &a.valid, &lengths)?;
     }
 
-    // The positions of every head row: the token position, the same for all heads of a frame.
-    let positions = |heads: usize| {
-        let mut pos = vec![0i32; rows * heads * t];
-        for r in 0..rows {
-            for h in 0..heads {
-                for j in 0..t {
-                    pos[(r * heads + h) * t + j] = j as i32;
-                }
-            }
-        }
-        pos
-    };
-    ar.upload(gpu, &pos_all, &positions(hq))?;
-    ar.upload(gpu, &pos_kv_all, &positions(hkv))?;
+    // The position of a head row is its token position, and the RoPE kernels derive it from the
+    // row, so the pass uploads no position table (P4).
 
     // 1. The embedding: audio frames sum 8 codebook rows, text positions read the token.
     //    `embed_mixed` writes one row at a time, so the rows are separate calls.
@@ -116,38 +153,37 @@ pub fn forward(
 
     for layer in 0..cfg.num_hidden_layers {
         let p = format!("llm.layers.{layer}");
-        // 2. input_layernorm, then the three projections.
+        // 2. input_layernorm, then the fused attention projection: q | k | v in one matrix.
         rmsnorm_to_f16(gpu, ar, &a.x.rows(0, n), w.get(&format!("{p}.input_layernorm.weight")), &a.h.rows(0, n), eps)?;
-        gemm(gpu, blas, ar, &a.h.rows(0, n), w.get(&format!("{p}.self_attn.q_proj.weight")), &a.q_row.rows(0, n), q_w)?;
-        gemm(gpu, blas, ar, &a.h.rows(0, n), w.get(&format!("{p}.self_attn.k_proj.weight")), &a.k_row.rows(0, n), kv_w)?;
-        gemm(gpu, blas, ar, &a.h.rows(0, n), w.get(&format!("{p}.self_attn.v_proj.weight")), &a.v_row.rows(0, n), kv_w)?;
+        let qkv_w = q_w + 2 * kv_w;
+        gemm(gpu, blas, ar, &a.h.rows(0, n), w.get(&format!("{p}.self_attn.qkv_proj.weight")), &a.qkv.rows(0, n), qkv_w)?;
 
-        // 3. The head layout, q/k-norm per head, and RoPE.
-        to_heads(gpu, ar, &a.q_row.rows(0, n), &q_all, rows, t, hq, hd)?;
-        to_heads(gpu, ar, &a.k_row.rows(0, n), &k_all, rows, t, hkv, hd)?;
-        to_heads(gpu, ar, &a.v_row.rows(0, n), &v_all, rows, t, hkv, hd)?;
+        // 3. The head layout of each block, q/k-norm per head, and RoPE.
+        to_heads_at(gpu, ar, &a.qkv.rows(0, n), 0, &q_all, rows, t, hq, hd)?;
+        to_heads_at(gpu, ar, &a.qkv.rows(0, n), q_w, &k_all, rows, t, hkv, hd)?;
+        to_heads_at(gpu, ar, &a.qkv.rows(0, n), q_w + kv_w, &v_all, rows, t, hkv, hd)?;
         // The head rows are contiguous, so the row kernels see them as [rows·heads, head_dim].
         let q_flat = q_all.reshaped(&[rows * hq * t, hd]);
         let k_flat = k_all.reshaped(&[rows * hkv * t, hd]);
-        rmsnorm_rows(gpu, ar, &q_flat, w.get(&format!("{p}.self_attn.q_norm.weight")), eps)?;
-        rmsnorm_rows(gpu, ar, &k_flat, w.get(&format!("{p}.self_attn.k_norm.weight")), eps)?;
-        rope_with(gpu, ar, &q_flat, &pos_all, &a.inv_freq, RopeKind::HalfSplit)?;
-        rope_with(gpu, ar, &k_flat, &pos_kv_all, &a.inv_freq, RopeKind::HalfSplit)?;
+        rmsnorm_rows_warp(gpu, ar, &q_flat, w.get(&format!("{p}.self_attn.q_norm.weight")), eps)?;
+        rmsnorm_rows_warp(gpu, ar, &k_flat, w.get(&format!("{p}.self_attn.k_norm.weight")), eps)?;
+        rope_rows(gpu, ar, &q_flat, &a.inv_freq, t)?;
+        rope_rows(gpu, ar, &k_flat, &a.inv_freq, t)?;
 
         // 4. The attention, then back to the row layout and the output projection. The
         //    projection accumulates into the f32 residual stream, so there is no f16 round
         //    trip and no second pass over the row.
         let valid_t = a.valid.rows_unaligned(0, rows);
-        let scratch = BidirScratch { kx: scratch_all.kx, vx: scratch_all.vx, scores: scratch_all.scores };
-        attention_bidir(gpu, ar, blas, &q_all, &k_all, &v_all, &att_all, scratch, if padded { Some(&valid_t) } else { None })?;
+        let scratch = BidirScratch { scores: padded_scratch.as_ref().map(|(_, tensor)| tensor) };
+        let scratch_arena = padded_scratch.as_ref().map(|(arena, _)| arena).unwrap_or(ar);
+        attention_bidir(gpu, ar, blas, &q_all, &k_all, &v_all, &att_all, scratch, scratch_arena, if padded { Some(&valid_t) } else { None })?;
         from_heads(gpu, ar, &att_all, &a.att_row.rows(0, n), rows, t, hq, hd)?;
         accumulate(gpu, blas, ar, &a.att_row.rows(0, n), w.get(&format!("{p}.self_attn.o_proj.weight")), &a.x.rows(0, n), d)?;
 
-        // 5. post_attention_layernorm and the SwiGLU MLP.
+        // 5. post_attention_layernorm and the SwiGLU MLP, with gate and up in one matrix.
         rmsnorm_to_f16(gpu, ar, &a.x.rows(0, n), w.get(&format!("{p}.post_attention_layernorm.weight")), &a.h.rows(0, n), eps)?;
-        gemm(gpu, blas, ar, &a.h.rows(0, n), w.get(&format!("{p}.mlp.gate_proj.weight")), &a.gate.rows(0, n), mlp)?;
-        gemm(gpu, blas, ar, &a.h.rows(0, n), w.get(&format!("{p}.mlp.up_proj.weight")), &a.up.rows(0, n), mlp)?;
-        swiglu(gpu, ar, &a.gate.rows(0, n), &a.up.rows(0, n), &a.gate.rows(0, n))?;
+        gemm(gpu, blas, ar, &a.h.rows(0, n), w.get(&format!("{p}.mlp.gate_up_proj.weight")), &a.gate_up.rows(0, n), 2 * mlp)?;
+        swiglu_strided(gpu, ar, &a.gate_up.rows(0, n), 0, mlp, &a.gate.rows(0, n))?;
         accumulate(gpu, blas, ar, &a.gate.rows(0, n), w.get(&format!("{p}.mlp.down_proj.weight")), &a.x.rows(0, n), d)?;
 
         taps(&format!("hidden_{layer:02}"), ar, &a.x.rows(0, n));

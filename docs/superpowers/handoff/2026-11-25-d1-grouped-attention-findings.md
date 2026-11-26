@@ -1,6 +1,6 @@
 # D1 grouped attention: findings for the supervisor (2026-11-25)
 
-The grouped (repeat-free) attention was implemented, measured and **reverted**. This note has
+The grouped (repeat-free) attention was implemented, measured, reverted after a padded-row failure, and **fixed by the supervisor**: the mask launch grid used the key-head batch (b*h_kv) and covered only half of the score planes; the fix is score_batch = b*hq. It is in the tree and verified (unconditioned logits 100%, max 0.0389). The findings below are kept as the record. This note has
 everything needed to investigate it without re-deriving anything.
 
 ## 1. Where the code is
