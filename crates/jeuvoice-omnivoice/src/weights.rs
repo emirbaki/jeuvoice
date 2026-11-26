@@ -59,8 +59,6 @@ pub struct Activations {
     pub logits: Tensor,
     /// `[head_dim / 2]` f32: the RoPE inverse frequencies.
     pub inv_freq: Tensor,
- 	/// `[batches·heads_q, t, t]` f16: the attention scores.
-    pub scores: Tensor,
 }
 
 impl Activations {
@@ -82,7 +80,6 @@ impl Activations {
             gate_up: plan.add(DType::F16, &[rows, 2 * mlp]),
             logits: plan.add(DType::F32, &[rows, cfg.audio_head_rows()]),
             inv_freq: plan.add(DType::F32, &[hd / 2]),
-            scores: plan.add(DType::F16, &[b * hq, t, t]),
             conf: plan.add(DType::F32, &[cfg.num_audio_codebook * t]),
             pick: plan.add(DType::I32, &[cfg.num_audio_codebook * t]),
             ids: plan.add(DType::I32, &[b * cfg.num_audio_codebook, t]),

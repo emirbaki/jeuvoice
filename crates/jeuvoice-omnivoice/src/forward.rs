@@ -9,7 +9,7 @@ use jeuvoice_gpu::blas::{Blas, Op};
 use jeuvoice_gpu::ops::{
     BidirScratch, attention_bidir, embed_mixed, f16_to_f32, from_heads, rmsnorm_rows_warp, rmsnorm_to_f16, rope_rows, swiglu_strided, to_heads_at,
 };
-use jeuvoice_gpu::{Arena, Gpu, Tensor};
+use jeuvoice_gpu::{Arena, ArenaPlan, DType, Gpu, Tensor};
 
 use crate::config::OmniVoiceConfig;
 use crate::{Result, TtsError};
@@ -69,11 +69,19 @@ pub fn forward(
     let k_all = a.k.prefix_as(&[rows, hkv, t, hd]);
     let v_all = a.v.prefix_as(&[rows, hkv, t, hd]);
     let att_all = a.att.prefix_as(&[rows, hq, t, hd]);
-    let scratch_all = BidirScratch { scores: &a.scores.prefix_as(&[rows * hq, t, t]) };
     let mask_all = a.mask.prefix_as(&[rows, t]);
     ar.upload(gpu, &ids_all, ids)?;
     ar.upload(gpu, &mask_all, audio_mask)?;
     let padded = valid.is_some();
+    // Only the padded reference path needs the score plane. Production uses flash attention and
+    // keeps this 67 MB tensor out of the model arena. The test path allocates it once per pass.
+    let padded_scratch = if padded {
+        let mut plan = ArenaPlan::new();
+        let scores = plan.add(DType::F16, &[rows * hq, t, t]);
+        Some((Arena::new(gpu, &plan)?, scores))
+    } else {
+        None
+    };
     if let Some(v) = valid {
         // The tensor holds one value per planned row, so a short pass pads with `t`.
         let mut lengths = vec![t as i32; crate::weights::BATCH];
@@ -119,8 +127,9 @@ pub fn forward(
         //    projection accumulates into the f32 residual stream, so there is no f16 round
         //    trip and no second pass over the row.
         let valid_t = a.valid.rows_unaligned(0, rows);
-        let scratch = BidirScratch { scores: scratch_all.scores };
-        attention_bidir(gpu, ar, blas, &q_all, &k_all, &v_all, &att_all, scratch, if padded { Some(&valid_t) } else { None })?;
+        let scratch = BidirScratch { scores: padded_scratch.as_ref().map(|(_, tensor)| tensor) };
+        let scratch_arena = padded_scratch.as_ref().map(|(arena, _)| arena).unwrap_or(ar);
+        attention_bidir(gpu, ar, blas, &q_all, &k_all, &v_all, &att_all, scratch, scratch_arena, if padded { Some(&valid_t) } else { None })?;
         from_heads(gpu, ar, &att_all, &a.att_row.rows(0, n), rows, t, hq, hd)?;
         accumulate(gpu, blas, ar, &a.att_row.rows(0, n), w.get(&format!("{p}.self_attn.o_proj.weight")), &a.x.rows(0, n), d)?;
 

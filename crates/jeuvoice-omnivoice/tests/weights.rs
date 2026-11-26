@@ -74,6 +74,9 @@ fn the_weights_load_and_fit_the_plan() {
     let total = (w.weight_bytes + w.activation_bytes) as f64 / 1e6;
     eprintln!("arena total: {total:.0} MB");
     assert!(total < 1700.0, "the arena takes {total:.0} MB, too much for a 4 GB card");
+    // Production uses flash attention. The old score plane was 67 MB of dead memory.
+    let activations = w.activation_bytes as f64 / 1e6;
+    assert!(activations < 200.0, "the activations take {activations:.0} MB, the score plane came back");
 }
 
 /// The adapter must change the weights: with the LoRA merged, a projection differs from the

@@ -1198,3 +1198,16 @@ The `class_temperature > 0` branch no longer downloads both full logit planes. `
 The test failed first on the missing op, then on a test tensor that was twice the planned size. It now compares confidence, ids and values against a CPU f64 reference at a small shape. The real product test keeps 214 frames and stays repeatable. The isolated bench is 2140 us for 1712 pairs, 7.2 GB/s, 4% of the memory limit. The kernel is limited by the serial 103-step selection and its barriers, not by bandwidth.
 
 Lesson 12 records the kernel, the bench and the remaining option of a threshold-based selector. Test counts after this change: 457 plain, 128 GPU, 70 whisper GPU. The real decode and quality gate pass. The product stage itself has no separate wall-clock number yet; the transfer saving is arithmetic from the buffer sizes.
+
+### Dead score plane removed (2026-11-26)
+
+Flash attention does not write the score plane. The grouped path needs it only for padded callers, which are now tests. The `scores` tensor left `Activations` and the model arena.
+
+`BidirScratch.scores` is now optional. `attention_bidir` takes a second arena for the score tensor; `attention_bidir_grouped` slices the scores from that arena. The forward pass allocates a local scratch arena only when `valid` is present. Production passes keep the model arena for both parameters and take the flash path. The test API change failed first on the missing argument, then on the remaining `scratch.scores` use.
+
+The real weight test now reports weights 1225 MB, activations **168 MB** and arena **1393 MB**, down from 235 MB and 1460 MB. A new assertion keeps activations below 200 MB so the score plane cannot return unnoticed. The padded reference test still matches both logit rows.
+
+Remaining options, in brief:
+
+1. Flash d128 keeps 12 of 64 warps and about 150 registers per thread. A 128-row block with 8 warps, 32 rows per warp at about 210 registers, 16 keys per tile, or V streamed from global memory are the candidates. Each needs a before and after at `t = 486` and on the whole step.
+2. CUDA graphs could remove launch overhead from the hundreds of small kernels per step. The risks are cuBLAS capture support and the ids buffer that changes each step. A prototype must show a gain before this replaces the current path.

@@ -68,9 +68,11 @@ fn run(gpu: &Gpu, q: &[f32], k: &[f32], v: &[f32], b: usize, hq: usize, h_kv: us
     let tk = plan.add(DType::F16, &[b, h_kv, t, d]);
     let tv = plan.add(DType::F16, &[b, h_kv, t, d]);
     let to = plan.add(DType::F16, &[b, hq, t, d]);
-    let scores = plan.add(DType::F16, &[b * hq, t, t]);
     let mask = valid.map(|_| plan.add(DType::I32, &[b]));
     let arena = Arena::new(gpu, &plan).unwrap();
+    let mut scratch_plan = ArenaPlan::new();
+    let scores = scratch_plan.add(DType::F16, &[b * hq, t, t]);
+    let scratch_arena = Arena::new(gpu, &scratch_plan).unwrap();
     let r16 = |x: &[f32]| x.iter().map(|&v| f16::from_f32(v)).collect::<Vec<_>>();
     let back = |x: &f16| x.to_f32();
     let (hq16, hk16, hv16) = (r16(q), r16(k), r16(v));
@@ -80,8 +82,8 @@ fn run(gpu: &Gpu, q: &[f32], k: &[f32], v: &[f32], b: usize, hq: usize, h_kv: us
     if let (Some(m), Some(v)) = (mask.as_ref(), valid) {
         arena.upload(gpu, m, v).unwrap();
     }
-    let scratch = BidirScratch { scores: &scores };
-    attention_bidir_grouped(gpu, &arena, &blas, &tq, &tk, &tv, &to, scratch, mask.as_ref()).unwrap();
+    let scratch = BidirScratch { scores: Some(&scores) };
+    attention_bidir_grouped(gpu, &arena, &scratch_arena, &blas, &tq, &tk, &tv, &to, scratch, mask.as_ref()).unwrap();
     let got: Vec<f32> = arena.download::<f16>(gpu, &to).unwrap().iter().map(back).collect();
     let valid_usize: Vec<usize> = valid.map(|v| v.iter().map(|&x| x as usize).collect()).unwrap_or(vec![t; b]);
     let want = cpu_attention(
@@ -175,8 +177,10 @@ fn an_empty_sequence_is_ok() {
     let k = plan.add(DType::F16, &[1, 2, 0, 8]);
     let v = plan.add(DType::F16, &[1, 2, 0, 8]);
     let out = plan.add(DType::F16, &[1, 2, 0, 8]);
-    let scores = plan.add(DType::F16, &[2, 0, 0]);
     let arena = Arena::new(&gpu, &plan).unwrap();
-    let scratch = BidirScratch { scores: &scores };
-    attention_bidir_grouped(&gpu, &arena, &blas, &q, &k, &v, &out, scratch, None).unwrap();
+    let mut scratch_plan = ArenaPlan::new();
+    let scores = scratch_plan.add(DType::F16, &[2, 0, 0]);
+    let scratch_arena = Arena::new(&gpu, &scratch_plan).unwrap();
+    let scratch = BidirScratch { scores: Some(&scores) };
+    attention_bidir_grouped(&gpu, &arena, &scratch_arena, &blas, &q, &k, &v, &out, scratch, None).unwrap();
 }

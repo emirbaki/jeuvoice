@@ -115,7 +115,7 @@ fn the_flash_attention_agrees_with_the_grouped_path() {
             arena.upload(&gpu, tensor, &values.iter().map(|&x| f16::from_f32(x)).collect::<Vec<_>>()).unwrap();
         }
         attention_flash128(&gpu, &arena, &tq, &tk, &tv, &flash).unwrap();
-        attention_bidir_grouped(&gpu, &arena, &blas, &tq, &tk, &tv, &grouped, BidirScratch { scores: &scores }, None).unwrap();
+        attention_bidir_grouped(&gpu, &arena, &arena, &blas, &tq, &tk, &tv, &grouped, BidirScratch { scores: Some(&scores) }, None).unwrap();
         let a: Vec<f32> = arena.download::<f16>(&gpu, &flash).unwrap().iter().map(|x| x.to_f32()).collect();
         let c: Vec<f32> = arena.download::<f16>(&gpu, &grouped).unwrap().iter().map(|x| x.to_f32()).collect();
         assert_close(&format!("flash128 vs grouped t={t}"), &a, &c, Tol { abs: 4e-3, rel: 2e-2 });

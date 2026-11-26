@@ -620,7 +620,7 @@ fn bench_attention_bidir(gpu: &Gpu, name: &str, heads: usize, t_len: usize, d: u
     if let (Some(v), Some(t)) = (valid, lens.as_ref()) {
         arena.upload(gpu, t, &v)?;
     }
-    let t = time_on_stream(gpu, 3, 10, || attention_bidir_grouped(gpu, &arena, &blas, &q, &k, &v, &out, BidirScratch { scores: &scores }, lens.as_ref()))?;
+    let t = time_on_stream(gpu, 3, 10, || attention_bidir_grouped(gpu, &arena, &arena, &blas, &q, &k, &v, &out, BidirScratch { scores: Some(&scores) }, lens.as_ref()))?;
     // Two products of q·kᵀ and probs·v per batch and head.
     let flops = 4 * (2 * heads * t_len * t_len * d) as u64;
     Ok(Row {
@@ -651,7 +651,7 @@ fn bench_attention_p5(gpu: &Gpu, name: &str, t_len: usize, flash: bool) -> Resul
         if flash {
             attention_flash128(gpu, &arena, &q, &k, &v, &out)
         } else {
-            attention_bidir_grouped(gpu, &arena, &blas, &q, &k, &v, &out, BidirScratch { scores: &scores }, None)
+            attention_bidir_grouped(gpu, &arena, &arena, &blas, &q, &k, &v, &out, BidirScratch { scores: Some(&scores) }, None)
         }
     })?;
     // Two products of q·kᵀ and probs·v per head.

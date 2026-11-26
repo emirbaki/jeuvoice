@@ -166,8 +166,9 @@ pub fn attention_flash128(gpu: &Gpu, arena: &Arena, q: &Tensor, k: &Tensor, v: &
 
 /// The scratch of `attention_bidir`.
 pub struct BidirScratch<'a> {
-    /// `[batches·heads_q, t, t]` F16: the scores, then the probabilities.
-    pub scores: &'a Tensor,
+    /// `[batches·heads_q, t, t]` F16: the scores, then the probabilities. Only the grouped path
+    /// uses this tensor. The flash path takes `None`.
+    pub scores: Option<&'a Tensor>,
 }
 
 /// The bidirectional attention of the backbone: the flash kernel when the head width is 128
@@ -189,12 +190,13 @@ pub fn attention_bidir(
     v: &Tensor,
     out: &Tensor,
     scratch: BidirScratch<'_>,
+    scratch_arena: &Arena,
     valid: Option<&Tensor>,
 ) -> Result<(), GpuError> {
     if valid.is_none() && q.shape().len() == 4 && q.shape()[3] == FT8_D {
         return attention_flash128(gpu, arena, q, k, v, out);
     }
-    attention_bidir_grouped(gpu, arena, blas, q, k, v, out, scratch, valid)
+    attention_bidir_grouped(gpu, arena, scratch_arena, blas, q, k, v, out, scratch, valid)
 }
 
 /// `attention_bidir` with cuBLAS: the scores of every head in a DRAM plane (`scratch.scores`),
@@ -206,6 +208,7 @@ pub fn attention_bidir(
 pub fn attention_bidir_grouped(
     gpu: &Gpu,
     arena: &Arena,
+    scratch_arena: &Arena,
     blas: &Blas,
     q: &Tensor,
     k: &Tensor,
@@ -224,7 +227,8 @@ pub fn attention_bidir_grouped(
     assert_eq!(v.shape(), k.shape(), "attention_bidir: v must have the shape of k");
     assert_eq!(out.shape(), q.shape(), "attention_bidir: out must have the shape of q");
     assert!(h_kv > 0 && hq % h_kv == 0, "attention_bidir: {hq} query heads with {h_kv} key heads");
-    assert_eq!(scratch.scores.shape(), &[b * hq, t_len, t_len], "attention_bidir: scores must be [batches·heads, t, t]");
+    let scores = scratch.scores.expect("attention_bidir_grouped needs a score tensor");
+    assert_eq!(scores.shape(), &[b * hq, t_len, t_len], "attention_bidir: scores must be [batches·heads, t, t]");
     if let Some(mask) = valid {
         assert_eq!(mask.dtype(), DType::I32, "attention_bidir: valid must be I32");
         assert_eq!(mask.numel(), b, "attention_bidir: valid needs one value per batch");
@@ -237,7 +241,7 @@ pub fn attention_bidir_grouped(
         arena.slice::<f16>(q),
         arena.slice::<f16>(k),
         arena.slice::<f16>(v),
-        arena.slice::<f16>(scratch.scores),
+        scratch_arena.slice::<f16>(scores),
         arena.slice::<f16>(out),
     );
     let kv_batch = b * h_kv;
@@ -257,7 +261,7 @@ pub fn attention_bidir_grouped(
         unsafe { gpu.kernels()?.attn_pad_mask_f16(gpu.stream(), cfg, ss.as_mut_ptr().cast(), ms.as_ptr(), t_len, hq, b) }?;
     }
     // 4. The softmax over the keys, with the scale of the head width.
-    softmax_rows(gpu, arena, scratch.scores, 1.0 / (d as f32).sqrt(), None)?;
+    softmax_rows(gpu, scratch_arena, scores, 1.0 / (d as f32).sqrt(), None)?;
     // 5. The weighted sum of the values.
     blas.gemm_f16_batched(gpu, &ss, Op::N, q_rows * t_len, &vs, Op::N, row_d, &os, q_rows * d, q_rows, d, t_len, kv_batch, 1.0, 0.0)?;
     Ok(())
