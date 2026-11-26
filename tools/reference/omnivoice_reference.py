@@ -52,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--bench", type=int, default=0, help="render s1 this many times for the baseline")
     ap.add_argument("--skip-product", action="store_true")
     ap.add_argument("--skip-taps", action="store_true")
+    ap.add_argument("--taps-script", default=None, help="comma-separated script ids for taps; default: the first script")
     return ap.parse_args()
 
 
@@ -327,9 +328,18 @@ def main() -> None:
             save_npz(out / f"{script['id']}.product.npz", script, language, speed, tokens, target_len, prompt_frames(prompt), ref_text)
 
     if not args.skip_taps:
-        taps_path = out / f"{specs['scripts'][0]['id']}.taps.safetensors"
-        capture_taps(model, prompt, specs["scripts"][0], language, speed, det, taps_path)
-        first_pass_inputs(model, prompt, specs["scripts"][0], language, speed, det, taps_path)
+        if args.taps_script:
+            wanted = [part.strip() for part in args.taps_script.split(",") if part.strip()]
+            tap_specs = [script for script in specs["scripts"] if script["id"] in wanted]
+            missing = [script_id for script_id in wanted if script_id not in {script["id"] for script in tap_specs}]
+            if missing:
+                raise SystemExit(f"no script with id {missing}")
+        else:
+            tap_specs = [specs["scripts"][0]]
+        for tap_spec in tap_specs:
+            taps_path = out / f"{tap_spec['id']}.taps.safetensors"
+            capture_taps(model, prompt, tap_spec, language, speed, det, taps_path)
+            first_pass_inputs(model, prompt, tap_spec, language, speed, det, taps_path)
 
     if args.bench:
         bench(model, prompt, specs["scripts"][0], language, speed, prod, args.bench, ref_audio, ref_text)

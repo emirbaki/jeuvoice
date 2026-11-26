@@ -1142,3 +1142,25 @@ printed 16.67 in this process, consistent with the cuBLAS per-process variation 
 
 Tests: 456 plain, 127 GPU, 70 whisper GPU. The real forward and decode files pass. Product keeps
 214 frames and the deterministic second run matches. Lessons 10, 11 and 13 carry the new numbers.
+
+### Quality gate and s2/s3 taps (2026-11-26)
+
+`tests/quality_gate.rs` is one ignored real-model test with the five criterion-1 measures: exact tap set, hidden-state ratio against the engine fp16 floor, logit argmax and direct bound, deterministic repeatability, and product frame count with seed repeatability. Token shares against the engine keep their 5 pp margin.
+
+The first run failed on a mistake in the new test: it compared a packed two-row logit slot against a single conditioned pass. The second run failed on the missing `s2.taps.safetensors`. `omnivoice_reference.py` gained `--taps-script`, and the s2 and s3 taps were generated in fp16 and f32 with the adapter. The third run showed s2 conditioned argmax at 97.8%, below a fixed 98% bound. The engine fp16 run itself reaches only 92.7% on that fixture. The gate now compares our argmax share against the engine fp16 floor with a 2 pp margin. Absolute logit error stays below 0.1.
+
+| Script | Our cond argmax | Engine fp16 cond | Our uncond | Cond logit max |
+|---|---|---|---|---|
+| s1 | 1693/1712 (98.9%) | 95.4% | 100% | 0.0554 |
+| s2 | 1510/1544 (97.8%) | 92.7% | 100% | 0.0603 |
+| s3 | 1551/1568 (98.9%) | 95.5% | 100% | 0.0601 |
+
+Every tap passes the ratio rule on all three scripts. Representative values: `hidden_27` ours 16.67 / 18.67 / 21.63 against the fp16 floor 47.26 / 42.44 / 55.08; `post_norm` ours 0.196 / 0.195 / 0.381 against 0.368 / 0.765 / 0.619. Deterministic s1 repeats exactly. Product keeps 214 / 193 / 196 frames and repeats for one seed.
+
+Expanded open areas:
+
+1. Flash d128 keeps 12 of 64 warps and about 150 registers per thread. The tested options are 128 rows per block with 8 warps, 32 rows per warp at about 210 registers, 16 keys per tile, and streaming V from global memory. Each needs a before and after at `t = 486` and on the whole step. The `t = 214` micro-bench swings with the clock and is not decisive alone.
+2. Product mode still samples `class_temperature > 0` on the host. The app preset uses variety 0, so this path is not on the benchmark. A GPU version needs top-103 selection and a per-pair Gumbel stream. It needs a score-margin fixture before it can replace the CPU path.
+3. The `scores` tensor is now dead in production, about 67 MB. The padded tap test is the only grouped caller. Removing it needs that test to allocate its own scratch. VRAM is 1460 MB, so this is a cleanup, not a blocker.
+4. CUDA graphs could remove launch overhead from the hundreds of small kernels per step. Capture with cuBLAS and the changing ids buffer is a compatibility risk. This needs a prototype.
+5. Quality work now has s1-s3 taps. The next fixture is the guided score and top-k order at step 0, so an arithmetic change can be caught before it reaches the token trajectory.
